@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "docuflow": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "-p",
+        "@doquflow/server",
+        "docuflow-server"
+      ],
+      "type": "stdio"
+    }
+  }
+}
