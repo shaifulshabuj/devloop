@@ -1,182 +1,298 @@
 # 🔁 DevLoop
 
-**Claude Code (Architect) + GitHub Copilot CLI (Worker)**
+**Claude Code (Architect) + GitHub Copilot CLI (Worker) — remote-controllable dev pipeline**
 
-A pure shell script that wires both CLIs together natively — no Node.js, no API keys, no copy-pasting.
+A single shell script that wires Claude Code and Copilot CLI into a fully automated development loop. Instruct from your phone or browser while everything runs on your Mac.
 
 ```
-devloop architect "add order filtering by date range"
+You (mobile / browser — remotely)
+         ↓ "add order filtering by date range"
+Claude Code --remote-control (your Mac)
          ↓
-  claude -p (non-interactive) → generates spec + Copilot instructions
+  @devloop-architect  → designs implementation spec
          ↓
-devloop work
+  copilot CLI         → implements with /plan mode
          ↓
-  copilot (interactive) → implements with /plan mode
+  @devloop-reviewer   → reviews git diff against spec
          ↓
-devloop review
-         ↓
-  claude -p (non-interactive) → reviews git diff → APPROVED / NEEDS_WORK
-         ↓
-devloop fix  (if needed)
-         ↓
-  copilot (interactive) → applies Claude's fix instructions
-         ↓
-devloop review  (repeat until APPROVED)
+  APPROVED ✅  or  loop back for fixes ⚠️
 ```
 
 ---
 
-## Prerequisites
+## Requirements
+
+| Tool | Install |
+|------|---------|
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `copilot` | `gh extension install github/gh-copilot` |
+| `git` | https://git-scm.com |
+
+---
+
+## Install
 
 ```bash
-# Claude Code CLI
-curl -fsSL https://claude.ai/install.sh | bash
+# Download
+curl -fsSL https://your-host/devloop.sh -o devloop.sh
 
-# GitHub Copilot CLI (requires gh CLI first)
-brew install gh
-gh auth login
-gh extension install github/gh-copilot
-gh copilot auth
+# Make executable and install globally
+chmod +x devloop.sh
+sudo mv devloop.sh /usr/local/bin/devloop
 
 # Verify
-claude --version
-copilot --version
+devloop --version
 ```
 
----
-
-## Install DevLoop
-
+Or use the `install` command if you already have the file:
 ```bash
-# Option A: Global symlink (recommended)
-chmod +x devloop.sh
-sudo ln -s "$(pwd)/devloop.sh" /usr/local/bin/devloop
-
-# Option B: Add to PATH
-echo 'export PATH="$PATH:/path/to/devloop-shell"' >> ~/.zshrc
-source ~/.zshrc
-
-# Option C: Alias
-echo 'alias devloop="/path/to/devloop-shell/devloop.sh"' >> ~/.zshrc
+devloop install            # installs to /usr/local/bin/devloop
+devloop install ~/bin/devloop  # custom path
 ```
 
 ---
 
-## Setup Per Project
+## Quick Start
 
 ```bash
 cd your-project/
+
+# 1. Initialize DevLoop (one-time per project)
 devloop init
+
+# 2. Edit your stack
+nano devloop.config.sh
+
+# 3. Start the session
+devloop start
+# → scan QR code or open claude.ai/code on your phone
+
+# 4. From your phone, type:
+#    "add GET /orders endpoint with date range filter"
+#    → Claude designs spec, Copilot implements, Claude reviews — automatically
 ```
 
-Creates:
-- `devloop.config.sh` — your stack, patterns, conventions
-- `CLAUDE.md` — Claude Code persistent instructions (read every session)
-- `.github/copilot-instructions.md` — Copilot persistent instructions
-- `.devloop/specs/` — task specs and reviews
-- `.devloop/prompts/` — extracted Copilot instruction blocks
+---
 
-**Edit `devloop.config.sh`:**
+## Commands
+
+### `devloop install [path]`
+Copies the script to `/usr/local/bin/devloop` (or a custom path). Uses `sudo` if needed.
+
+---
+
+### `devloop init`
+Sets up DevLoop in the current project. Run once per project.
+
+**Creates:**
+| File | Purpose |
+|------|---------|
+| `devloop.config.sh` | Your project stack, patterns, conventions |
+| `CLAUDE.md` | Persistent instructions for Claude Code sessions |
+| `.github/copilot-instructions.md` | Persistent instructions for Copilot |
+| `.claude/agents/devloop-orchestrator.md` | Main agent — coordinates the loop |
+| `.claude/agents/devloop-architect.md` | Subagent — designs specs |
+| `.claude/agents/devloop-reviewer.md` | Subagent — reviews implementation |
+| `.devloop/specs/` | Where task specs and reviews are saved |
+| `.devloop/prompts/` | Extracted Copilot instruction blocks |
+
+**After init, edit `devloop.config.sh`:**
 ```bash
 PROJECT_NAME="MyProject"
 PROJECT_STACK="C#, .NET 8, ASP.NET Web API, MSSQL"
 PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"
-PROJECT_CONVENTIONS="Use async/await, Custom exception classes, No magic strings"
+PROJECT_CONVENTIONS="async/await throughout, custom exceptions, no magic strings"
 TEST_FRAMEWORK="xUnit"
-CLAUDE_MODEL="opus"  # or "sonnet" for faster/cheaper
+CLAUDE_MODEL="sonnet"   # or "opus" for more capable architect/reviewer
 ```
 
 ---
 
-## The Full Loop
+### `devloop start [project-name]`  · alias: `s`
+Launches Claude Code with remote control and the orchestrator agent.
 
-### Step 1 — Claude designs the spec
+- **Prevents Mac sleep** via `caffeinate -is` for the entire session duration
+- Sleep prevention is stopped automatically when you press Ctrl+C
+
+```bash
+devloop start
+devloop start "Avail OMS"   # custom session name
+```
+
+**Connect from:**
+- 📱 Claude app → look for `"DevLoop: project-name"` with a green dot
+- 🌐 https://claude.ai/code → session list
+
+**What runs under the hood:**
+```bash
+caffeinate -is &   # prevent sleep
+claude \
+  --remote-control "DevLoop: project-name" \
+  --agent devloop-orchestrator \
+  --permission-mode acceptEdits
+```
+
+---
+
+### `devloop daemon [project-name]`  · alias: `d`
+Runs DevLoop in the **background** with auto-restart and sleep prevention. Best for long sessions or when you want to close the terminal.
+
+```bash
+devloop daemon              # start in background
+devloop daemon status       # check if running + last 10 log lines
+devloop daemon log          # tail live logs
+devloop daemon stop         # stop the daemon
+devloop daemon uninstall    # remove launchd entry
+```
+
+**What daemon does differently from `start`:**
+- Runs the Claude session in a background process — you can close the terminal
+- **Auto-restarts** if Claude crashes or the connection drops
+- Uses exponential backoff between restarts (5s → 10s → ... → 60s max)
+- Restarts `caffeinate -is` fresh on each attempt — survives wake from sleep
+- **Registers a macOS launchd agent** so DevLoop starts automatically after reboot or login
+- Logs everything to `.devloop/daemon.log`
+
+**Recommended for Mac mini (always-on):**
+```bash
+devloop daemon        # start once, close terminal
+# work from phone all day
+devloop daemon stop   # done for the day
+```
+
+**Logs:**
+```
+.devloop/daemon.log         ← session events + restart history
+.devloop/launchd.log        ← stdout from launchd-managed process
+.devloop/launchd-error.log  ← stderr from launchd-managed process
+```
+
+**launchd agent** (`~/Library/LaunchAgents/com.devloop.projectname.plist`):
+- `RunAtLoad: true` — starts when you log in
+- `KeepAlive: true` — macOS restarts it if it crashes
+- `ProcessType: Interactive` — hints to macOS not to aggressively suspend it
+- Remove with: `devloop daemon uninstall`
+
+---
+
+### `devloop architect "feature" [type] [files]`  · alias: `a`
+Claude designs a precise implementation spec for Copilot to follow.
 
 ```bash
 devloop architect "add GET /orders endpoint with date range filter"
-
-# With type and file hints:
 devloop architect "null ref in OrderService.GetActive()" bugfix "OrderService.cs"
-
-# Aliases work:
-devloop a "add pagination to product listing"
+devloop architect "extract IOrderRepository interface" refactor
 ```
 
-**What happens:**
-- Runs `claude -p` (print mode, non-interactive, exits)
-- Saves full spec to `.devloop/specs/TASK-YYYYMMDD-HHMM.md`
-- Prints the **Copilot Instructions Block** ready to use
-- Saves instructions to `.devloop/prompts/TASK-ID-copilot.txt`
+Types: `feature` (default) | `bugfix` | `refactor` | `test`
+
+**What it produces:**
+- Full spec in `.devloop/specs/TASK-YYYYMMDD-HHMM.md`
+- Copilot Instructions Block printed to terminal and saved to `.devloop/prompts/`
+- Task ID for use in subsequent commands
+
+> Normally called automatically by the orchestrator agent. Run manually to design a spec without starting a full session.
 
 ---
 
-### Step 2 — Copilot implements
+### `devloop work [TASK-ID]`  · alias: `w`
+Launches Copilot CLI with the task spec pre-loaded in `/plan` mode.
 
 ```bash
-devloop work
-# or: devloop work TASK-20260504-0930
-# alias: devloop w
+devloop work                        # uses latest task
+devloop work TASK-20260504-0930
 ```
 
-**What happens:**
-- Reads spec + instructions
-- Launches `copilot` interactively with the task pre-loaded
-- Copilot uses `/plan` mode — creates checklist, asks clarifying questions, implements
-- You supervise and can interact if needed
+Copilot reads the spec, creates an implementation plan, implements each step, runs tests if available, and summarizes what was done. You can supervise interactively in the terminal.
 
 ---
 
-### Step 3 — Claude reviews
+### `devloop review [TASK-ID]`  · alias: `r`
+Claude reviews Copilot's implementation against the original spec using `git diff`.
 
 ```bash
 devloop review
-# alias: devloop r
+devloop review TASK-20260504-0930
 ```
 
-**What happens:**
-- Reads git diff (staged + unstaged + new files)
-- Runs `claude -p` with spec + diff
-- Outputs: `✅ APPROVED`, `⚠️ NEEDS WORK`, or `❌ REJECTED`
-- Saves review to `.devloop/specs/TASK-ID-review.md`
-- If NEEDS_WORK: prints **Copilot Fix Instructions**
+**Reads:**
+- Staged changes (`git diff --cached`)
+- Unstaged changes (`git diff`)
+- New untracked files
+
+**Returns:**
+| Verdict | Meaning |
+|---------|---------|
+| `✅ APPROVED` | Implementation matches spec, tests present |
+| `⚠️ NEEDS_WORK` | Fixable issues — Copilot Instructions block provided |
+| `❌ REJECTED` | Wrong approach or security issue — consider restarting |
+
+Review is saved to `.devloop/specs/TASK-ID-review.md` and the spec status is updated.
 
 ---
 
-### Step 4 — Copilot fixes (if needed)
+### `devloop fix [TASK-ID]`  · alias: `f`
+Launches Copilot CLI with Claude's fix instructions from the latest review.
 
 ```bash
 devloop fix
-# alias: devloop f
+devloop fix TASK-20260504-0930
 ```
 
-- Reads Claude's review
-- Launches `copilot` with fix instructions pre-loaded
-- Go back to Step 3 until APPROVED
+Run `devloop review` again after Copilot fixes. Repeat until `APPROVED`.
 
 ---
 
-## Manage Tasks
+### `devloop tasks`  · alias: `t`
+Lists all task specs with status icons.
 
 ```bash
-devloop tasks          # List all specs with status icons
-devloop status         # Show latest spec + review in full
-devloop status TASK-ID # Show specific task
+devloop tasks
+
+# Output:
+# ✅ TASK-20260504-0930   add order filtering by date range   ✅ approved
+# ⚠️  TASK-20260503-1415   paginate product listing            ⚠️ needs-work
+# ⏳ TASK-20260503-1100   add auth middleware                  pending
 ```
 
 ---
 
-## How Each CLI Is Used
+### `devloop status [TASK-ID]`
+Shows the full spec and latest review for a task.
 
-| Tool | Mode | Command | Purpose |
-|------|------|---------|---------|
-| `claude` | Print (non-interactive) | `claude -p "..."` | Architect: generate spec |
-| `claude` | Print (non-interactive) | `claude -p "..."` | Reviewer: analyze git diff |
-| `copilot` | Interactive | `copilot` with piped prompt | Worker: implement with /plan |
-| `copilot` | Interactive | `copilot` with piped prompt | Worker: apply fix instructions |
+```bash
+devloop status                      # latest task
+devloop status TASK-20260504-0930
+```
 
-**Key insight from docs:**
-- `claude -p` runs in print mode — it responds and exits without interactive mode, perfect for architect/review tasks that need no supervision
-- Copilot CLI's true power is agentic autonomous work — it stays interactive so you can supervise implementation
+---
+
+## The Full Remote Loop
+
+```bash
+# On your Mac (terminal):
+devloop daemon            # start once, close terminal
+
+# On your phone (Claude app):
+# Find "DevLoop: MyProject" → open session
+
+# Type:
+"add pagination to the orders list endpoint"
+
+# Claude orchestrator responds:
+# 📐 Designing spec...
+#    @devloop-architect is creating the implementation spec
+
+# 🤖 Copilot implementing...
+#    devloop work TASK-20260504-1030
+
+# 🔍 Reviewing...
+#    @devloop-reviewer is checking the git diff
+
+# ✅ Approved!
+#    Added GetOrdersPaged() with page/pageSize params and xUnit tests.
+#    3 files modified: OrdersController.cs, IOrderRepository.cs, OrderRepository.cs
+```
 
 ---
 
@@ -184,36 +300,87 @@ devloop status TASK-ID # Show specific task
 
 ```
 your-project/
-├── devloop.config.sh                    # Project config
-├── CLAUDE.md                            # Claude Code instructions
+├── devloop.config.sh                        ← edit this with your stack
+├── CLAUDE.md                                ← Claude Code persistent context
 ├── .github/
-│   └── copilot-instructions.md          # Copilot instructions
+│   └── copilot-instructions.md              ← Copilot persistent context
+├── .claude/
+│   └── agents/
+│       ├── devloop-orchestrator.md          ← main agent (written by init)
+│       ├── devloop-architect.md             ← subagent (written by init)
+│       └── devloop-reviewer.md              ← subagent (written by init)
 └── .devloop/
+    ├── daemon.pid                           ← daemon process ID
+    ├── daemon.log                           ← restart history + events
     ├── specs/
-    │   ├── TASK-20260504-0930.md        # Full spec
-    │   ├── TASK-20260504-0930-review.md # Claude's review
+    │   ├── TASK-20260504-0930.md            ← full spec
+    │   ├── TASK-20260504-0930-review.md     ← Claude's review
     │   └── ...
     └── prompts/
-        ├── TASK-20260504-0930-copilot.txt  # Extracted instructions
+        ├── TASK-20260504-0930-copilot.txt   ← extracted Copilot block
         └── ...
 ```
 
 ---
 
+## Agent Model Routing
+
+Each agent uses a different model to balance quality and quota usage:
+
+| Agent | Model | Reason |
+|-------|-------|--------|
+| `devloop-orchestrator` | `sonnet` | Just coordination — no heavy reasoning needed |
+| `devloop-architect` | `opus` | Complex spec design — worth the stronger model |
+| `devloop-reviewer` | `sonnet` | Structured output — sonnet handles this well |
+
+Change in `devloop.config.sh`:
+```bash
+CLAUDE_MODEL="opus"    # used by architect/reviewer claude -p calls
+```
+
+Or edit the agent `.md` files directly in `.claude/agents/` to change per-agent models.
+
+---
+
+## Sleep & Connectivity Issues (Mac mini)
+
+| Problem | Solution |
+|---------|----------|
+| Mac sleeps → session drops | `devloop daemon` uses `caffeinate -is` |
+| Terminal closed → session dies | `devloop daemon` runs in background |
+| Mac reboots → session gone | `devloop daemon` registers launchd agent |
+| Crash loop | Exponential backoff (5s→60s), stops after 20 restarts |
+| Check what happened | `devloop daemon log` |
+| Start fresh | `devloop daemon stop && devloop daemon` |
+
+**System Preferences → Battery → Prevent automatic sleeping** is also recommended for always-on Mac mini use.
+
+---
+
 ## Tips
 
-**Use CLAUDE.md for persistent architect context:**
-Claude Code reads `CLAUDE.md` at the start of every session, so your stack and patterns don't need to be re-explained each time.
+**Model cost control:**
+Use `CLAUDE_MODEL="sonnet"` in `devloop.config.sh` for routine features. Switch to `opus` only for complex architecture tasks.
 
-**Use `.github/copilot-instructions.md` for persistent worker context:**
-Copilot CLI automatically reads instructions from `.github/copilot-instructions.md` — so your code standards are always in scope.
+**Multiple projects:**
+Each project gets its own daemon with its own launchd entry. Run `devloop daemon` in each project directory.
 
-**Use plan mode for complex tasks:**
-Models achieve higher success rates when given a concrete plan to follow — `devloop work` pre-loads `/plan` mode automatically.
+**VS Code integration** — add to `.vscode/tasks.json`:
+```json
+{
+  "label": "DevLoop Review",
+  "type": "shell",
+  "command": "devloop review",
+  "group": "build"
+}
+```
 
-**Switch Claude model for cost control:**
+**Keep specs in git:**
+Add `.devloop/specs/` to version control. Specs document every feature decision and review outcome.
 ```bash
-# In devloop.config.sh:
-CLAUDE_MODEL="sonnet"  # Faster, cheaper for simpler features
-CLAUDE_MODEL="opus"    # Strongest for architecture and review
+# .gitignore
+.devloop/daemon.pid
+.devloop/daemon.log
+.devloop/launchd*.log
+# keep: .devloop/specs/
 ```
