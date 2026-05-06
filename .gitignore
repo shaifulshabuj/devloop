@@ -1,3 +1,5 @@
 /.DS_Store
 # Docuflow
 #.docuflow/
+.docuflow/index.md
+.docuflow/log.md
