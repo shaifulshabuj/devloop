@@ -1,20 +1,21 @@
-# DevLoop Wiki Index
+# Wiki Index
 
-Auto-maintained catalog of pages. Last updated: 2026-05-06.
+Generated: 2026-05-06T08:39:47.826Z
 
----
+## Overview
 
-## Concepts
+Total pages: 5
 
-| Page | Description |
-|------|-------------|
-| [Core Pipeline & Architecture](wiki/concepts/pipeline-architecture.md) | The three-agent loop (orchestrator → architect → copilot → reviewer), remote control, session modes, and data flow |
-| [Configuration Reference](wiki/concepts/configuration.md) | All `devloop.config.sh` options with examples — stack, patterns, conventions, model selection |
-| [Setup & Installation](wiki/concepts/setup-installation.md) | Prerequisites, install steps, `devloop init` walkthrough, gitignore, troubleshooting |
+## By Category
 
-## Entities
+### Entity Pages (2)
 
-| Page | Description |
-|------|-------------|
-| [CLI Command Reference](wiki/entities/cli-commands.md) | Every command (`install`, `init`, `start`, `daemon`, `architect`, `work`, `review`, `fix`, `tasks`, `status`) with arguments and examples |
-| [Agent Definitions](wiki/entities/agents.md) | `devloop-orchestrator`, `devloop-architect`, `devloop-reviewer` — roles, models, tools, output formats, customization |
+- [`agents`](./wiki/entities/agents.md) — **Agent Definitions**
+- [`cli-commands`](./wiki/entities/cli-commands.md) — **CLI Command Reference**
+
+### Concept Pages (3)
+
+- [`configuration`](./wiki/concepts/configuration.md) — **Configuration Reference**
+- [`pipeline-architecture`](./wiki/concepts/pipeline-architecture.md) — **Core Pipeline & Architecture**
+- [`setup-installation`](./wiki/concepts/setup-installation.md) — **Setup & Installation**
+
