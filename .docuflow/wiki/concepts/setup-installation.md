@@ -55,7 +55,7 @@ devloop.sh install ~/bin/devloop   # custom path
 
 ```bash
 devloop --version
-# DevLoop v2.0.0
+# DevLoop v3.1.0
 ```
 
 ---
@@ -99,13 +99,36 @@ PROJECT_PATTERNS="SOLID, Repository Pattern"
 PROJECT_CONVENTIONS="async/await throughout, Result<T> returns, JSDoc on exports"
 TEST_FRAMEWORK="Jest"
 CLAUDE_MODEL="sonnet"
+
+# Provider routing (optional — defaults shown)
+DEVLOOP_MAIN_PROVIDER="claude"
+DEVLOOP_WORKER_PROVIDER="copilot"
+DEVLOOP_WORKER_MODE="cli"
+
+# Self-improvement (optional)
+DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/shaifulshabuj/devloop/main/VERSION"
 ```
 
-This file is injected into every architect and reviewer prompt. The more accurate it is, the better Copilot's generated code will match your codebase. See [Configuration Reference](configuration.md) for all options.
+This file is injected into every architect and reviewer prompt. See [Configuration Reference](configuration.md) for all options.
 
 ---
 
-## Step 4 — Start a session
+## Step 4 — Install hooks and get tool recommendations
+
+```bash
+# Install Claude Code pipeline hooks
+devloop hooks
+
+# Get stack-relevant MCP/skill/plugin recommendations
+devloop tools suggest
+
+# Install recommended tools interactively
+devloop tools add
+```
+
+---
+
+## Step 5 — Start a session
 
 ### Foreground (terminal stays open)
 
@@ -125,7 +148,7 @@ Close the terminal — the session keeps running. It auto-restarts on crash and 
 
 ---
 
-## Step 5 — Connect from your device
+## Step 6 — Connect from your device
 
 After starting, DevLoop prints connection info:
 
@@ -139,7 +162,7 @@ Open the Claude app on your phone or https://claude.ai/code in your browser and 
 
 ---
 
-## Step 6 — Send your first feature request
+## Step 7 — Send your first feature request
 
 Type a natural-language feature request in the chat:
 

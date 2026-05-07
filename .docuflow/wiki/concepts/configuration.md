@@ -1,8 +1,9 @@
 ---
 title: "Configuration Reference"
 category: concept
-tags: [configuration, devloop.config.sh, settings, model, stack]
+tags: [configuration, devloop.config.sh, settings, model, stack, provider-routing]
 created: 2026-05-06
+updated: 2026-05-07
 ---
 
 # Configuration Reference
@@ -131,6 +132,83 @@ CLAUDE_MODEL="opus"     # more capable — use for complex architecture tasks
 
 ---
 
+### `DEVLOOP_MAIN_PROVIDER`
+
+**Type:** `"claude"` | `"copilot"`
+**Default:** `"claude"`
+
+Which AI provider runs the orchestrator, architect, and reviewer roles.
+
+```bash
+DEVLOOP_MAIN_PROVIDER="claude"    # Claude handles design + review
+DEVLOOP_MAIN_PROVIDER="copilot"   # Copilot handles design + review
+```
+
+---
+
+### `DEVLOOP_WORKER_PROVIDER`
+
+**Type:** `"copilot"` | `"claude"`
+**Default:** `"copilot"`
+
+Which AI provider runs the worker (implementation) role.
+
+```bash
+DEVLOOP_WORKER_PROVIDER="copilot"  # Copilot implements specs (default)
+DEVLOOP_WORKER_PROVIDER="claude"   # Claude implements specs
+```
+
+---
+
+### `DEVLOOP_WORKER_MODE`
+
+**Type:** `"cli"` | `"github-agent"`
+**Default:** `"cli"`
+
+How the worker executes.
+
+```bash
+DEVLOOP_WORKER_MODE="cli"           # local CLI tool (copilot or claude)
+DEVLOOP_WORKER_MODE="github-agent"  # Copilot cloud coding agent via GitHub Issues/PRs
+```
+
+In `github-agent` mode, DevLoop creates a GitHub Issue containing the spec, waits for the Copilot cloud agent to open a PR (polls every 30 seconds, up to 20 minutes), then triggers `devloop review`.
+
+---
+
+### `DEVLOOP_VERSION_URL`
+
+**Type:** URL string
+**Default:** not set
+
+URL to a plain-text semver file for version checking. Used by `devloop check` and the background check in `devloop start`.
+
+```bash
+DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/shaifulshabuj/devloop/main/VERSION"
+```
+
+---
+
+### `PROJECT_STACK`
+
+**Type:** string
+**Default:** `"C#, .NET 8, ASP.NET Web API, MSSQL"`
+
+Also drives `devloop tools suggest` — set this accurately for stack-relevant MCP/skill/plugin recommendations.
+
+---
+
+## Provider Routing Combinations
+
+| Config | MAIN_PROVIDER | WORKER_PROVIDER | Description |
+|--------|--------------|----------------|-------------|
+| All Copilot | copilot | copilot | Copilot handles everything |
+| Default | claude | copilot | Claude orchestrates, Copilot implements |
+| All Claude | claude | claude | Claude handles everything |
+| Reversed | copilot | claude | Copilot orchestrates, Claude implements |
+
+---
+
 ## Internal Variables (read-only)
 
 These are set by `devloop` itself after loading config. Do not set them in `devloop.config.sh`.
@@ -142,7 +220,7 @@ These are set by `devloop` itself after loading config. Do not set them in `devl
 | `PROMPTS_DIR` | `.devloop/prompts` | Copilot instruction block storage |
 | `AGENTS_DIR` | `.claude/agents` | Agent definition files |
 | `CONFIG_FILE` | `devloop.config.sh` | Config file name |
-| `VERSION` | `2.0.0` | Script version |
+| `VERSION` | `3.1.0` | Script version |
 
 ---
 
@@ -187,3 +265,28 @@ Key directives it sets for Copilot:
 - Commit with a descriptive message when done
 
 You can extend this file with project-specific Copilot guidance (e.g. "always use the Result pattern", "never import lodash").
+
+---
+
+## devloop.config.sh — Full Example (v3.1.0)
+
+```bash
+# DevLoop Project Configuration — edit to match your stack
+
+PROJECT_NAME="$(basename "$PWD")"
+PROJECT_STACK="TypeScript, Node.js 20, Express, PostgreSQL, Prisma"
+PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"
+PROJECT_CONVENTIONS="async/await throughout, Result<T> returns, JSDoc on exports"
+TEST_FRAMEWORK="Jest"
+
+# Provider routing
+DEVLOOP_MAIN_PROVIDER="claude"     # claude | copilot
+DEVLOOP_WORKER_PROVIDER="copilot"  # copilot | claude
+DEVLOOP_WORKER_MODE="cli"          # cli | github-agent
+
+# Model for claude -p calls (architect/reviewer)
+CLAUDE_MODEL="sonnet"              # sonnet | opus
+
+# Self-improvement version check
+DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/shaifulshabuj/devloop/main/VERSION"
+```

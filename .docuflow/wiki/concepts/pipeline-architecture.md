@@ -138,25 +138,92 @@ Runs in your terminal. Ctrl+C stops everything. `caffeinate -is` keeps Mac awake
 Runs Claude in a detached background process. You can close the terminal. Features:
 - **Auto-restart** on crash or connection drop (exponential backoff: 5s → 10s → … → 60s max, stops after 20 attempts)
 - **caffeinate -is** restarted fresh on each attempt — survives wake from sleep
-- **launchd agent** registered so DevLoop auto-starts on login/reboot
+- **launchd agent** registered so DevLoop auto-starts on login/reboot (macOS); **systemd user service** on Linux
 - All output logged to `.devloop/daemon.log`
+
+## Worker Modes
+
+### `cli` (default)
+
+Worker runs via the local CLI tool. Copilot uses `gh copilot suggest`; Claude uses `claude -p`.
+
+### `github-agent`
+
+Worker creates a GitHub Issue containing the spec, and the Copilot cloud coding agent picks it up, opens a PR. DevLoop polls every 30 seconds (up to 20 minutes). When the PR appears, it auto-triggers `devloop review`.
+
+```bash
+DEVLOOP_WORKER_MODE="github-agent"
+```
+
+Requirements: `gh` CLI authenticated, Copilot coding agent enabled on the repo.
+
+## Pipeline Hooks
+
+`devloop hooks` installs four Claude Code hook scripts that auto-execute during every session:
+
+| Hook | Event | Log |
+|------|-------|-----|
+| `devloop-stop.sh` | `Stop` | `.devloop/pipeline.log` |
+| `devloop-subagent-stop.sh` | `SubagentStop` | `.devloop/pipeline.log` |
+| `devloop-notification.sh` | `Notification` | `.devloop/notifications.log` |
+| `devloop-session.sh` | `PreToolUse(Bash)` | `.devloop/sessions.log` |
+
+## Self-Improvement Loop
+
+`devloop learn` extracts lessons from reviews and prepends them to `CLAUDE.md` under `## Learned Patterns`. The architect and reviewer read these patterns in every subsequent session, making the pipeline progressively smarter.
+
+`devloop check` + `DEVLOOP_VERSION_URL` keeps DevLoop itself up to date: a background version check runs on `devloop start` and hints when a new version is available.
+
+## Tools Ecosystem (v3.1.0)
+
+`devloop tools` manages the AI tool layer for both Claude and Copilot:
+
+```
+Global (user-wide)                  Project-level
+────────────────────────────────    ────────────────────────────────
+~/.claude.json (mcpServers)    →    .mcp.json (mcpServers)
+~/.claude/skills/              →    .claude/skills/
+~/.claude/settings.json            .claude/settings.json (hooks)
+                                    .vscode/mcp.json (servers)
+                                    .github/instructions/*.md
+```
+
+DevLoop writes both `.mcp.json` and `.vscode/mcp.json` in a single `devloop tools add --mcp` call, translating schema automatically (Claude uses `mcpServers`, VS Code uses `servers` + `type`).
 
 ## Data Flow & File Layout
 
 ```
 your-project/
-├── devloop.config.sh                         ← project context fed to every claude -p call
-├── CLAUDE.md                                 ← Claude Code persistent context
+├── devloop.config.sh                         ← project context + provider routing
+├── CLAUDE.md                                 ← Claude Code persistent context + learned patterns
 ├── .github/
-│   └── copilot-instructions.md               ← Copilot persistent context
+│   ├── copilot-instructions.md               ← Copilot persistent context
+│   ├── instructions/                         ← path-specific Copilot instructions
+│   │   └── tests.instructions.md
+│   └── workflows/
+│       └── devloop-review.yml                ← CI (devloop ci)
 ├── .claude/
-│   └── agents/
-│       ├── devloop-orchestrator.md
-│       ├── devloop-architect.md
-│       └── devloop-reviewer.md
+│   ├── agents/
+│   │   ├── devloop-orchestrator.md
+│   │   ├── devloop-architect.md
+│   │   └── devloop-reviewer.md
+│   ├── hooks/                                ← devloop hooks
+│   │   ├── devloop-stop.sh
+│   │   ├── devloop-subagent-stop.sh
+│   │   ├── devloop-notification.sh
+│   │   └── devloop-session.sh
+│   ├── settings.json                         ← hook registrations
+│   └── skills/                               ← project-level Claude skills
+│       └── code-review/SKILL.md
+├── .mcp.json                                 ← Claude MCP servers (mcpServers)
+├── .vscode/
+│   └── mcp.json                              ← VS Code/Copilot MCP servers (servers)
 └── .devloop/
     ├── daemon.pid                            ← gitignored
     ├── daemon.log                            ← gitignored
+    ├── pipeline.log                          ← hook-generated
+    ├── notifications.log                     ← hook-generated
+    ├── sessions.log                          ← hook-generated
     ├── specs/
     │   ├── TASK-20260504-0930.md             ← commit this
     │   └── TASK-20260504-0930-review.md      ← commit this
@@ -168,5 +235,6 @@ your-project/
 
 - The architect generates specs via `claude -p` (print mode) — it does not modify files
 - The reviewer also uses `claude -p` — it only reads git state, never applies fixes
-- Only Copilot CLI modifies source files (during `devloop work` and `devloop fix`)
+- Only the worker (Copilot or Claude CLI) modifies source files (during `devloop work` and `devloop fix`)
 - The orchestrator is the single contact point for the remote user
+- `devloop tools add --mcp` always writes both `.mcp.json` and `.vscode/mcp.json`
