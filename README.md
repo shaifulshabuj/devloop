@@ -20,6 +20,28 @@ Claude Code --remote-control (your Mac)
 
 ---
 
+## Architecture Diagrams
+
+Detailed Mermaid diagrams covering every aspect of the pipeline, file lifecycle, agent collaboration, daemon behaviour, and data flow:
+
+📊 **[DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md)**
+
+| Diagram | Description |
+|---------|-------------|
+| 1. Full Pipeline | End-to-end flow from user request to APPROVED |
+| 2. Command Reference | Every command grouped by category with aliases |
+| 3. `devloop init` | All files created and CLAUDE_MODEL propagation |
+| 4. File Lifecycle | All 4 files per task — who writes, reads, and deletes each |
+| 5. Git Baseline | How `.pre-commit` enables precise multi-commit diffs |
+| 6. `devloop work` prompt | Exact structure sent to Copilot |
+| 7. `devloop review` prompt | Diff computation, compact spec assembly, Claude prompt |
+| 8. Daemon & Auto-restart | Background loop, backoff, launchd/systemd registration |
+| 9. Status State Machine | `pending → approved/needs_work/rejected` transitions |
+| 10. Agent Collaboration | Orchestrator ↔ Architect ↔ Reviewer ↔ Copilot roles |
+| 11. `devloop clean` | File selection logic and dry-run path |
+
+---
+
 ## Requirements
 
 | Tool | Install |
@@ -466,3 +488,6 @@ devloop block         # print just the Copilot Instructions Block
 devloop clean --days 14 --dry-run   # see what would be removed
 devloop clean --days 14             # apply
 ```
+
+**Understand the full data flow:**
+See [DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md) for 11 Mermaid diagrams covering the pipeline, file lifecycle, git baseline mechanism, agent collaboration, daemon behaviour, and every command in detail.

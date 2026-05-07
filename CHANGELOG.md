@@ -9,6 +9,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Architecture & data flow diagrams**
+- Added [`DEVLOOP-GRAPH.md`](./DEVLOOP-GRAPH.md) — 11 detailed Mermaid diagrams covering the full pipeline, every command, file lifecycle, git baseline mechanism, `devloop work` and `devloop review` prompt structure, daemon auto-restart loop, status state machine, agent collaboration map, and `devloop clean` selection logic
+
 **Linux systemd support (FIX #15)**
 - `devloop daemon` now registers a `~/.config/systemd/user/devloop-<project>.service` unit on Linux
 - Service starts automatically on user login (`WantedBy=default.target`) and restarts on crash (`Restart=on-failure`)
