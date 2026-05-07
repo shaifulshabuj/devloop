@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="3.0.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -80,6 +80,8 @@ load_config() {
   CLAUDE_MODEL="sonnet"
   DEVLOOP_MAIN_PROVIDER="claude"
   DEVLOOP_WORKER_PROVIDER="copilot"
+  DEVLOOP_WORKER_MODE="cli"
+  DEVLOOP_VERSION_URL=""
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -140,6 +142,623 @@ main_provider() {
 
 worker_provider() {
   normalize_provider "${DEVLOOP_WORKER_PROVIDER:-copilot}"
+}
+
+# ── Version checking ──────────────────────────────────────────────────────────
+
+_check_version_bg() {
+  local url="${DEVLOOP_VERSION_URL:-}"
+  [[ -z "$url" ]] && return
+  local root; root="$(find_project_root)"
+  local hint_file="$root/$DEVLOOP_DIR/.version-hint"
+  (
+    local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+    elif command -v wget &>/dev/null; then
+      wget -qO "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+    else
+      rm -f "$tmp"; exit 0
+    fi
+    local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+    rm -f "$tmp"
+    if [[ -n "$remote_ver" && "$remote_ver" != "$VERSION" ]]; then
+      echo "$remote_ver" > "$hint_file"
+    fi
+  ) >/dev/null 2>&1 &
+}
+
+cmd_check() {
+  load_config
+  local url="${DEVLOOP_VERSION_URL:-}"
+  if [[ -z "$url" ]]; then
+    warn "DEVLOOP_VERSION_URL not configured"
+    echo ""
+    echo -e "${BOLD}To enable version checks, add to devloop.config.sh:${RESET}"
+    echo -e "  ${CYAN}DEVLOOP_VERSION_URL=\"https://raw.githubusercontent.com/you/devloop/main/VERSION\"${RESET}"
+    echo ""
+    echo -e "The VERSION file should contain a single semver line, e.g.: ${GRAY}3.0.0${RESET}"
+    return
+  fi
+  step "🔍 Checking for DevLoop updates..."
+  local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$url" -o "$tmp" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
+  elif command -v wget &>/dev/null; then
+    wget -qO "$tmp" "$url" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
+  else
+    error "Neither curl nor wget found"; rm -f "$tmp"; return
+  fi
+  local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+  rm -f "$tmp"
+  if [[ -z "$remote_ver" ]]; then
+    warn "Could not read version from manifest at: $url"
+    return
+  fi
+  if [[ "$remote_ver" == "$VERSION" ]]; then
+    success "Up to date — ${BOLD}v$VERSION${RESET}"
+  else
+    warn "Update available: ${BOLD}v$VERSION${RESET} → ${GREEN}v$remote_ver${RESET}"
+    echo -e "  Run: ${CYAN}devloop update${RESET}"
+  fi
+  echo ""
+}
+
+# ── Self-improvement ──────────────────────────────────────────────────────────
+
+cmd_learn() {
+  load_config
+  ensure_dirs
+  check_deps
+
+  local id="${1:-$(latest_task)}"
+  [[ -z "$id" ]] && { error "No task found."; exit 1; }
+
+  local review_file="$SPECS_PATH/$id-review.md"
+  local spec_file="$SPECS_PATH/$id.md"
+
+  [[ ! -f "$review_file" ]] && { error "No review found for $id. Run: devloop review $id"; exit 1; }
+
+  step "🧠 Learning from: ${BOLD}$id${RESET}"
+  divider
+
+  local provider; provider="$(main_provider)"
+
+  local learn_prompt
+  learn_prompt="You are analyzing a code review to extract reusable lessons for future development.
+
+## Task spec (excerpt)
+$(head -60 "$spec_file" 2>/dev/null)
+
+## Code review outcome
+$(cat "$review_file")
+
+## Your task
+Extract 2-5 specific, reusable lessons from this review. Format each as a Markdown list item.
+Focus on:
+- Anti-patterns found (what NOT to do next time)
+- Patterns that worked well
+- Common mistakes to avoid in this stack
+- Conventions that were enforced
+
+Output ONLY the Markdown list items, one per line, starting with '-'. No headers, no prose, no intro sentence."
+
+  local lessons_file; lessons_file="$(mktemp /tmp/devloop-lessons.XXXXXX)"
+  info "Calling $(provider_label "$provider") to extract lessons..."
+  run_provider_prompt "$provider" "$learn_prompt" "$lessons_file"
+  local lessons; lessons="$(cat "$lessons_file")"
+  rm -f "$lessons_file"
+
+  if [[ -z "$lessons" ]]; then
+    warn "Could not extract lessons from review"
+    return
+  fi
+
+  echo ""
+  info "Extracted lessons:"
+  echo -e "${GRAY}$lessons${RESET}"
+  echo ""
+
+  local root; root="$(find_project_root)"
+  local claude_md="$root/CLAUDE.md"
+
+  if [[ ! -f "$claude_md" ]]; then
+    warn "CLAUDE.md not found — creating it"
+    echo "# Claude Code — DevLoop Project" > "$claude_md"
+  fi
+
+  if grep -q '^## Learned Patterns' "$claude_md"; then
+    {
+      printf '\n### From %s (%s)\n' "$id" "$(date +%Y-%m-%d)"
+      printf '%s\n' "$lessons"
+    } >> "$claude_md"
+  else
+    {
+      printf '\n## Learned Patterns\n'
+      printf '_Auto-updated by `devloop learn`. Applied to future architect prompts._\n'
+      printf '\n### From %s (%s)\n' "$id" "$(date +%Y-%m-%d)"
+      printf '%s\n' "$lessons"
+    } >> "$claude_md"
+  fi
+
+  success "Lessons appended to ${CYAN}CLAUDE.md${RESET}"
+  info "Claude will apply these patterns in future architect sessions"
+  echo ""
+}
+
+# ── Claude Hooks ──────────────────────────────────────────────────────────────
+
+_write_hook_stop() {
+  local hooks_dir="$1"
+  local root; root="$(find_project_root)"
+  cat > "$hooks_dir/devloop-stop.sh" <<'HOOK'
+#!/usr/bin/env bash
+# DevLoop Stop hook — logs when Claude finishes a turn
+LOG="$(git rev-parse --show-toplevel 2>/dev/null)/.devloop/pipeline.log"
+mkdir -p "$(dirname "$LOG")"
+TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+INPUT="$(cat)"
+STOP_REASON="$(printf '%s' "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stop_reason','unknown'))" 2>/dev/null || echo "unknown")"
+printf '[%s] Claude turn ended — stop_reason: %s\n' "$TIMESTAMP" "$STOP_REASON" >> "$LOG"
+HOOK
+  chmod +x "$hooks_dir/devloop-stop.sh"
+}
+
+_write_hook_subagent_stop() {
+  local hooks_dir="$1"
+  cat > "$hooks_dir/devloop-subagent-stop.sh" <<'HOOK'
+#!/usr/bin/env bash
+# DevLoop SubagentStop hook — logs when an agent (architect/reviewer) completes
+LOG="$(git rev-parse --show-toplevel 2>/dev/null)/.devloop/pipeline.log"
+mkdir -p "$(dirname "$LOG")"
+TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+INPUT="$(cat)"
+AGENT="$(printf '%s' "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('agent_name', d.get('subagent_name','unknown')))" 2>/dev/null || echo "unknown")"
+printf '[%s] Subagent completed — agent: %s\n' "$TIMESTAMP" "$AGENT" >> "$LOG"
+HOOK
+  chmod +x "$hooks_dir/devloop-subagent-stop.sh"
+}
+
+_write_hook_notification() {
+  local hooks_dir="$1"
+  cat > "$hooks_dir/devloop-notification.sh" <<'HOOK'
+#!/usr/bin/env bash
+# DevLoop Notification hook — forwards Claude notifications to a log
+LOG="$(git rev-parse --show-toplevel 2>/dev/null)/.devloop/notifications.log"
+mkdir -p "$(dirname "$LOG")"
+TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+INPUT="$(cat)"
+MSG="$(printf '%s' "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null || echo "$INPUT")"
+printf '[%s] %s\n' "$TIMESTAMP" "$MSG" >> "$LOG"
+HOOK
+  chmod +x "$hooks_dir/devloop-notification.sh"
+}
+
+_write_hook_session() {
+  local hooks_dir="$1"
+  cat > "$hooks_dir/devloop-session.sh" <<'HOOK'
+#!/usr/bin/env bash
+# DevLoop SessionStart/End hook — records session boundaries
+LOG="$(git rev-parse --show-toplevel 2>/dev/null)/.devloop/sessions.log"
+mkdir -p "$(dirname "$LOG")"
+TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+INPUT="$(cat)"
+EVENT="$(printf '%s' "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('event','session_event'))" 2>/dev/null || echo "session_event")"
+SESSION="$(printf '%s' "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id','')[:8])" 2>/dev/null || echo "?")"
+printf '[%s] %s session=%s\n' "$TIMESTAMP" "$EVENT" "$SESSION" >> "$LOG"
+HOOK
+  chmod +x "$hooks_dir/devloop-session.sh"
+}
+
+_write_claude_settings() {
+  local settings_file="$1"
+  local hooks_dir="$2"
+  if [[ -f "$settings_file" ]]; then
+    warn ".claude/settings.json already exists — skipping (merge hooks manually if needed)"
+    return
+  fi
+  cat > "$settings_file" <<SETTINGS
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hooks_dir}/devloop-stop.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hooks_dir}/devloop-subagent-stop.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hooks_dir}/devloop-notification.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hooks_dir}/devloop-session.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hooks_dir}/devloop-session.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGS
+}
+
+cmd_hooks() {
+  load_config
+  local root; root="$(find_project_root)"
+  local hooks_dir="$root/.claude/hooks"
+  local settings_file="$root/.claude/settings.json"
+
+  step "🪝 Installing DevLoop Claude hooks"
+  divider
+
+  mkdir -p "$hooks_dir"
+  mkdir -p "$root/$DEVLOOP_DIR"
+
+  _write_hook_stop         "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-stop.sh${RESET}"
+  _write_hook_subagent_stop "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-subagent-stop.sh${RESET}"
+  _write_hook_notification  "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-notification.sh${RESET}"
+  _write_hook_session       "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-session.sh${RESET}"
+
+  _write_claude_settings "$settings_file" "$hooks_dir"
+  if [[ -f "$settings_file" ]] && grep -q 'devloop-stop' "$settings_file"; then
+    success "Settings: ${CYAN}$settings_file${RESET}"
+  fi
+
+  divider
+  echo ""
+  info "Hooks fire automatically inside Claude sessions"
+  echo -e "  ${BOLD}Logs written to:${RESET}"
+  echo -e "    ${CYAN}.devloop/pipeline.log${RESET}       — Claude turns + agent completions"
+  echo -e "    ${CYAN}.devloop/notifications.log${RESET}  — Claude notifications"
+  echo -e "    ${CYAN}.devloop/sessions.log${RESET}       — session start/end boundaries"
+  echo ""
+  echo -e "  Run ${CYAN}devloop logs${RESET} to view"
+  echo ""
+}
+
+cmd_logs() {
+  load_config
+  local follow=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in -f|--follow) follow=true; shift ;; *) shift ;; esac
+  done
+
+  local root; root="$(find_project_root)"
+  local log_dir="$root/$DEVLOOP_DIR"
+
+  step "📋 DevLoop Logs"
+  divider
+
+  local logs=()
+  for logname in pipeline notifications sessions; do
+    local f="$log_dir/${logname}.log"
+    [[ -f "$f" ]] && logs+=("$f")
+  done
+
+  if [[ ${#logs[@]} -eq 0 ]]; then
+    info "No logs found yet."
+    echo -e "  1. Run ${CYAN}devloop hooks${RESET} to install hooks"
+    echo -e "  2. Run ${CYAN}devloop start${RESET} — logs will appear automatically"
+    return
+  fi
+
+  if [[ "$follow" == true ]]; then
+    info "Tailing logs (Ctrl+C to stop)..."
+    tail -f "${logs[@]}"
+  else
+    for f in "${logs[@]}"; do
+      local name; name="$(basename "$f")"
+      echo -e "\n${BOLD}=== $name ===${RESET}"
+      tail -40 "$f"
+    done
+    echo ""
+    info "Use ${CYAN}devloop logs -f${RESET} for live tail"
+    echo ""
+  fi
+}
+
+# ── Doctor ────────────────────────────────────────────────────────────────────
+
+cmd_doctor() {
+  load_config
+  step "🩺 DevLoop Doctor"
+  divider
+
+  local pass=0 fail=0
+
+  _chk() {
+    local label="$1"
+    local ok="$2"
+    local hint="${3:-}"
+    if [[ "$ok" == "true" ]]; then
+      echo -e "  ${GREEN}✔${RESET}  $label"
+      pass=$(( pass + 1 ))
+    else
+      echo -e "  ${RED}✖${RESET}  $label"
+      [[ -n "$hint" ]] && echo -e "       ${GRAY}→ $hint${RESET}"
+      fail=$(( fail + 1 ))
+    fi
+  }
+
+  local root; root="$(find_project_root)"
+
+  # Tools
+  local ok
+  ok="false"; command -v claude   &>/dev/null && ok="true"
+  _chk "claude CLI installed"   "$ok" "curl -fsSL https://claude.ai/install.sh | bash"
+  ok="false"; command -v copilot &>/dev/null && ok="true"
+  _chk "copilot CLI installed"  "$ok" "gh extension install github/gh-copilot"
+  ok="false"; command -v gh      &>/dev/null && ok="true"
+  _chk "gh CLI installed"       "$ok" "https://cli.github.com"
+  ok="false"; command -v git     &>/dev/null && ok="true"
+  _chk "git installed"          "$ok" "https://git-scm.com"
+
+  # Repo
+  ok="false"; git rev-parse --git-dir &>/dev/null 2>&1 && ok="true"
+  _chk "inside a git repo" "$ok" "git init"
+
+  # Config + generated files
+  ok="false"; [[ -f "$CONFIG_PATH" ]] && ok="true"
+  _chk "devloop.config.sh present" "$ok" "devloop init"
+
+  ok="false"; [[ -f "$root/CLAUDE.md" ]] && ok="true"
+  _chk "CLAUDE.md present" "$ok" "devloop init"
+
+  ok="false"; [[ -f "$root/.github/copilot-instructions.md" ]] && ok="true"
+  _chk ".github/copilot-instructions.md present" "$ok" "devloop init"
+
+  for agent in devloop-orchestrator devloop-architect devloop-reviewer; do
+    ok="false"; [[ -f "$root/$AGENTS_DIR/$agent.md" ]] && ok="true"
+    _chk "agent: $agent" "$ok" "devloop init"
+  done
+
+  # Hooks
+  ok="false"; [[ -f "$root/.claude/settings.json" ]] && grep -q 'devloop-stop' "$root/.claude/settings.json" 2>/dev/null && ok="true"
+  _chk "Claude hooks installed (.claude/settings.json)" "$ok" "devloop hooks"
+
+  # Version check
+  if [[ -n "${DEVLOOP_VERSION_URL:-}" ]]; then
+    local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+    ok="false"
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$DEVLOOP_VERSION_URL" -o "$tmp" 2>/dev/null && ok="true"
+    fi
+    if [[ "$ok" == "true" ]]; then
+      local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+      rm -f "$tmp"
+      if [[ "$remote_ver" == "$VERSION" ]]; then
+        _chk "version up to date (v$VERSION)" "true"
+      else
+        _chk "version up to date (local: v$VERSION, remote: v$remote_ver)" "false" "devloop update"
+      fi
+    else
+      rm -f "$tmp"
+      _chk "version check (URL unreachable)" "false" "Check DEVLOOP_VERSION_URL in config"
+    fi
+  else
+    echo -e "  ${GRAY}—  version check skipped (DEVLOOP_VERSION_URL not set)${RESET}"
+  fi
+
+  divider
+  echo ""
+  echo -e "  ${BOLD}Passed:${RESET} ${GREEN}$pass${RESET}   ${BOLD}Failed:${RESET} ${RED}$fail${RESET}"
+  echo ""
+  if (( fail > 0 )); then
+    warn "Fix issues above, then re-run ${CYAN}devloop doctor${RESET}"
+    echo ""
+  else
+    success "All checks passed — DevLoop is healthy"
+    echo ""
+  fi
+}
+
+# ── GitHub Actions CI ─────────────────────────────────────────────────────────
+
+cmd_ci() {
+  load_config
+  local root; root="$(find_project_root)"
+  local workflow_dir="$root/.github/workflows"
+  local workflow_file="$workflow_dir/devloop-review.yml"
+
+  step "⚙️  Generating GitHub Actions workflow"
+  divider
+
+  mkdir -p "$workflow_dir"
+
+  if [[ -f "$workflow_file" ]]; then
+    warn "$workflow_file already exists — skipping"
+    info "Delete it and re-run to regenerate"
+    return
+  fi
+
+  cat > "$workflow_file" <<'WORKFLOW'
+name: DevLoop Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  devloop-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: DevLoop Review via Claude
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          task: |
+            You are the DevLoop Reviewer. Review the changes in this pull request.
+
+            1. Check if any .devloop/specs/*.md files exist matching recent commits.
+            2. If a matching spec is found, evaluate the diff against it (spec compliance,
+               edge cases, error handling, tests, SOLID principles).
+            3. If no spec found, perform a general senior code review of the git diff.
+            4. Post a structured review comment with:
+               - Verdict: APPROVED / NEEDS_WORK / REJECTED
+               - Score: X/10
+               - What's Good (bullet list)
+               - Issues Found (table: severity, file/area, description)
+               - Required Fixes (if any)
+WORKFLOW
+
+  success "Workflow written: ${CYAN}$workflow_file${RESET}"
+  echo ""
+  echo -e "${BOLD}Next steps:${RESET}"
+  echo -e "  1. Add ${CYAN}ANTHROPIC_API_KEY${RESET} to GitHub repo secrets"
+  echo -e "  2. Commit and push the workflow file"
+  echo -e "  3. Open a PR — Claude reviews it automatically"
+  echo ""
+}
+
+# ── Copilot setup steps (coding agent env) ────────────────────────────────────
+
+_write_copilot_setup_steps() {
+  cat > "copilot-setup-steps.yml" <<SETUP
+# copilot-setup-steps.yml
+# Pre-installs tools in the Copilot coding agent's ephemeral environment.
+# See: https://docs.github.com/en/copilot/customizing-copilot/customizing-the-development-environment-for-copilot-coding-agent
+
+steps:
+  # Install project dependencies — customize for your stack
+  - name: Install dependencies
+    run: |
+      # Node.js:  npm ci
+      # Python:   pip install -r requirements.txt
+      # .NET:     dotnet restore
+      # Go:       go mod download
+      echo "Add your dependency installation steps here"
+
+  # Install DevLoop so Copilot can call devloop commands
+  - name: Install DevLoop
+    run: |
+      if [ -f "./devloop.sh" ]; then
+        cp ./devloop.sh /usr/local/bin/devloop
+        chmod +x /usr/local/bin/devloop
+      fi
+
+  # Verify environment
+  - name: Verify tools
+    run: |
+      git --version
+      # Add any other verification steps
+SETUP
+}
+
+# ── Copilot coding agent work mode ────────────────────────────────────────────
+
+_cmd_work_github_agent() {
+  local id="$1"
+  local spec_file="$2"
+
+  command -v gh &>/dev/null || {
+    error "gh CLI required for github-agent mode"
+    echo -e "  Install: ${CYAN}https://cli.github.com${RESET}"
+    exit 1
+  }
+
+  step "🤖 Copilot coding agent implementing: ${BOLD}$id${RESET}"
+  divider
+
+  local base_hash
+  base_hash="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  if [[ -n "$base_hash" ]]; then
+    echo "$base_hash" > "$SPECS_PATH/$id.pre-commit"
+    info "Git baseline recorded: ${GRAY}${base_hash:0:12}${RESET}"
+  fi
+
+  local feature; feature="$(grep '^\*\*Feature\*\*:' "$spec_file" | sed 's/\*\*Feature\*\*: //' | head -1)"
+  local issue_title="DevLoop $id: $feature"
+  local spec_content; spec_content="$(cat "$spec_file")"
+
+  info "Creating GitHub Issue for Copilot coding agent..."
+  echo ""
+
+  local issue_url
+  issue_url="$(gh issue create \
+    --title "$issue_title" \
+    --body "$spec_content" \
+    --label "copilot" 2>/dev/null)" || {
+    error "Failed to create GitHub Issue. Verify auth: gh auth status"
+    exit 1
+  }
+
+  local issue_num; issue_num="$(printf '%s' "$issue_url" | grep -o '[0-9]*$')"
+  echo "$issue_url" > "$SPECS_PATH/$id.issue"
+
+  success "Issue created: ${CYAN}$issue_url${RESET}"
+  echo ""
+  echo -e "${BOLD}Copilot coding agent is now working on this issue.${RESET}"
+  echo -e "  You can monitor progress at: ${CYAN}$issue_url${RESET}"
+  echo ""
+  info "Watching for Copilot PR (up to 5 min — Ctrl+C to skip)..."
+
+  local elapsed=0
+  local max_wait=300
+  while (( elapsed < max_wait )); do
+    local pr_url
+    pr_url="$(gh pr list --search "closes #$issue_num" --json url --jq '.[0].url' 2>/dev/null || echo "")"
+    if [[ -n "$pr_url" && "$pr_url" != "null" ]]; then
+      echo ""
+      success "Copilot PR found: ${CYAN}$pr_url${RESET}"
+      echo "$pr_url" > "$SPECS_PATH/$id.pr"
+      echo ""
+      echo -e "  Run: ${CYAN}devloop review $id${RESET}"
+      return
+    fi
+    sleep 15
+    elapsed=$(( elapsed + 15 ))
+    printf "."
+  done
+  echo ""
+  warn "No PR found after 5 minutes — Copilot may still be working"
+  echo -e "  Check: ${CYAN}gh pr list${RESET}"
+  echo -e "  When ready: ${CYAN}devloop review $id${RESET}"
 }
 
 run_provider_prompt() {
@@ -240,6 +859,10 @@ Mark "Review" completed.
 - `devloop: not found` → tell user: `sudo devloop install`
 - `copilot: not found` → tell user: `gh extension install github/gh-copilot`
 - No git changes after work → ask user to confirm Copilot finished
+
+## Mobile push notifications
+When starting a long task, include in your first message: "I'll notify you when this task completes."
+Claude Code will push a notification to your phone when the task finishes.
 AGENT
 }
 
@@ -407,9 +1030,17 @@ TEST_FRAMEWORK="xUnit"
 DEVLOOP_MAIN_PROVIDER="claude"
 DEVLOOP_WORKER_PROVIDER="copilot"
 
+# Worker mode
+# cli          — use copilot or claude CLI locally (default)
+# github-agent — create a GitHub Issue; Copilot coding agent works on it and opens a PR
+DEVLOOP_WORKER_MODE="cli"
+
 # Model for claude -p calls when a role uses Claude
 # "sonnet" = faster/cheaper   "opus" = more capable
 CLAUDE_MODEL="sonnet"
+
+# Optional: URL to a VERSION file (single semver line) for update checks
+# DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/you/devloop/main/VERSION"
 
 # Optional: set to enable 'devloop update'
 # DEVLOOP_SOURCE_URL="https://raw.githubusercontent.com/you/devloop/main/devloop.sh"
@@ -427,12 +1058,9 @@ CONFIG
 This project uses the DevLoop multi-agent pipeline:
 - `devloop-orchestrator` — main thread, receives remote instructions
 - `devloop-architect`    — subagent, designs implementation specs
-- `devloop-reviewer`     — subagent, reviews Copilot's implementation
-- `copilot CLI`          — external worker, implements specs
-- Provider routing is controlled in `devloop.config.sh`:
-  - `DEVLOOP_MAIN_PROVIDER` for orchestrator / architect / reviewer
-  - `DEVLOOP_WORKER_PROVIDER` for work / fix
-- The current launcher stays Claude remote-control in v1.
+- `devloop-reviewer`     — subagent, reviews the worker's implementation
+- Worker — implements specs (CLI or cloud Copilot coding agent)
+- Provider routing and worker mode are controlled in `devloop.config.sh`
 
 ## Start the system
 ```bash
@@ -442,18 +1070,27 @@ Then connect from claude.ai/code or the Claude mobile app.
 
 ## DevLoop commands
 - `devloop architect "feature"` — design a spec
-- `devloop work [TASK-ID]`      — launch Copilot to implement
+- `devloop work [TASK-ID]`      — launch worker to implement
 - `devloop review [TASK-ID]`    — review implementation
-- `devloop fix [TASK-ID]`       — launch Copilot with fix instructions
+- `devloop fix [TASK-ID]`       — launch worker with fix instructions
 - `devloop tasks`               — list all specs
 - `devloop status [TASK-ID]`    — show spec + review
 - `devloop open [TASK-ID]`      — open spec in $EDITOR
 - `devloop block [TASK-ID]`     — print Copilot Instructions Block
 - `devloop clean [--days N]`    — remove old specs
+- `devloop learn [TASK-ID]`     — extract lessons from review and save to CLAUDE.md
+- `devloop hooks`               — install Claude pipeline hooks
+- `devloop logs [TYPE]`         — show pipeline/notification/session logs
+- `devloop doctor`              — validate dependencies and configuration
+- `devloop ci`                  — generate GitHub Actions review workflow
+- `devloop check`               — check for DevLoop updates
 - `devloop update`              — self-upgrade devloop
 
 ## Stack
 See devloop.config.sh for project-specific stack details.
+
+## Learned Patterns
+<!-- devloop learn appends dated lessons here -->
 CLAUDEMD
     success "Created: ${CYAN}CLAUDE.md${RESET}"
   else
@@ -470,15 +1107,26 @@ CLAUDEMD
     info "Regenerate with: ${CYAN}rm .github/copilot-instructions.md && devloop init${RESET}"
   fi
 
+  # 5. copilot-setup-steps.yml (only for github-agent mode)
+  if [[ "${DEVLOOP_WORKER_MODE:-cli}" == "github-agent" ]]; then
+    if [[ ! -f "copilot-setup-steps.yml" ]]; then
+      _write_copilot_setup_steps
+      success "Created: ${CYAN}copilot-setup-steps.yml${RESET}"
+    else
+      warn "copilot-setup-steps.yml already exists — skipping"
+    fi
+  fi
+
   divider
   echo ""
   echo -e "${GREEN}${BOLD}✅ DevLoop initialized!${RESET}\n"
   echo -e "${BOLD}Next steps:${RESET}"
   echo -e "  1. Edit ${CYAN}devloop.config.sh${RESET} with your project stack"
   echo -e "  2. Re-run ${CYAN}devloop init${RESET} to apply stack to agent + copilot files"
-  echo -e "  3. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
-  echo -e "  4. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
-  echo -e "  5. Send a feature request — the pipeline runs automatically"
+  echo -e "  3. Run ${CYAN}devloop hooks${RESET} to install Claude pipeline hooks"
+  echo -e "  4. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
+  echo -e "  5. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
+  echo -e "  6. Send a feature request — the pipeline runs automatically"
   echo ""
 }
 
@@ -597,6 +1245,18 @@ cmd_start() {
   step "Starting DevLoop for: ${CYAN}$project_name${RESET}"
   divider
   echo ""
+
+  # Non-blocking version check — result shown on next start if update exists
+  _check_version_bg
+  local root; root="$(find_project_root)"
+  local hint_file="$root/$DEVLOOP_DIR/.version-hint"
+  if [[ -f "$hint_file" ]]; then
+    local remote_ver; remote_ver="$(cat "$hint_file")"
+    rm -f "$hint_file"
+    warn "DevLoop ${GREEN}v${remote_ver}${RESET} available — run ${CYAN}devloop update${RESET}"
+    echo ""
+  fi
+
   echo -e "${BOLD}Launching:${RESET}"
   echo -e "  ${CYAN}--remote-control${RESET}      accessible from mobile + browser"
   echo -e "  ${CYAN}--agent orchestrator${RESET}  main thread is the orchestrator"
@@ -1077,6 +1737,12 @@ cmd_work() {
   [[ ! -f "$spec_file" ]] && { error "Spec not found: $id"; exit 1; }
   local provider
   provider="$(worker_provider)"
+
+  # Copilot coding agent mode — create GitHub Issue and hand off to cloud agent
+  if [[ "${DEVLOOP_WORKER_MODE:-cli}" == "github-agent" ]]; then
+    _cmd_work_github_agent "$id" "$spec_file"
+    return
+  fi
 
   # FIX #7: Validate spec completeness before handing to Copilot
   if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
@@ -1642,6 +2308,18 @@ cmd_help() {
   echo -e "  ${CYAN}devloop clean [--days N] [--dry-run]${RESET}"
   echo -e "    Remove finalized (approved/rejected) specs older than N days (default: 30)"
   echo -e "    Use ${CYAN}--dry-run${RESET} to preview what would be removed\n"
+  echo -e "  ${CYAN}devloop learn [TASK-ID]${RESET}"
+  echo -e "    Extract lessons from the latest review and append to CLAUDE.md\n"
+  echo -e "  ${CYAN}devloop check${RESET}"
+  echo -e "    Check for available DevLoop updates (requires DEVLOOP_VERSION_URL)\n"
+  echo -e "  ${CYAN}devloop hooks${RESET}"
+  echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)\n"
+  echo -e "  ${CYAN}devloop logs [pipeline|notifications|sessions]${RESET}"
+  echo -e "    View DevLoop pipeline, notification, or session logs\n"
+  echo -e "  ${CYAN}devloop doctor${RESET}"
+  echo -e "    Validate all DevLoop dependencies and configuration\n"
+  echo -e "  ${CYAN}devloop ci${RESET}"
+  echo -e "    Generate .github/workflows/devloop-review.yml for CI-triggered review\n"
   echo -e "  ${CYAN}devloop update${RESET}"
   echo -e "    Self-upgrade devloop (requires DEVLOOP_SOURCE_URL in devloop.config.sh)\n"
   echo -e "${BOLD}SETUP (one-time)${RESET}\n"
@@ -1651,11 +2329,17 @@ cmd_help() {
   echo -e "  ${GRAY}# In each project:${RESET}"
   echo -e "  ${CYAN}cd your-project/${RESET}"
   echo -e "  ${CYAN}devloop init${RESET}"
+  echo -e "  ${CYAN}devloop hooks${RESET}  ${GRAY}← install pipeline hooks${RESET}"
   echo -e "  ${CYAN}devloop start${RESET}  ${GRAY}← connect from mobile/browser${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
   echo -e "  ${CYAN}claude${RESET}   Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
   echo -e "  ${CYAN}copilot${RESET}  Copilot CLI        ${GRAY}gh extension install github/gh-copilot${RESET}"
+  echo -e "  ${CYAN}gh${RESET}       GitHub CLI         ${GRAY}brew install gh  (required for github-agent mode)${RESET}"
   echo -e "  ${CYAN}git${RESET}      Git\n"
+  echo -e "${BOLD}WORKER MODES${RESET}\n"
+  echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
+  echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"
+  echo -e "  Set ${CYAN}DEVLOOP_WORKER_MODE${RESET} in devloop.config.sh\n"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1685,6 +2369,12 @@ main() {
     open|o)       cmd_open      "$@" ;;
     block|b)      cmd_block     "$@" ;;
     clean)        cmd_clean     "$@" ;;
+    learn)        cmd_learn     "$@" ;;
+    check)        cmd_check     "$@" ;;
+    hooks)        cmd_hooks     "$@" ;;
+    logs)         cmd_logs      "$@" ;;
+    doctor)       cmd_doctor    "$@" ;;
+    ci)           cmd_ci        "$@" ;;
     update)       cmd_update    "$@" ;;
     help)         cmd_help ;;
     *)

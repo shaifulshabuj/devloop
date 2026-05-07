@@ -48,6 +48,7 @@ Detailed Mermaid diagrams covering every aspect of the pipeline, file lifecycle,
 |------|---------|
 | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `copilot` | `gh extension install github/gh-copilot` |
+| `gh` | `brew install gh` (required for `github-agent` mode) |
 | `git` | https://git-scm.com |
 
 ---
@@ -247,9 +248,21 @@ devloop work TASK-20260504-093022
 ```
 
 - Validates spec completeness before launching (checks for `## Copilot Instructions Block` section)
-- Records a **git baseline** (current HEAD) to `.devloop/specs/TASK-ID.pre-commit` so `devloop review` can diff exactly what Copilot changed
+- Records a **git baseline** (current HEAD) to `.devloop/specs/TASK-ID.pre-commit` so `devloop review` can diff exactly what changed
 - Prepends **live runtime context** (stack, patterns, conventions, test framework) from `devloop.config.sh` — always up to date even on re-runs
 - Prints the runtime context to terminal for visibility
+- In `github-agent` mode, creates a GitHub Issue and waits for the Copilot coding agent to open a PR
+
+#### Worker modes
+
+Set `DEVLOOP_WORKER_MODE` in `devloop.config.sh`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `cli` (default) | Runs the worker provider as a local CLI process |
+| `github-agent` | Creates a GitHub Issue with the spec; Copilot coding agent works on it and opens a PR automatically |
+
+`github-agent` mode requires `gh` CLI authenticated with repo write access and a `copilot` label in the repository. Run `devloop init` after setting this mode to generate `copilot-setup-steps.yml`.
 
 ---
 
@@ -348,6 +361,84 @@ Also removes associated files per task: review `.md`, `.pre-commit` baseline, an
 
 ---
 
+### `devloop learn [TASK-ID]`
+Extracts lessons from the latest review cycle and appends them to `CLAUDE.md` under `## Learned Patterns`. This is the self-improvement mechanism — Claude reads these patterns in future sessions.
+
+```bash
+devloop learn                       # extract lessons from latest task
+devloop learn TASK-20260504-093022
+```
+
+---
+
+### `devloop check`
+Checks for a newer version of DevLoop against the manifest URL.
+
+```bash
+devloop check
+
+# Set the manifest URL in devloop.config.sh:
+DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/you/devloop/main/VERSION"
+```
+
+The manifest is a plain text file with a semver string on the first line (e.g., `3.0.0`). `devloop start` also performs a silent background check and shows a hint if an update is available.
+
+---
+
+### `devloop hooks`
+Installs Claude Code pipeline hooks into `.claude/settings.json` and `.claude/hooks/`. These hooks provide visibility into Claude's activity without polling.
+
+```bash
+devloop hooks
+```
+
+**Hooks installed:**
+
+| Event | Script | What it does |
+|-------|--------|--------------|
+| `Stop` | `devloop-stop.sh` | Logs task summary when Claude finishes |
+| `SubagentStop` | `devloop-subagent-stop.sh` | Records which subagent completed and keywords from its verdict |
+| `Notification` | `devloop-notification.sh` | Saves all Claude notifications to `.devloop/notifications.log` |
+| `SessionStart` / `SessionEnd` | `devloop-session.sh` | Records session boundaries to `.devloop/sessions.log` |
+
+After installing, use `devloop logs` to view the collected data.
+
+---
+
+### `devloop logs [TYPE]`
+Views DevLoop pipeline logs.
+
+```bash
+devloop logs                        # show pipeline log
+devloop logs pipeline               # same
+devloop logs notifications          # notification log
+devloop logs sessions               # session boundaries log
+```
+
+---
+
+### `devloop doctor`
+Validates that all DevLoop dependencies and configuration are healthy before starting.
+
+```bash
+devloop doctor
+```
+
+Checks: `claude` auth, `copilot` auth, `gh` auth, git config, agent files, `devloop.config.sh`, version currency.
+
+---
+
+### `devloop ci`
+Generates `.github/workflows/devloop-review.yml` — a GitHub Actions workflow that triggers Claude to review PRs automatically.
+
+```bash
+devloop ci
+```
+
+Requires `ANTHROPIC_API_KEY` secret in the GitHub repository. The workflow runs `devloop review` on every pull request using the `anthropics/claude-code-action` integration.
+
+---
+
 ### `devloop update`
 Self-upgrades devloop by downloading from `DEVLOOP_SOURCE_URL`.
 
@@ -398,9 +489,18 @@ devloop daemon            # start once, close terminal
 your-project/
 ├── devloop.config.sh                        ← edit this with your stack
 ├── CLAUDE.md                                ← Claude Code persistent context
+├── copilot-setup-steps.yml                  ← Copilot agent environment setup (github-agent mode)
 ├── .github/
-│   └── copilot-instructions.md              ← Copilot persistent context (stack + commit format)
+│   ├── copilot-instructions.md              ← Copilot persistent context (stack + commit format)
+│   └── workflows/
+│       └── devloop-review.yml               ← CI review workflow (generated by devloop ci)
 ├── .claude/
+│   ├── settings.json                        ← Claude hooks config (generated by devloop hooks)
+│   ├── hooks/                               ← Pipeline hook scripts
+│   │   ├── devloop-stop.sh
+│   │   ├── devloop-subagent-stop.sh
+│   │   ├── devloop-notification.sh
+│   │   └── devloop-session.sh
 │   └── agents/
 │       ├── devloop-orchestrator.md          ← main agent (written by init)
 │       ├── devloop-architect.md             ← subagent (written by init)
@@ -408,6 +508,9 @@ your-project/
 └── .devloop/
     ├── daemon.pid                           ← daemon process ID
     ├── daemon.log                           ← restart history + events
+    ├── pipeline.log                         ← hook-captured pipeline events
+    ├── notifications.log                    ← Claude notifications
+    ├── sessions.log                         ← session start/end boundaries
     ├── specs/
     │   ├── TASK-20260504-093022.md          ← full spec
     │   ├── TASK-20260504-093022.pre-commit  ← git baseline for review diff

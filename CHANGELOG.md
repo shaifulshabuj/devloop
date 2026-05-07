@@ -5,6 +5,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.0.0] — 2026-05-08
+
+### Added
+
+**Self-improvement: `devloop learn` command**
+- Extracts lessons from review cycles and appends them to `CLAUDE.md` under `## Learned Patterns`
+- Claude reads these patterns in future sessions, making the pipeline progressively smarter
+- CLAUDE.md template updated with `## Learned Patterns` section placeholder
+
+**Version awareness: `devloop check` command + auto hint**
+- `devloop check` — checks manifest URL for newer version and prints update instructions
+- `devloop start` runs a silent background version check; shows a hint on the next start if an update is available
+- New config: `DEVLOOP_VERSION_URL` pointing to a plain-text semver manifest file
+
+**Claude Code hooks: `devloop hooks` command**
+- Generates `.claude/settings.json` registering all 4 pipeline hook events
+- Writes 4 executable hook scripts to `.claude/hooks/`:
+  - `devloop-stop.sh` — logs task summary on `Stop` event
+  - `devloop-subagent-stop.sh` — records subagent completion and verdict keywords
+  - `devloop-notification.sh` — saves Claude notifications to `.devloop/notifications.log`
+  - `devloop-session.sh` — records session start/end to `.devloop/sessions.log`
+- Orchestrator agent updated with mobile push notification guidance
+
+**Pipeline log viewer: `devloop logs` command**
+- Views pipeline, notification, and session logs collected by hooks
+- Usage: `devloop logs [pipeline|notifications|sessions]`
+
+**Health check: `devloop doctor` command**
+- Validates all DevLoop dependencies: `claude` auth, `copilot` auth, `gh` auth, git config, agent files, config validity, version currency
+- Prints ✔/✖ for each check with actionable fix hints
+
+**GitHub Actions integration: `devloop ci` command**
+- Generates `.github/workflows/devloop-review.yml` for CI-triggered PR review
+- Uses `anthropics/claude-code-action` — requires `ANTHROPIC_API_KEY` secret in repo
+
+**Copilot coding agent: `github-agent` worker mode**
+- New `DEVLOOP_WORKER_MODE` config: `cli` (default) or `github-agent`
+- In `github-agent` mode, `devloop work` creates a GitHub Issue with the spec, waits for Copilot's cloud agent to open a PR
+- `devloop init` generates `copilot-setup-steps.yml` when `DEVLOOP_WORKER_MODE=github-agent`
+- New config: `DEVLOOP_VERSION_URL` for update checking
+
+### Changed
+
+- `devloop.config.sh` template updated with `DEVLOOP_WORKER_MODE` and `DEVLOOP_VERSION_URL` defaults
+- `CLAUDE.md` template updated with cleaner system section and `## Learned Patterns` placeholder
+- `cmd_help` updated with all new commands and worker mode documentation
+- `README.md` updated with all new commands, worker modes, and expanded file structure
+- `devloop init` next-steps guidance updated to include `devloop hooks`
+
+---
+
 ## [2.1.0] — 2026-05-07
 
 ### Added
