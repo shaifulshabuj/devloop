@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -39,6 +39,8 @@ CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
 GRAY='\033[0;90m'
 BOLD='\033[1m'
 RESET='\033[0m'
@@ -552,6 +554,27 @@ cmd_doctor() {
   # Hooks
   ok="false"; [[ -f "$root/.claude/settings.json" ]] && grep -q 'devloop-stop' "$root/.claude/settings.json" 2>/dev/null && ok="true"
   _chk "Claude hooks installed (.claude/settings.json)" "$ok" "devloop hooks"
+
+  # Tools
+  echo -e "\n  ${BOLD}Tools${RESET}"
+  local project_mcp_count=0
+  [[ -f "$root/.mcp.json" ]] && project_mcp_count="$(python3 -c "import json; d=json.load(open('$root/.mcp.json')); print(len(d.get('mcpServers',{})))" 2>/dev/null || echo 0)"
+  local global_mcp_count=0
+  [[ -f "$HOME/.claude.json" ]] && global_mcp_count="$(python3 -c "import json; d=json.load(open('$HOME/.claude.json')); print(len(d.get('mcpServers',{})))" 2>/dev/null || echo 0)"
+  echo -e "  ${GRAY}—${RESET}  MCP servers: ${CYAN}$global_mcp_count${RESET} global  /  ${CYAN}$project_mcp_count${RESET} project"
+
+  local vscode_mcp_count=0
+  [[ -f "$root/.vscode/mcp.json" ]] && vscode_mcp_count="$(python3 -c "import json; d=json.load(open('$root/.vscode/mcp.json')); print(len(d.get('servers',{})))" 2>/dev/null || echo 0)"
+  echo -e "  ${GRAY}—${RESET}  VS Code MCP servers (.vscode/mcp.json): ${CYAN}$vscode_mcp_count${RESET}"
+
+  local skill_count=0
+  [[ -d "$root/.claude/skills" ]] && skill_count="$(ls -1 "$root/.claude/skills" 2>/dev/null | wc -l | tr -d ' ')"
+  echo -e "  ${GRAY}—${RESET}  Project skills (.claude/skills/): ${CYAN}$skill_count${RESET}"
+
+  local path_instr_count=0
+  [[ -d "$root/.github/instructions" ]] && path_instr_count="$(ls -1 "$root/.github/instructions/"*.instructions.md 2>/dev/null | wc -l | tr -d ' ')"
+  echo -e "  ${GRAY}—${RESET}  Path-specific Copilot instructions: ${CYAN}$path_instr_count${RESET}"
+  echo -e "  ${GRAY}→  Run ${CYAN}devloop tools audit${GRAY} for full details | ${CYAN}devloop tools suggest${GRAY} for recommendations${RESET}"
 
   # Version check
   if [[ -n "${DEVLOOP_VERSION_URL:-}" ]]; then
@@ -1124,9 +1147,10 @@ CLAUDEMD
   echo -e "  1. Edit ${CYAN}devloop.config.sh${RESET} with your project stack"
   echo -e "  2. Re-run ${CYAN}devloop init${RESET} to apply stack to agent + copilot files"
   echo -e "  3. Run ${CYAN}devloop hooks${RESET} to install Claude pipeline hooks"
-  echo -e "  4. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
-  echo -e "  5. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
-  echo -e "  6. Send a feature request — the pipeline runs automatically"
+  echo -e "  4. Run ${CYAN}devloop tools suggest${RESET} for stack-specific MCP/skill recommendations"
+  echo -e "  5. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
+  echo -e "  6. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
+  echo -e "  7. Send a feature request — the pipeline runs automatically"
   echo ""
 }
 
@@ -2273,6 +2297,555 @@ cmd_update() {
   echo ""
 }
 
+# ── Tools / MCP / Skills Management ──────────────────────────────────────────
+
+_read_global_claude_mcp() {
+  local f="$HOME/.claude.json"
+  [[ -f "$f" ]] || return 0
+  python3 -c "
+import json
+try:
+    data = json.load(open('$f'))
+    for name in sorted(data.get('mcpServers', {}).keys()): print(name)
+except Exception: pass
+" 2>/dev/null
+}
+
+_read_project_claude_mcp() {
+  local f="$1/.mcp.json"
+  [[ -f "$f" ]] || return 0
+  python3 -c "
+import json
+try:
+    data = json.load(open('$f'))
+    for name in sorted(data.get('mcpServers', {}).keys()): print(name)
+except Exception: pass
+" 2>/dev/null
+}
+
+_read_project_vscode_mcp() {
+  local f="$1/.vscode/mcp.json"
+  [[ -f "$f" ]] || return 0
+  python3 -c "
+import json
+try:
+    data = json.load(open('$f'))
+    for name in sorted(data.get('servers', {}).keys()): print(name)
+except Exception: pass
+" 2>/dev/null
+}
+
+_read_global_claude_plugins() {
+  local f="$HOME/.claude/settings.json"
+  [[ -f "$f" ]] || return 0
+  python3 -c "
+import json
+try:
+    data = json.load(open('$f'))
+    for p in sorted(data.get('enabledPlugins', [])): print(p)
+except Exception: pass
+" 2>/dev/null
+}
+
+_read_global_claude_skills()  { local d="$HOME/.claude/skills"; [[ -d "$d" ]] && ls -1 "$d" 2>/dev/null | sort || true; }
+_read_project_claude_skills() { local d="$1/.claude/skills"; [[ -d "$d" ]] && ls -1 "$d" 2>/dev/null | sort || true; }
+
+_read_hooks_from_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  python3 -c "
+import json
+try:
+    data = json.load(open('$f'))
+    for event in sorted(data.get('hooks', {}).keys()): print(event)
+except Exception: pass
+" 2>/dev/null
+}
+_read_global_hooks()  { _read_hooks_from_file "$HOME/.claude/settings.json"; }
+_read_project_hooks() { _read_hooks_from_file "$1/.claude/settings.json"; }
+
+_suggest_tools_for_stack() {
+  local s; s="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  echo "$s" | grep -qiE "typescript|javascript|node" && \
+    echo "mcp:context7:Context7 — up-to-date library docs (npx -y @upstash/context7-mcp)"
+  echo "$s" | grep -qiE "python" && \
+    echo "mcp:context7:Context7 — library docs for Python (npx -y @upstash/context7-mcp)"
+  echo "$s" | grep -qiE "docker|container" && \
+    echo "mcp:docker:Docker MCP gateway (docker mcp gateway run)"
+  echo "$s" | grep -qiE "sentry" && \
+    echo "mcp:sentry:Sentry error tracking (HTTP: https://mcp.sentry.dev/mcp)"
+  echo "$s" | grep -qiE "linear" && \
+    echo "mcp:linear:Linear project management (npx mcp-remote https://mcp.linear.app/sse)"
+  echo "$s" | grep -qiE "github" && \
+    echo "mcp:github:GitHub MCP server (npx -y @modelcontextprotocol/server-github)"
+  echo "$s" | grep -qiE "postgres|mysql|sqlite|sql" && \
+    echo "mcp:database:SQLite MCP server (npx -y @modelcontextprotocol/server-sqlite)"
+  echo "$s" | grep -qiE "typescript|javascript" && \
+    echo "plugin:typescript-lsp:TypeScript language server plugin"
+  echo "$s" | grep -qiE "python" && \
+    echo "plugin:pyright-lsp:Pyright Python language server plugin"
+  echo "$s" | grep -qiE "rust" && \
+    echo "plugin:rust-analyzer-lsp:Rust Analyzer language server plugin"
+  echo "$s" | grep -qiE "golang" && \
+    echo "plugin:gopls-lsp:Go language server plugin"
+  echo "$s" | grep -qiE "csharp|dotnet" && \
+    echo "plugin:csharp-lsp:C# language server plugin"
+  echo "$s" | grep -qiE "github" && \
+    echo "plugin:github:GitHub integration plugin"
+  echo "$s" | grep -qiE "jira|atlassian" && \
+    echo "plugin:atlassian:Jira/Confluence integration plugin"
+  echo "$s" | grep -qiE "figma" && \
+    echo "plugin:figma:Figma design integration plugin"
+  echo "$s" | grep -qiE "playwright|testing|e2e" && \
+    echo "plugin:playwright:Playwright browser automation plugin"
+  echo "$s" | grep -qiE "postgres|mysql|sqlite|sql" && \
+    echo "skill:database-query:Skill for writing safe SQL queries and migrations"
+  echo "$s" | grep -qiE "typescript|javascript|python|rust|csharp" && \
+    echo "skill:code-review:Skill for thorough code reviews with security checks"
+  echo "$s" | grep -qiE "git|github" && \
+    echo "skill:commit-message:Skill for writing conventional commit messages"
+  echo "$s" | grep -qiE "typescript|javascript" && \
+    echo "instruction:tests:Path instruction for test files (glob: **/*.test.ts,**/*.spec.ts)"
+  echo "$s" | grep -qiE "python" && \
+    echo "instruction:tests:Path instruction for Python tests (glob: test_*.py)"
+  echo "$s" | grep -qiE "typescript|javascript|python|rust|csharp" && \
+    echo "instruction:docs:Path instruction for docs (glob: **/*.md,docs/**)"
+}
+
+_add_mcp_to_project() {
+  local root="$1" name="$2" cmd_str="$3"
+  shift 3
+  local args_json; args_json="$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" -- "$@")"
+  python3 - "$root/.mcp.json" "$name" "$cmd_str" "$args_json" << 'PYEOF'
+import json, os, sys
+path, name, command, args_json = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+args = json.loads(args_json)
+data = {}
+if os.path.exists(path):
+    try: data = json.load(open(path))
+    except Exception: data = {}
+data.setdefault('mcpServers', {})[name] = {'command': command, 'args': args}
+with open(path, 'w') as f: json.dump(data, f, indent=2); f.write('\n')
+PYEOF
+  mkdir -p "$root/.vscode"
+  python3 - "$root/.vscode/mcp.json" "$name" "$cmd_str" "$args_json" << 'PYEOF'
+import json, os, sys
+path, name, command, args_json = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+args = json.loads(args_json)
+data = {}
+if os.path.exists(path):
+    try: data = json.load(open(path))
+    except Exception: data = {}
+data.setdefault('servers', {})[name] = {'type': 'stdio', 'command': command, 'args': args}
+data.setdefault('inputs', [])
+with open(path, 'w') as f: json.dump(data, f, indent=2); f.write('\n')
+PYEOF
+}
+
+_scaffold_skill() {
+  local root="$1" name="$2" desc="${3:-A custom skill for this project}"
+  local f="$root/.claude/skills/$name/SKILL.md"
+  mkdir -p "$(dirname "$f")"
+  if [[ -f "$f" ]]; then warn "Skill already exists: $f"; return 0; fi
+  cat > "$f" << SKILL
+# Skill: $name
+
+$desc
+
+## When to use this skill
+
+<!-- Describe trigger conditions -->
+
+## Steps
+
+1.
+
+## Notes
+
+<!-- Caveats and edge cases -->
+SKILL
+  success "Created skill: $f"
+}
+
+_add_path_instruction() {
+  local root="$1" name="$2" glob_pattern="${3:-**/*.md}"
+  local dir="$root/.github/instructions"
+  mkdir -p "$dir"
+  local f="$dir/${name}.instructions.md"
+  if [[ -f "$f" ]]; then warn "Path instruction already exists: $f"; return 0; fi
+  cat > "$f" << INSTR
+---
+applyTo: "$glob_pattern"
+---
+
+# Instructions for: $name
+
+<!-- Instructions for files matching: $glob_pattern -->
+<!-- Applied in addition to .github/copilot-instructions.md -->
+INSTR
+  success "Created path instruction: $f"
+  info "Edit ${CYAN}$f${RESET} to add guidance for ${CYAN}$glob_pattern${RESET} files"
+}
+
+_merge_hook_to_project_settings() {
+  local root="$1" event="$2" matcher="${3:-.*}" script="$4"
+  python3 - "$root/.claude/settings.json" "$event" "$matcher" "$script" << 'PYEOF'
+import json, os, sys
+path, event, matcher, script = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+data = {}
+if os.path.exists(path):
+    try: data = json.load(open(path))
+    except Exception: data = {}
+data.setdefault('hooks', {}).setdefault(event, []).append(
+    {'matcher': matcher, 'hooks': [{'type': 'command', 'command': script}]}
+)
+with open(path, 'w') as f: json.dump(data, f, indent=2); f.write('\n')
+PYEOF
+}
+
+cmd_tools_audit() {
+  load_config
+  local root; root="$(find_project_root)"
+  step "🔍 DevLoop Tools Audit"
+  divider
+
+  echo -e "\n  ${BOLD}Claude MCP Servers${RESET}"
+  local g_mcps; g_mcps="$(_read_global_claude_mcp)"
+  local p_mcps; p_mcps="$(_read_project_claude_mcp "$root")"
+  local v_mcps; v_mcps="$(_read_project_vscode_mcp "$root")"
+
+  echo -e "    ${CYAN}Global (~/.claude.json):${RESET}"
+  if [[ -n "$g_mcps" ]]; then
+    echo "$g_mcps" | while IFS= read -r name; do
+      if echo "$p_mcps" | grep -qx "$name" 2>/dev/null; then
+        echo -e "      • $name ${GREEN}[in project ✔]${RESET}"
+      else
+        echo -e "      • $name ${YELLOW}[global only — run sync to copy]${RESET}"
+      fi
+    done
+  else
+    echo -e "      ${GRAY}(none)${RESET}"
+  fi
+
+  echo -e "    ${CYAN}Project (.mcp.json / Claude):${RESET}"
+  [[ -n "$p_mcps" ]] && echo "$p_mcps" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
+
+  echo -e "    ${CYAN}Project (.vscode/mcp.json / Copilot):${RESET}"
+  if [[ -n "$v_mcps" ]]; then
+    echo "$v_mcps" | sed 's/^/      • /'
+  else
+    echo -e "      ${GRAY}(none — run ${CYAN}devloop tools sync${GRAY} to populate)${RESET}"
+  fi
+
+  echo -e "\n  ${BOLD}Claude Skills${RESET}"
+  local g_skills; g_skills="$(_read_global_claude_skills)"
+  local p_skills; p_skills="$(_read_project_claude_skills "$root")"
+  echo -e "    ${CYAN}Global (~/.claude/skills/):${RESET}"
+  [[ -n "$g_skills" ]] && echo "$g_skills" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
+  echo -e "    ${CYAN}Project (.claude/skills/):${RESET}"
+  [[ -n "$p_skills" ]] && echo "$p_skills" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
+
+  echo -e "\n  ${BOLD}Claude Plugins (global)${RESET}"
+  local plugins; plugins="$(_read_global_claude_plugins)"
+  [[ -n "$plugins" ]] && echo "$plugins" | sed 's/^/    • /' || echo -e "    ${GRAY}(none installed)${RESET}"
+
+  echo -e "\n  ${BOLD}Claude Hooks${RESET}"
+  local g_h; g_h="$(_read_global_hooks | tr '\n' ' ')"
+  local p_h; p_h="$(_read_project_hooks "$root" | tr '\n' ' ')"
+  echo -e "    ${CYAN}Global events:${RESET}  ${g_h:-${GRAY}(none)}"
+  echo -e "    ${CYAN}Project events:${RESET} ${p_h:-${GRAY}(none)}"
+
+  echo -e "\n  ${BOLD}Copilot Instructions${RESET}"
+  local ci_status="${RED}missing — run devloop init${RESET}"
+  [[ -f "$root/.github/copilot-instructions.md" ]] && ci_status="${GREEN}present${RESET}"
+  echo -e "    ${CYAN}.github/copilot-instructions.md:${RESET} $ci_status"
+  local path_instrs; path_instrs="$(ls "$root/.github/instructions/"*.instructions.md 2>/dev/null || true)"
+  if [[ -n "$path_instrs" ]]; then
+    echo -e "    ${CYAN}Path-specific instructions:${RESET}"
+    echo "$path_instrs" | xargs -I{} basename {} | sed 's/^/      • /'
+  else
+    echo -e "    ${CYAN}Path-specific instructions:${RESET} ${GRAY}(none)${RESET}"
+  fi
+
+  divider
+  echo -e "\n  ${CYAN}devloop tools suggest${RESET} — stack-based recommendations"
+  echo -e "  ${CYAN}devloop tools sync${RESET}    — copy global tools to project\n"
+}
+
+cmd_tools_suggest() {
+  load_config
+  local root; root="$(find_project_root)"
+  step "💡 DevLoop Tools Suggestions"
+
+  local stack="${PROJECT_STACK:-}"
+  if [[ -z "$stack" ]]; then
+    warn "PROJECT_STACK not set in devloop.config.sh"
+    echo -e "  Example: ${CYAN}PROJECT_STACK=\"typescript github docker\"${RESET}\n"
+    return 0
+  fi
+
+  echo -e "  Stack: ${CYAN}$stack${RESET}\n"
+  divider
+
+  local suggestions; suggestions="$(_suggest_tools_for_stack "$stack")"
+  if [[ -z "$suggestions" ]]; then
+    echo -e "  ${GRAY}No suggestions for this stack. Try: typescript, python, docker, github, sentry${RESET}\n"
+    return 0
+  fi
+
+  echo -e "  ${BOLD}Recommended Tools:${RESET}\n"
+  local idx=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local t; t="$(echo "$line" | cut -d: -f1)"
+    local n; n="$(echo "$line" | cut -d: -f2)"
+    local d; d="$(echo "$line" | cut -d: -f3-)"
+    idx=$(( idx + 1 ))
+    local badge=""
+    case "$t" in
+      mcp)         badge="${BLUE}[MCP]       ${RESET}" ;;
+      plugin)      badge="${MAGENTA}[Plugin]    ${RESET}" ;;
+      skill)       badge="${GREEN}[Skill]     ${RESET}" ;;
+      instruction) badge="${CYAN}[Instruction]${RESET}" ;;
+    esac
+    echo -e "  $idx. $badge ${BOLD}$n${RESET}"
+    echo -e "       ${GRAY}$d${RESET}"
+  done <<< "$suggestions"
+
+  echo ""
+  divider
+  echo -e "\n  Run ${CYAN}devloop tools add${RESET} to install interactively\n"
+}
+
+cmd_tools_add() {
+  load_config
+  local root; root="$(find_project_root)"
+  local filter="${1:-}"
+
+  step "➕ DevLoop Tools Add"
+
+  case "$filter" in
+    --mcp|--skill|--instruction|--plugin)
+      shift 2>/dev/null || true
+      _tools_add_explicit "$root" "$filter" "$@"
+      return 0
+      ;;
+  esac
+
+  local stack="${PROJECT_STACK:-}"
+  local suggestions=""
+  [[ -n "$stack" ]] && suggestions="$(_suggest_tools_for_stack "$stack")"
+
+  if [[ -z "$suggestions" ]]; then
+    warn "No suggestions. Set PROJECT_STACK in devloop.config.sh or use explicit flags:"
+    echo -e "    ${CYAN}devloop tools add --mcp <name> <command> [args...]${RESET}"
+    echo -e "    ${CYAN}devloop tools add --skill <name> [description]${RESET}"
+    echo -e "    ${CYAN}devloop tools add --instruction <name> [glob]${RESET}"
+    echo ""
+    return 0
+  fi
+
+  local types=() names=() descs=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    types+=("$(echo "$line" | cut -d: -f1)")
+    names+=("$(echo "$line" | cut -d: -f2)")
+    descs+=("$(echo "$line" | cut -d: -f3-)")
+  done <<< "$suggestions"
+
+  echo -e "  ${BOLD}Select tools to install (comma-separated numbers or 'all'):${RESET}\n"
+  local i
+  for i in "${!names[@]}"; do
+    local badge=""
+    case "${types[$i]}" in
+      mcp)         badge="${BLUE}[MCP]       ${RESET}" ;;
+      plugin)      badge="${MAGENTA}[Plugin]    ${RESET}" ;;
+      skill)       badge="${GREEN}[Skill]     ${RESET}" ;;
+      instruction) badge="${CYAN}[Instruction]${RESET}" ;;
+    esac
+    echo -e "  $(( i + 1 )). $badge ${BOLD}${names[$i]}${RESET}"
+    echo -e "       ${GRAY}${descs[$i]}${RESET}"
+  done
+
+  echo ""
+  printf "  Enter selection [1-%d, all, q to quit]: " "${#names[@]}"
+  read -r selection
+  [[ "$selection" == "q" ]] && return 0
+
+  local selected=()
+  if [[ "$selection" == "all" ]]; then
+    for i in "${!names[@]}"; do selected+=("$i"); done
+  else
+    IFS=',' read -ra parts <<< "$selection"
+    for part in "${parts[@]}"; do
+      part="${part// /}"
+      if [[ "$part" =~ ^[0-9]+$ ]]; then
+        local idx=$(( part - 1 ))
+        (( idx >= 0 && idx < ${#names[@]} )) && selected+=("$idx")
+      fi
+    done
+  fi
+
+  [[ ${#selected[@]} -eq 0 ]] && { warn "No valid selection"; return 0; }
+
+  echo ""
+  for idx in "${selected[@]}"; do
+    local t="${types[$idx]}" n="${names[$idx]}" d="${descs[$idx]}"
+    case "$t" in
+      mcp)
+        step "Installing MCP: $n"
+        local mcp_cmd="" mcp_args=()
+        if echo "$d" | grep -q "(npx "; then
+          local fc; fc="$(echo "$d" | grep -oE '\(npx [^)]+\)' | tr -d '()')"
+          mcp_cmd="npx"; IFS=' ' read -ra _p <<< "$fc"; mcp_args=("${_p[@]:1}")
+        elif echo "$d" | grep -q "(docker "; then
+          local fc; fc="$(echo "$d" | grep -oE '\(docker [^)]+\)' | tr -d '()')"
+          mcp_cmd="docker"; IFS=' ' read -ra _p <<< "$fc"; mcp_args=("${_p[@]:1}")
+        elif echo "$d" | grep -q "HTTP:"; then
+          local url; url="$(echo "$d" | grep -oE 'https://[^ )]+' | head -1)"
+          mcp_cmd="npx"; mcp_args=("mcp-remote" "$url")
+          info "HTTP MCP proxied via npx mcp-remote"
+        else
+          warn "Cannot auto-detect command for '$n' — use: devloop tools add --mcp $n <command>"; continue
+        fi
+        _add_mcp_to_project "$root" "$n" "$mcp_cmd" "${mcp_args[@]}"
+        success "Added MCP '$n' to .mcp.json + .vscode/mcp.json"
+        ;;
+      plugin)
+        step "Plugin: $n"
+        warn "Plugins require an interactive Claude session:"
+        echo -e "    ${CYAN}claude plugin install $n@claude-plugins-official${RESET}"
+        ;;
+      skill)
+        step "Creating skill: $n"
+        _scaffold_skill "$root" "$n" "$d"
+        ;;
+      instruction)
+        step "Creating path instruction: $n"
+        local glob="**/*.md"
+        case "$n" in
+          tests)
+            local sl; sl="$(echo "${stack:-}" | tr '[:upper:]' '[:lower:]')"
+            echo "$sl" | grep -qiE "python" && glob="test_*.py,*_test.py" || glob="**/*.test.ts,**/*.spec.ts"
+            ;;
+          docs) glob="**/*.md,**/*.mdx,docs/**" ;;
+        esac
+        _add_path_instruction "$root" "$n" "$glob"
+        ;;
+    esac
+  done
+
+  echo ""
+  success "Done. Run ${CYAN}devloop tools audit${RESET} to review."
+  echo ""
+}
+
+_tools_add_explicit() {
+  local root="$1" flag="$2"
+  shift 2
+  case "$flag" in
+    --mcp)
+      local name="${1:-}" cmd_str="${2:-}"
+      [[ -z "$name" || -z "$cmd_str" ]] && { warn "Usage: devloop tools add --mcp <name> <command> [args...]"; return 1; }
+      shift 2
+      _add_mcp_to_project "$root" "$name" "$cmd_str" "$@"
+      success "Added MCP '$name' to .mcp.json + .vscode/mcp.json"
+      ;;
+    --skill)
+      local name="${1:-}" desc="${2:-A custom skill for this project}"
+      [[ -z "$name" ]] && { warn "Usage: devloop tools add --skill <name> [description]"; return 1; }
+      _scaffold_skill "$root" "$name" "$desc"
+      ;;
+    --instruction)
+      local name="${1:-}" glob="${2:-**/*.md}"
+      [[ -z "$name" ]] && { warn "Usage: devloop tools add --instruction <name> [glob]"; return 1; }
+      _add_path_instruction "$root" "$name" "$glob"
+      ;;
+    --plugin)
+      local name="${1:-}"
+      [[ -z "$name" ]] && { warn "Usage: devloop tools add --plugin <name>"; return 1; }
+      warn "Plugins require an interactive Claude session:"
+      echo -e "  ${CYAN}claude plugin install $name@claude-plugins-official${RESET}"
+      ;;
+  esac
+}
+
+cmd_tools_sync() {
+  load_config
+  local root; root="$(find_project_root)"
+  step "🔄 DevLoop Tools Sync (global → project)"
+  divider
+
+  echo -e "\n  ${BOLD}MCP Servers${RESET}"
+  local g_mcps; g_mcps="$(_read_global_claude_mcp)"
+  local p_mcps; p_mcps="$(_read_project_claude_mcp "$root")"
+
+  if [[ -z "$g_mcps" ]]; then
+    echo -e "    ${GRAY}No global MCP servers found${RESET}"
+  else
+    while IFS= read -r name; do
+      [[ -z "$name" ]] && continue
+      if echo "$p_mcps" | grep -qx "$name" 2>/dev/null; then
+        echo -e "    ${GREEN}✔${RESET}  $name ${GRAY}(already in project)${RESET}"
+        continue
+      fi
+      printf "  Copy global MCP '%s' to project? [y/N] " "$name"
+      read -r ans
+      if [[ "$ans" =~ ^[Yy] ]]; then
+        local srv_cmd srv_args_str
+        srv_cmd="$(python3 -c "import json; d=json.load(open('$HOME/.claude.json')); print(d.get('mcpServers',{}).get('$name',{}).get('command',''))" 2>/dev/null)"
+        srv_args_str="$(python3 -c "import json; d=json.load(open('$HOME/.claude.json')); print(' '.join(d.get('mcpServers',{}).get('$name',{}).get('args',[])))" 2>/dev/null)"
+        IFS=' ' read -ra srv_args <<< "$srv_args_str"
+        _add_mcp_to_project "$root" "$name" "$srv_cmd" "${srv_args[@]}"
+        echo -e "    ${GREEN}✔${RESET}  $name copied to .mcp.json + .vscode/mcp.json"
+      fi
+    done <<< "$g_mcps"
+  fi
+
+  echo -e "\n  ${BOLD}Skills${RESET}"
+  local g_skills; g_skills="$(_read_global_claude_skills)"
+  local p_skills; p_skills="$(_read_project_claude_skills "$root")"
+
+  if [[ -z "$g_skills" ]]; then
+    echo -e "    ${GRAY}No global skills found (~/.claude/skills/)${RESET}"
+  else
+    while IFS= read -r skill; do
+      [[ -z "$skill" ]] && continue
+      if echo "$p_skills" | grep -qx "$skill" 2>/dev/null; then
+        echo -e "    ${GREEN}✔${RESET}  $skill ${GRAY}(already in project)${RESET}"
+        continue
+      fi
+      printf "  Copy global skill '%s' to project? [y/N] " "$skill"
+      read -r ans
+      if [[ "$ans" =~ ^[Yy] ]]; then
+        local dst="$root/.claude/skills/$skill"
+        mkdir -p "$dst"
+        cp -r "$HOME/.claude/skills/$skill/." "$dst/"
+        echo -e "    ${GREEN}✔${RESET}  $skill copied"
+      fi
+    done <<< "$g_skills"
+  fi
+
+  divider
+  echo -e "\n  Run ${CYAN}devloop tools audit${RESET} to see the updated state\n"
+}
+
+cmd_tools() {
+  local subcmd="${1:-audit}"
+  shift 2>/dev/null || true
+  case "$subcmd" in
+    audit)   cmd_tools_audit   "$@" ;;
+    suggest) cmd_tools_suggest "$@" ;;
+    add)     cmd_tools_add     "$@" ;;
+    sync)    cmd_tools_sync    "$@" ;;
+    *)
+      error "Unknown tools subcommand: $subcmd"
+      echo -e "  Usage: ${CYAN}devloop tools [audit|suggest|add|sync]${RESET}"
+      exit 1
+      ;;
+  esac
+}
+
 # ── cmd: help ─────────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -2320,6 +2893,12 @@ cmd_help() {
   echo -e "    Validate all DevLoop dependencies and configuration\n"
   echo -e "  ${CYAN}devloop ci${RESET}"
   echo -e "    Generate .github/workflows/devloop-review.yml for CI-triggered review\n"
+  echo -e "  ${CYAN}devloop tools [audit|suggest|add|sync]${RESET}"
+  echo -e "    Manage MCP servers, skills, plugins, and path instructions"
+  echo -e "    ${GRAY}audit${RESET}   — show global vs project tool inventory"
+  echo -e "    ${GRAY}suggest${RESET} — stack-based tool recommendations"
+  echo -e "    ${GRAY}add${RESET}     — interactive install (or: --mcp --skill --instruction --plugin)"
+  echo -e "    ${GRAY}sync${RESET}    — copy global tools to project level\n"
   echo -e "  ${CYAN}devloop update${RESET}"
   echo -e "    Self-upgrade devloop (requires DEVLOOP_SOURCE_URL in devloop.config.sh)\n"
   echo -e "${BOLD}SETUP (one-time)${RESET}\n"
@@ -2329,8 +2908,9 @@ cmd_help() {
   echo -e "  ${GRAY}# In each project:${RESET}"
   echo -e "  ${CYAN}cd your-project/${RESET}"
   echo -e "  ${CYAN}devloop init${RESET}"
-  echo -e "  ${CYAN}devloop hooks${RESET}  ${GRAY}← install pipeline hooks${RESET}"
-  echo -e "  ${CYAN}devloop start${RESET}  ${GRAY}← connect from mobile/browser${RESET}\n"
+  echo -e "  ${CYAN}devloop hooks${RESET}           ${GRAY}← install pipeline hooks${RESET}"
+  echo -e "  ${CYAN}devloop tools suggest${RESET}   ${GRAY}← discover stack-specific tools${RESET}"
+  echo -e "  ${CYAN}devloop start${RESET}           ${GRAY}← connect from mobile/browser${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
   echo -e "  ${CYAN}claude${RESET}   Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
   echo -e "  ${CYAN}copilot${RESET}  Copilot CLI        ${GRAY}gh extension install github/gh-copilot${RESET}"
@@ -2375,6 +2955,7 @@ main() {
     logs)         cmd_logs      "$@" ;;
     doctor)       cmd_doctor    "$@" ;;
     ci)           cmd_ci        "$@" ;;
+    tools)        cmd_tools     "$@" ;;
     update)       cmd_update    "$@" ;;
     help)         cmd_help ;;
     *)

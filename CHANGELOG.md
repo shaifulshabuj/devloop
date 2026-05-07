@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.1.0] — Tools, Skills & MCP Management
+
+### Added
+
+**`devloop tools` command family — project-level tooling management**
+
+- `devloop tools audit` — full inventory: global vs project MCP servers, skills, plugins, hooks, and Copilot instructions. Shows gaps and sync status at a glance.
+- `devloop tools suggest` — reads `PROJECT_STACK` from `devloop.config.sh` and recommends MCP servers, Claude plugins, skills, and Copilot path instructions tailored to the stack.
+- `devloop tools add` — interactive numbered picker; installs selected tools. Also supports non-interactive flags: `--mcp`, `--skill`, `--instruction`, `--plugin`.
+- `devloop tools sync` — prompts to copy global MCP servers (`~/.claude.json`) and skills (`~/.claude/skills/`) to project level per item.
+
+**Dual MCP config writing (Claude + Copilot)**
+- `_add_mcp_to_project()` writes MCP servers to **both** `.mcp.json` (Claude; `mcpServers` key) and `.vscode/mcp.json` (Copilot/VS Code; `servers` key with `type: stdio`) in one call, auto-translating schemas.
+
+**Claude skill scaffolding**
+- `_scaffold_skill()` creates `.claude/skills/<name>/SKILL.md` with a structured template.
+
+**Copilot path-specific instructions**
+- `_add_path_instruction()` creates `.github/instructions/<name>.instructions.md` with YAML frontmatter `applyTo` glob, which Copilot applies in addition to the repo-wide instructions.
+
+**`cmd_doctor` tools section**
+- Reports MCP server count (global / project), VS Code MCP count, skill count, and path instruction count. Links to `devloop tools audit` and `devloop tools suggest`.
+
+**Colors**
+- Added `BLUE` and `MAGENTA` ANSI variables for tool-type badges in suggest/add output.
+
+### Changed
+- `devloop init` next-steps now includes step 4: "Run `devloop tools suggest` for stack-specific tool recommendations."
+- VERSION bumped to `3.1.0`.
+
+---
+
 ## [3.0.0] — 2026-05-08
 
 ### Added
