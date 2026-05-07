@@ -1,6 +1,6 @@
 ---
-created_at: 2026-05-07T10:20:08.894Z
-updated_at: 2026-05-07T10:20:08.894Z
+created_at: 2026-05-07T10:22:48.795Z
+updated_at: 2026-05-07T10:22:48.795Z
 sources: ["tools-management"]
 tags: ["concept"]
 inbound_links: ["source_tools_management"]
