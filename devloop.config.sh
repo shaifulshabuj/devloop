@@ -6,6 +6,13 @@ PROJECT_PATTERNS="Command-dispatch pattern (cmd_* functions), embedded agent def
 PROJECT_CONVENTIONS="set -euo pipefail throughout, color output via ANSI escape helpers (info/success/warn/error/step), absolute paths via find_project_root(), source config before use, no external deps beyond claude/copilot/git"
 TEST_FRAMEWORK="none"
 
-# Model for architect/reviewer calls via claude -p
+# Provider routing
+# main = orchestrator / architect / reviewer
+# worker = work / fix
+# Valid values: claude, copilot
+DEVLOOP_MAIN_PROVIDER="claude"
+DEVLOOP_WORKER_PROVIDER="copilot"
+
+# Model for claude -p calls when a role uses Claude
 # "sonnet" = faster/cheaper, "opus" = more capable
 CLAUDE_MODEL="sonnet"

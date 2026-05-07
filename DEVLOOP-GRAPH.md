@@ -1,5 +1,7 @@
 # DevLoop — Usage & Data Flow Graphs
 
+Provider routing is configurable in `devloop.config.sh`: the launcher stays Claude in v1, while the main roles and worker roles can be routed to Claude or Copilot.
+
 ---
 
 ## 1. Full Pipeline — End to End

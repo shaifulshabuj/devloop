@@ -1,19 +1,19 @@
 # 🔁 DevLoop
 
-**Claude Code (Architect + Reviewer) + GitHub Copilot CLI (Worker) — remote-controllable dev pipeline**
+**Claude Code + GitHub Copilot CLI — configurable remote-controllable dev pipeline**
 
-A single shell script that wires Claude Code and Copilot CLI into a fully automated development loop. Design specs, implement features, and review code — all from your phone or browser while everything runs on your Mac.
+A single shell script that wires Claude Code and Copilot CLI into a fully automated development loop. You can route the main roles and worker roles to Claude, Copilot, or a mix, while the v1 launcher stays Claude remote-control.
 
 ```
 You (mobile / browser — remotely)
          ↓ "add order filtering by date range"
 Claude Code --remote-control (your Mac)
-         ↓
-  @devloop-architect  → designs precise implementation spec
-         ↓
-  copilot CLI         → implements with /plan mode (full spec)
-         ↓
-  @devloop-reviewer   → reviews git diff against spec
+          ↓
+  provider-selected main role → designs/spec-reviews/orchestrates
+          ↓
+  provider-selected worker   → implements with /plan mode (full spec)
+          ↓
+  provider-selected review    → reviews git diff against spec
          ↓
   APPROVED ✅  or  loop back for fixes ⚠️
 ```
@@ -30,11 +30,11 @@ Detailed Mermaid diagrams covering every aspect of the pipeline, file lifecycle,
 |---------|-------------|
 | 1. Full Pipeline | End-to-end flow from user request to APPROVED |
 | 2. Command Reference | Every command grouped by category with aliases |
-| 3. `devloop init` | All files created and CLAUDE_MODEL propagation |
+| 3. `devloop init` | All files created and provider/model propagation |
 | 4. File Lifecycle | All 4 files per task — who writes, reads, and deletes each |
 | 5. Git Baseline | How `.pre-commit` enables precise multi-commit diffs |
-| 6. `devloop work` prompt | Exact structure sent to Copilot |
-| 7. `devloop review` prompt | Diff computation, compact spec assembly, Claude prompt |
+| 6. `devloop work` prompt | Exact structure sent to the worker provider |
+| 7. `devloop review` prompt | Diff computation, compact spec assembly, main provider prompt |
 | 8. Daemon & Auto-restart | Background loop, backoff, launchd/systemd registration |
 | 9. Status State Machine | `pending → approved/needs_work/rejected` transitions |
 | 10. Agent Collaboration | Orchestrator ↔ Architect ↔ Reviewer ↔ Copilot roles |
@@ -97,7 +97,7 @@ devloop start
 
 # 4. From your phone, type:
 #    "add GET /orders endpoint with date range filter"
-#    → Claude designs spec, Copilot implements, Claude reviews — automatically
+#    → the configured providers design, implement, and review automatically
 ```
 
 ---
@@ -133,15 +133,29 @@ PROJECT_STACK="Python, Flask, PostgreSQL"
 PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"
 PROJECT_CONVENTIONS="type hints everywhere, custom exceptions, no magic strings"
 TEST_FRAMEWORK="pytest"
-CLAUDE_MODEL="sonnet"   # or "opus" for more capable architect/reviewer
+DEVLOOP_MAIN_PROVIDER="claude"   # or "copilot"
+DEVLOOP_WORKER_PROVIDER="copilot" # or "claude"
+CLAUDE_MODEL="sonnet"            # used when a role routes to Claude
 ```
 
-Agent `.md` files in `.claude/agents/` are regenerated automatically to stay in sync with `CLAUDE_MODEL` whenever you run `devloop init`.
+Agent `.md` files in `.claude/agents/` are regenerated automatically to stay in sync with the config whenever you run `devloop init`.
+
+### Provider routing
+
+| Mode | Main roles | Worker roles | Notes |
+|------|------------|--------------|-------|
+| Current | Claude | Copilot | default |
+| All Copilot | Copilot | Copilot | launcher still Claude in v1 |
+| All Claude | Claude | Claude | simplest uniform mode |
+| Mixed | Copilot | Claude | reverse of current |
+
+`devloop.config.sh` is the switch. Set `DEVLOOP_MAIN_PROVIDER` and `DEVLOOP_WORKER_PROVIDER` to the pair you want.
 
 ---
 
 ### `devloop start [project-name]`  · alias: `s`
 Launches Claude Code with remote control and the orchestrator agent.
+In v1 the launcher remains Claude; provider routing applies behind that session.
 
 - **Prevents Mac sleep** via `caffeinate -is` for the entire session duration
 - Sleep prevention is stopped automatically when you press Ctrl+C
@@ -205,7 +219,7 @@ devloop daemon stop   # done for the day
 ---
 
 ### `devloop architect "feature" [type] [files]`  · alias: `a`
-Claude designs a precise implementation spec for Copilot to follow.
+The configured main provider designs a precise implementation spec.
 
 ```bash
 devloop architect "add GET /orders endpoint with date range filter"
@@ -225,7 +239,7 @@ Types: `feature` (default) | `bugfix` | `refactor` | `test`
 ---
 
 ### `devloop work [TASK-ID]`  · alias: `w`
-Launches Copilot CLI with the **full task spec** pre-loaded in `/plan` mode.
+Launches the configured worker provider with the **full task spec** pre-loaded in `/plan` mode.
 
 ```bash
 devloop work                        # uses latest task
@@ -240,7 +254,7 @@ devloop work TASK-20260504-093022
 ---
 
 ### `devloop review [TASK-ID]`  · alias: `r`
-Claude reviews Copilot's implementation against the original spec using `git diff`.
+The configured main provider reviews the implementation against the original spec using `git diff`.
 
 ```bash
 devloop review
@@ -263,7 +277,7 @@ Review is saved to `.devloop/specs/TASK-ID-review.md` and the spec status is upd
 ---
 
 ### `devloop fix [TASK-ID]`  · alias: `f`
-Launches Copilot CLI with Claude's fix instructions from the latest review.
+Launches the configured worker provider with fix instructions from the latest review.
 
 ```bash
 devloop fix
@@ -406,19 +420,19 @@ your-project/
 
 ---
 
-## Agent Model Routing
+## Provider Routing
 
-Each agent uses a configurable model to balance quality and quota usage:
+Each role uses a configurable provider to balance cost and control:
 
-| Agent | Default Model | Reason |
-|-------|---------------|--------|
-| `devloop-orchestrator` | `sonnet` | Just coordination — no heavy reasoning needed |
-| `devloop-architect` | `CLAUDE_MODEL` | Complex spec design — worth the stronger model |
-| `devloop-reviewer` | `CLAUDE_MODEL` | Structured review output |
+| Role | Default Provider | Reason |
+|------|------------------|--------|
+| `main` | `claude` | current launcher and review/spec role |
+| `worker` | `copilot` | current implementation role |
 
-Set `CLAUDE_MODEL` in `devloop.config.sh`:
+Set providers in `devloop.config.sh`:
 ```bash
-CLAUDE_MODEL="opus"    # used by architect + reviewer; sonnet is the default
+DEVLOOP_MAIN_PROVIDER="claude"
+DEVLOOP_WORKER_PROVIDER="copilot"
 ```
 
 Agent `.md` files are regenerated on `devloop init` to stay in sync with this setting. Edit `.claude/agents/*.md` directly for per-agent overrides.
@@ -445,7 +459,7 @@ Agent `.md` files are regenerated on `devloop init` to stay in sync with this se
 ## Tips
 
 **Model cost control:**
-Use `CLAUDE_MODEL="sonnet"` in `devloop.config.sh` for routine features. Switch to `opus` only for complex architecture tasks.
+Use `CLAUDE_MODEL="sonnet"` in `devloop.config.sh` when a role routes to Claude. Switch to `opus` only for complex architecture tasks.
 
 **Multiple projects:**
 Each project gets its own daemon with its own launchd/systemd entry. Run `devloop daemon` in each project directory.

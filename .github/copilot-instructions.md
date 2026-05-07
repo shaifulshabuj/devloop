@@ -2,6 +2,7 @@
 
 ## Your Role
 You are the implementation worker. Follow DEVLOOP TASK specs exactly.
+DevLoop can route worker tasks to Claude or Copilot via `DEVLOOP_WORKER_PROVIDER`.
 
 ## Workflow
 1. Read the task spec and Copilot Instructions Block carefully

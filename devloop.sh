@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# devloop — Claude Code (Architect) + Copilot CLI (Worker) orchestration tool
+# devloop — Claude Code + Copilot CLI orchestration tool with provider routing
 #
 # Install globally:
 #   curl -fsSL https://raw.githubusercontent.com/you/devloop/main/devloop \
@@ -11,7 +11,7 @@
 #
 # Usage:
 #   devloop init                — set up a project (agents, CLAUDE.md, config)
-#   devloop start               — launch Claude with remote control + orchestrator agent
+#   devloop start               — launch Claude remote control + orchestrator agent
 #   devloop architect "feature"
 #   devloop work [TASK-ID]
 #   devloop review [TASK-ID]
@@ -78,6 +78,8 @@ load_config() {
   PROJECT_CONVENTIONS="Use async/await, handle all errors explicitly"
   TEST_FRAMEWORK="default"
   CLAUDE_MODEL="sonnet"
+  DEVLOOP_MAIN_PROVIDER="claude"
+  DEVLOOP_WORKER_PROVIDER="copilot"
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -111,6 +113,56 @@ latest_task() {
     || echo ""
 }
 
+normalize_provider() {
+  local provider="${1:-}"
+  provider="$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')"
+  case "$provider" in
+    claude|copilot) echo "$provider" ;;
+    *)
+      error "Invalid DevLoop provider: ${provider:-<empty>}"
+      error "Expected one of: claude, copilot"
+      exit 1
+      ;;
+  esac
+}
+
+provider_label() {
+  case "$1" in
+    claude) echo "Claude" ;;
+    copilot) echo "Copilot" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+main_provider() {
+  normalize_provider "${DEVLOOP_MAIN_PROVIDER:-claude}"
+}
+
+worker_provider() {
+  normalize_provider "${DEVLOOP_WORKER_PROVIDER:-copilot}"
+}
+
+run_provider_prompt() {
+  local provider="$1"
+  local prompt="$2"
+  local output_file="$3"
+
+  case "$provider" in
+    claude)
+      if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$output_file" 2>/dev/null; then
+        echo "$prompt" | claude -p > "$output_file"
+      fi
+      ;;
+    copilot)
+      echo "$prompt" | copilot > "$output_file"
+      ;;
+    *)
+      error "Unsupported provider: $provider"
+      exit 1
+      ;;
+  esac
+}
+
 # ── Embedded Agent Definitions ────────────────────────────────────────────────
 # Written to .claude/agents/ by `devloop init`
 
@@ -119,7 +171,7 @@ write_agent_orchestrator() {
   cat > "$AGENTS_PATH/devloop-orchestrator.md" <<'AGENT'
 ---
 name: devloop-orchestrator
-description: Main DevLoop orchestrator. Receives feature requests remotely and coordinates the architect and reviewer agents through the full build loop until approved. Use for all feature development, bugfixes, and refactoring.
+description: Main DevLoop orchestrator. Receives feature requests remotely and coordinates the architect and reviewer agents through the full build loop until approved. Provider routing can swap architect/reviewer/worker backends while Claude remains the remote-control launcher in v1.
 tools: Agent(devloop-architect, devloop-reviewer), Bash, Read, Write, TodoWrite
 model: sonnet
 color: cyan
@@ -132,7 +184,7 @@ You are the DevLoop Orchestrator — the main coordinator of a three-agent devel
 User (remote: mobile / browser)
   → You (orchestrator, main thread)
     → @devloop-architect (subagent: designs spec)
-    → Bash: devloop work  (Copilot CLI implements)
+    → Bash: devloop work  (provider-selected worker implements)
     → @devloop-reviewer   (subagent: reviews result)
     → loop until APPROVED
 ```
@@ -157,7 +209,7 @@ Mark "Architect spec" completed.
 
 **Step 3 — Implement**
 Mark "Copilot implement" in_progress.
-Tell the user: "📐 Spec ready. Launching Copilot to implement..."
+Tell the user: "📐 Spec ready. Launching the configured worker to implement..."
 Run:
 ```bash
 devloop work TASK-ID
@@ -348,7 +400,14 @@ PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"
 PROJECT_CONVENTIONS="async/await throughout, custom exception classes, no magic strings, XML doc comments on public APIs"
 TEST_FRAMEWORK="xUnit"
 
-# Model for architect/reviewer agent files and claude -p calls
+# Provider routing
+# main = orchestrator / architect / reviewer
+# worker = work / fix
+# Valid values: claude, copilot
+DEVLOOP_MAIN_PROVIDER="claude"
+DEVLOOP_WORKER_PROVIDER="copilot"
+
+# Model for claude -p calls when a role uses Claude
 # "sonnet" = faster/cheaper   "opus" = more capable
 CLAUDE_MODEL="sonnet"
 
@@ -370,6 +429,10 @@ This project uses the DevLoop multi-agent pipeline:
 - `devloop-architect`    — subagent, designs implementation specs
 - `devloop-reviewer`     — subagent, reviews Copilot's implementation
 - `copilot CLI`          — external worker, implements specs
+- Provider routing is controlled in `devloop.config.sh`:
+  - `DEVLOOP_MAIN_PROVIDER` for orchestrator / architect / reviewer
+  - `DEVLOOP_WORKER_PROVIDER` for work / fix
+- The current launcher stays Claude remote-control in v1.
 
 ## Start the system
 ```bash
@@ -432,6 +495,7 @@ _write_copilot_instructions() {
 ## Your Role
 You are the implementation worker in the DevLoop pipeline.
 Follow DEVLOOP TASK specs exactly — no improvisation on behaviour not specified in the spec.
+If `DEVLOOP_WORKER_PROVIDER` is set to `claude`, DevLoop will route worker tasks through Claude instead of Copilot.
 
 ## Project Stack
 - **Stack**: $PROJECT_STACK
@@ -527,6 +591,8 @@ cmd_start() {
   _verify_agents
 
   local project_name="${1:-$PROJECT_NAME}"
+  local main_backend; main_backend="$(main_provider)"
+  local worker_backend; worker_backend="$(worker_provider)"
 
   step "Starting DevLoop for: ${CYAN}$project_name${RESET}"
   divider
@@ -535,6 +601,7 @@ cmd_start() {
   echo -e "  ${CYAN}--remote-control${RESET}      accessible from mobile + browser"
   echo -e "  ${CYAN}--agent orchestrator${RESET}  main thread is the orchestrator"
   echo -e "  ${CYAN}caffeinate -is${RESET}        Mac stays awake while session runs"
+  echo -e "  ${CYAN}providers${RESET}             main=$(provider_label "$main_backend"), worker=$(provider_label "$worker_backend")"
   echo ""
   echo -e "${BOLD}Connect from:${RESET}"
   echo -e "  📱 Claude app → find ${CYAN}\"DevLoop: $project_name\"${RESET} with green dot"
@@ -879,8 +946,10 @@ cmd_architect() {
   local id
   id="$(task_id)"
   local spec_file="$SPECS_PATH/$id.md"
+  local provider
+  provider="$(main_provider)"
 
-  step "📐 Claude designing spec: ${BOLD}\"$feature\"${RESET}"
+  step "📐 $(provider_label "$provider") designing spec: ${BOLD}\"$feature\"${RESET}"
   divider
 
   local prompt
@@ -961,12 +1030,10 @@ FRAMEWORK: $TEST_FRAMEWORK
 PROMPT
 )"
 
-  info "Calling claude -p (print mode)..."
+  info "Calling ${provider} for spec generation..."
   echo ""
 
-  if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$spec_file" 2>/dev/null; then
-    echo "$prompt" | claude -p > "$spec_file"
-  fi
+  run_provider_prompt "$provider" "$prompt" "$spec_file"
 
   success "Spec saved: ${CYAN}$spec_file${RESET}"
   divider
@@ -1008,6 +1075,8 @@ cmd_work() {
 
   local spec_file="$SPECS_PATH/$id.md"
   [[ ! -f "$spec_file" ]] && { error "Spec not found: $id"; exit 1; }
+  local provider
+  provider="$(worker_provider)"
 
   # FIX #7: Validate spec completeness before handing to Copilot
   if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
@@ -1016,7 +1085,7 @@ cmd_work() {
     exit 1
   fi
 
-  step "🤖 Copilot implementing: ${BOLD}$id${RESET}"
+  step "🤖 $(provider_label "$provider") implementing: ${BOLD}$id${RESET}"
   divider
 
   # FIX #1: Record current HEAD so `devloop review` can diff exactly what
@@ -1036,13 +1105,15 @@ cmd_work() {
   local task_prompt
   task_prompt="$(cat "$spec_file")"
 
-  info "Launching Copilot CLI with /plan mode..."
+  info "Launching ${provider} CLI with task prompt..."
   echo ""
 
   # FIX #11: Prepend runtime stack context from current config so Copilot
   #          always has up-to-date conventions, even on re-runs.
   info "Runtime context → Stack: ${PROJECT_STACK} | Tests: ${TEST_FRAMEWORK}"
-  echo "/plan You are implementing a DevLoop task spec. Follow it exactly.
+  local launch_prompt
+  if [[ "$provider" == "claude" ]]; then
+    launch_prompt="You are implementing a DevLoop task spec. Follow it exactly.
 
 ## Runtime Project Context
 Stack: $PROJECT_STACK
@@ -1054,10 +1125,33 @@ Commit format: feat(TASK-ID): <one-line summary>
 ## Full Task Spec
 $task_prompt
 
-After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented." | copilot
+After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
+  else
+    launch_prompt="/plan You are implementing a DevLoop task spec. Follow it exactly.
+
+## Runtime Project Context
+Stack: $PROJECT_STACK
+Patterns: $PROJECT_PATTERNS
+Conventions: $PROJECT_CONVENTIONS
+Test framework: $TEST_FRAMEWORK
+Commit format: feat(TASK-ID): <one-line summary>
+
+## Full Task Spec
+$task_prompt
+
+After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
+  fi
+
+  if [[ "$provider" == "claude" ]]; then
+    if ! echo "$launch_prompt" | claude -p --model "$CLAUDE_MODEL"; then
+      echo "$launch_prompt" | claude -p
+    fi
+  else
+    echo "$launch_prompt" | copilot
+  fi
 
   echo ""
-  success "Copilot session ended"
+  success "$(provider_label "$provider") session ended"
   echo -e "  Run ${CYAN}devloop review $id${RESET} to review the implementation"
   echo ""
 }
@@ -1075,8 +1169,10 @@ cmd_review() {
 
   local spec_file="$SPECS_PATH/$id.md"
   [[ ! -f "$spec_file" ]] && { error "Spec not found: $id"; exit 1; }
+  local provider
+  provider="$(main_provider)"
 
-  step "🔍 Claude reviewing: ${BOLD}$id${RESET}"
+  step "🔍 $(provider_label "$provider") reviewing: ${BOLD}$id${RESET}"
   divider
 
   # FIX #1: Use the pre-commit baseline saved by `devloop work` so we see
@@ -1176,12 +1272,11 @@ cmd_review() {
   review_prompt="$(cat "$_rp")"
   rm -f "$_rp"
 
-  info "Calling claude -p for review..."
+  info "Calling ${provider} for review..."
   echo ""
 
   local review_file="$SPECS_PATH/$id-review.md"
-  echo "$review_prompt" | claude -p --model "$CLAUDE_MODEL" > "$review_file" 2>/dev/null \
-    || echo "$review_prompt" | claude -p > "$review_file"
+  run_provider_prompt "$provider" "$review_prompt" "$review_file"
   cat "$review_file"
 
   divider
@@ -1225,8 +1320,10 @@ cmd_fix() {
 
   local review_file="$SPECS_PATH/$id-review.md"
   [[ ! -f "$review_file" ]] && { error "No review found. Run: devloop review $id"; exit 1; }
+  local provider
+  provider="$(worker_provider)"
 
-  step "🔧 Copilot fixing: ${BOLD}$id${RESET}"
+  step "🔧 $(provider_label "$provider") fixing: ${BOLD}$id${RESET}"
   divider
 
   # FIX #2: Match ``` with or without language tag (same fix as cmd_architect)
@@ -1243,19 +1340,28 @@ cmd_fix() {
     info "Git baseline updated: ${GRAY}${base_hash:0:12}...${RESET}"
   fi
 
-  info "Launching Copilot CLI with Claude's fix instructions..."
+  info "Launching ${provider} CLI with Claude's fix instructions..."
   echo ""
 
-  echo "The following issues were identified in a code review. Fix each one exactly as described.
+  local fix_prompt
+  fix_prompt="The following issues were identified in a code review. Fix each one exactly as described.
 
 $fix_instructions
 
 Fix all CRITICAL and HIGH severity issues. After fixing, stage all changed files and commit:
 feat($id): fix review issues — <one-line summary of what was fixed>
-Summarize the changes made." | copilot
+Summarize the changes made."
+
+  if [[ "$provider" == "claude" ]]; then
+    if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL"; then
+      echo "$fix_prompt" | claude -p
+    fi
+  else
+    echo "$fix_prompt" | copilot
+  fi
 
   echo ""
-  success "Fix session ended"
+  success "$(provider_label "$provider") fix session ended"
   echo -e "  ${CYAN}devloop review $id${RESET}  ${GRAY}→ re-review after fixes${RESET}"
   echo ""
 }
