@@ -94,9 +94,25 @@ ensure_dirs() {
 
 check_deps() {
   local missing=()
-  command -v claude  &>/dev/null || missing+=("claude  → curl -fsSL https://claude.ai/install.sh | bash")
-  command -v copilot &>/dev/null || missing+=("copilot → gh extension install github/gh-copilot")
-  command -v git     &>/dev/null || missing+=("git     → https://git-scm.com")
+  # Always require git
+  command -v git &>/dev/null || missing+=("git     → https://git-scm.com")
+
+  # Require the configured providers (or defaults if config not loaded yet)
+  local main_p="${DEVLOOP_MAIN_PROVIDER:-claude}"
+  local worker_p="${DEVLOOP_WORKER_PROVIDER:-copilot}"
+
+  case "$main_p" in
+    claude)  command -v claude  &>/dev/null || missing+=("claude  → curl -fsSL https://claude.ai/install.sh | bash") ;;
+    copilot) command -v copilot &>/dev/null || missing+=("copilot → gh extension install github/gh-copilot") ;;
+  esac
+
+  case "$worker_p" in
+    claude)   command -v claude   &>/dev/null || missing+=("claude   → curl -fsSL https://claude.ai/install.sh | bash") ;;
+    copilot)  command -v copilot  &>/dev/null || missing+=("copilot  → gh extension install github/gh-copilot") ;;
+    opencode) command -v opencode &>/dev/null || missing+=("opencode → npm install -g opencode-ai  or  https://opencode.ai") ;;
+    pi)       command -v pi       &>/dev/null || missing+=("pi       → https://pi.dev/docs/latest") ;;
+  esac
+
   if [[ ${#missing[@]} -gt 0 ]]; then
     error "Missing required tools:"
     for m in "${missing[@]}"; do echo -e "    ${GRAY}$m${RESET}"; done
@@ -118,10 +134,16 @@ latest_task() {
 }
 
 normalize_provider() {
+  # Main-role providers only (support remote control / session piping)
   local provider="${1:-}"
   provider="$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')"
   case "$provider" in
     claude|copilot) echo "$provider" ;;
+    opencode|pi)
+      error "Provider '${provider}' is a worker-only provider (no remote control)."
+      error "Set DEVLOOP_MAIN_PROVIDER to: claude or copilot"
+      exit 1
+      ;;
     *)
       error "Invalid DevLoop provider: ${provider:-<empty>}"
       error "Expected one of: claude, copilot"
@@ -130,11 +152,27 @@ normalize_provider() {
   esac
 }
 
+normalize_worker_provider() {
+  # Worker-role providers (local CLI execution, no remote control required)
+  local provider="${1:-}"
+  provider="$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')"
+  case "$provider" in
+    claude|copilot|opencode|pi) echo "$provider" ;;
+    *)
+      error "Invalid DevLoop worker provider: ${provider:-<empty>}"
+      error "Expected one of: claude, copilot, opencode, pi"
+      exit 1
+      ;;
+  esac
+}
+
 provider_label() {
   case "$1" in
-    claude) echo "Claude" ;;
-    copilot) echo "Copilot" ;;
-    *) echo "$1" ;;
+    claude)    echo "Claude" ;;
+    copilot)   echo "Copilot" ;;
+    opencode)  echo "OpenCode" ;;
+    pi)        echo "Pi" ;;
+    *)         echo "$1" ;;
   esac
 }
 
@@ -143,7 +181,7 @@ main_provider() {
 }
 
 worker_provider() {
-  normalize_provider "${DEVLOOP_WORKER_PROVIDER:-copilot}"
+  normalize_worker_provider "${DEVLOOP_WORKER_PROVIDER:-copilot}"
 }
 
 # ── Version checking ──────────────────────────────────────────────────────────
@@ -531,6 +569,13 @@ cmd_doctor() {
   _chk "gh CLI installed"       "$ok" "https://cli.github.com"
   ok="false"; command -v git     &>/dev/null && ok="true"
   _chk "git installed"          "$ok" "https://git-scm.com"
+
+  # Optional worker CLIs
+  echo -e "\n  ${BOLD}Optional Worker Providers${RESET}"
+  ok="false"; command -v opencode &>/dev/null && ok="true"
+  _chk "opencode CLI (optional worker)" "$ok" "npm install -g opencode-ai  or  https://opencode.ai"
+  ok="false"; command -v pi &>/dev/null && ok="true"
+  _chk "pi CLI (optional worker)"       "$ok" "https://pi.dev/docs/latest"
 
   # Repo
   ok="false"; git rev-parse --git-dir &>/dev/null 2>&1 && ok="true"
@@ -1047,9 +1092,9 @@ PROJECT_CONVENTIONS="async/await throughout, custom exception classes, no magic 
 TEST_FRAMEWORK="xUnit"
 
 # Provider routing
-# main = orchestrator / architect / reviewer
-# worker = work / fix
-# Valid values: claude, copilot
+# main  = orchestrator / architect / reviewer (requires remote control: claude | copilot)
+# worker = work / fix (any CLI provider: claude | copilot | opencode | pi)
+# opencode and pi are worker-only — they have no remote-control support
 DEVLOOP_MAIN_PROVIDER="claude"
 DEVLOOP_WORKER_PROVIDER="copilot"
 
@@ -1802,8 +1847,9 @@ cmd_work() {
   #          always has up-to-date conventions, even on re-runs.
   info "Runtime context → Stack: ${PROJECT_STACK} | Tests: ${TEST_FRAMEWORK}"
   local launch_prompt
-  if [[ "$provider" == "claude" ]]; then
-    launch_prompt="You are implementing a DevLoop task spec. Follow it exactly.
+  case "$provider" in
+    claude)
+      launch_prompt="You are implementing a DevLoop task spec. Follow it exactly.
 
 ## Runtime Project Context
 Stack: $PROJECT_STACK
@@ -1816,8 +1862,9 @@ Commit format: feat(TASK-ID): <one-line summary>
 $task_prompt
 
 After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
-  else
-    launch_prompt="/plan You are implementing a DevLoop task spec. Follow it exactly.
+      ;;
+    opencode|pi)
+      launch_prompt="You are implementing a DevLoop task spec. Follow it exactly.
 
 ## Runtime Project Context
 Stack: $PROJECT_STACK
@@ -1830,15 +1877,45 @@ Commit format: feat(TASK-ID): <one-line summary>
 $task_prompt
 
 After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
-  fi
+      ;;
+    *)  # copilot and others
+      launch_prompt="/plan You are implementing a DevLoop task spec. Follow it exactly.
 
-  if [[ "$provider" == "claude" ]]; then
-    if ! echo "$launch_prompt" | claude -p --model "$CLAUDE_MODEL"; then
-      echo "$launch_prompt" | claude -p
-    fi
-  else
-    echo "$launch_prompt" | copilot
-  fi
+## Runtime Project Context
+Stack: $PROJECT_STACK
+Patterns: $PROJECT_PATTERNS
+Conventions: $PROJECT_CONVENTIONS
+Test framework: $TEST_FRAMEWORK
+Commit format: feat(TASK-ID): <one-line summary>
+
+## Full Task Spec
+$task_prompt
+
+After planning, implement all steps. Run tests if possible. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
+      ;;
+  esac
+
+  local tmp_spec
+  tmp_spec="$(mktemp /tmp/devloop_task_XXXXXX.md)"
+  echo "$launch_prompt" > "$tmp_spec"
+
+  case "$provider" in
+    claude)
+      if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL"; then
+        cat "$tmp_spec" | claude -p
+      fi
+      ;;
+    opencode)
+      opencode run --file "$tmp_spec" "Implement the DevLoop task spec in the attached file exactly as described. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
+      ;;
+    pi)
+      pi --mode json "$launch_prompt" 2>&1 | cat
+      ;;
+    *)  # copilot
+      cat "$tmp_spec" | copilot
+      ;;
+  esac
+  rm -f "$tmp_spec"
 
   echo ""
   success "$(provider_label "$provider") session ended"
@@ -2046,6 +2123,13 @@ Summarize the changes made."
     if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL"; then
       echo "$fix_prompt" | claude -p
     fi
+  elif [[ "$provider" == "opencode" ]]; then
+    local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
+    echo "$fix_prompt" > "$tmp_fix"
+    opencode run --file "$tmp_fix" "Fix the issues described in the attached file exactly. Stage all changed files and commit."
+    rm -f "$tmp_fix"
+  elif [[ "$provider" == "pi" ]]; then
+    pi --mode json "$fix_prompt" 2>&1 | cat
   else
     echo "$fix_prompt" | copilot
   fi
@@ -2912,10 +2996,21 @@ cmd_help() {
   echo -e "  ${CYAN}devloop tools suggest${RESET}   ${GRAY}← discover stack-specific tools${RESET}"
   echo -e "  ${CYAN}devloop start${RESET}           ${GRAY}← connect from mobile/browser${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
-  echo -e "  ${CYAN}claude${RESET}   Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
-  echo -e "  ${CYAN}copilot${RESET}  Copilot CLI        ${GRAY}gh extension install github/gh-copilot${RESET}"
-  echo -e "  ${CYAN}gh${RESET}       GitHub CLI         ${GRAY}brew install gh  (required for github-agent mode)${RESET}"
-  echo -e "  ${CYAN}git${RESET}      Git\n"
+  echo -e "  ${CYAN}claude${RESET}    Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
+  echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}gh extension install github/gh-copilot${RESET}"
+  echo -e "  ${CYAN}gh${RESET}        GitHub CLI         ${GRAY}brew install gh  (required for github-agent mode)${RESET}"
+  echo -e "  ${CYAN}git${RESET}       Git\n"
+  echo -e "${BOLD}PROVIDER ROUTING${RESET}\n"
+  echo -e "  ${BOLD}DEVLOOP_MAIN_PROVIDER${RESET}   Role: orchestrator / architect / reviewer"
+  echo -e "  ${BOLD}DEVLOOP_WORKER_PROVIDER${RESET} Role: work / fix\n"
+  echo -e "  Supported combinations:"
+  echo -e "  ${CYAN}claude${RESET}    + ${CYAN}copilot${RESET}   main=Claude, worker=Copilot   ${GRAY}(default)${RESET}"
+  echo -e "  ${CYAN}claude${RESET}    + ${CYAN}claude${RESET}    main=Claude, worker=Claude"
+  echo -e "  ${CYAN}copilot${RESET}   + ${CYAN}copilot${RESET}   main=Copilot, worker=Copilot"
+  echo -e "  ${CYAN}copilot${RESET}   + ${CYAN}claude${RESET}    main=Copilot, worker=Claude"
+  echo -e "  ${CYAN}claude${RESET}    + ${CYAN}opencode${RESET}  main=Claude, worker=OpenCode  ${GRAY}(optional install)${RESET}"
+  echo -e "  ${CYAN}claude${RESET}    + ${CYAN}pi${RESET}        main=Claude, worker=Pi        ${GRAY}(optional install)${RESET}"
+  echo -e "  ${GRAY}Note: opencode and pi are worker-only (no remote control support)${RESET}\n"
   echo -e "${BOLD}WORKER MODES${RESET}\n"
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
   echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"
