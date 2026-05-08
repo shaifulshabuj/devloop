@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.0] — 2026-05-09
+
+### Added
+- **Smart permission gate** (`devloop hooks`): Claude `PreToolUse` hook classifies every Bash command — BLOCK dangerous commands (`rm -rf /`, `curl|bash`, etc.), ALLOW known-safe commands (git, pytest, npm test, make, linters), ESCALATE unknowns (asks user via tty → osascript dialog → queue file → auto-deny)
+- **`devloop permit` command**: inspect and manage the permission gate with `status`, `watch`, `grant`, `deny`, `log`, `mode` subcommands
+- **PostToolUse audit log**: every tool call recorded to `.devloop/permissions.log`
+- **Permission modes**: `smart` (default), `auto`, `strict`, `off` — set via `DEVLOOP_PERMISSION_MODE`
+- **Permission escalation timeout**: `DEVLOOP_PERMISSION_TIMEOUT` (default: 60s) before auto-deny
+
+### Fixed
+- **Copilot non-interactive permission wall**: all `copilot` invocations now use `--allow-all-tools --allow-all-paths -p "<prompt>"` — fixes "Permission denied and could not request permission from user" that blocked workers and reviewers in pipe mode
+- **Copilot `-p` flag syntax**: corrected from `echo ... | copilot -p` (broken) to `copilot -p "$prompt"` (correct — `-p` is a required argument, not a stdin flag)
+- **Claude worker tool scope**: `cmd_work` and `cmd_fix` now pass `--allowedTools` to `claude -p` workers to restrict to file ops, git, and test runners
+- **Claude reviewer tool scope**: `run_provider_prompt` uses read-only tool set for architect/reviewer roles
+- **Auto-recovery messaging**: removed stale "re-test after 6h" — recovery is probe-based (`DEVLOOP_PROBE_INTERVAL` minutes, default 5)
+
+### Documentation
+- README: expanded `devloop hooks` (all 7 hooks + permission tier table), new `devloop permit` section, updated file structure with hook scripts and permission files, updated `.gitignore` recommendations
+- USAGE.md: new Scenario 6 — Smart Permissions end-to-end walkthrough; updated Scenario 2 hooks step; expanded Quick Reference
+
+---
+
 ## [4.1.0] — 2026-05-09
 
 ### Changed
