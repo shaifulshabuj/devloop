@@ -274,7 +274,7 @@ _probe_provider() {
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
       ;;
     copilot)
-      if ! echo "Reply with exactly: OK" | copilot --allow-all-tools --allow-all-paths -p > "$tmp" 2>&1; then
+      if ! copilot --allow-all-tools --allow-all-paths -p "Reply with exactly: OK" > "$tmp" 2>&1; then
         rc=1
       fi
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
@@ -642,7 +642,7 @@ _agent_write_context() {
     echo ""
     echo "### Copilot"
     echo "- **Install:** \`npm install -g @github/copilot\`"
-    echo "- **Non-interactive:** \`echo \"/plan <prompt>\" | copilot --allow-all-tools --allow-all-paths -p\`"
+    echo "- **Non-interactive:** \`copilot --allow-all-tools --allow-all-paths -p \"<prompt>\"\`"
     echo "- **Remote control:** supported (Copilot coding agent)"
     echo "- **Instructions:** \`.github/copilot-instructions.md\`"
     echo "- **Skills:** \`.github/copilot/skills/\` and \`.copilot/\`"
@@ -666,7 +666,7 @@ _agent_write_context() {
     echo "| Provider | Role | Command | Prompt prefix |"
     echo "|----------|------|---------|--------------|"
     echo "| claude | main+worker | \`echo \"\$prompt\" | claude -p --model \$model\` | none |"
-    echo "| copilot | main+worker | \`echo \"\$prompt\" | copilot --allow-all-tools --allow-all-paths -p\` | /plan |"
+    echo "| copilot | main+worker | \`copilot --allow-all-tools --allow-all-paths -p \"\$prompt\"\` | /plan |"
     echo "| opencode | worker only | \`opencode run --file spec.md \"instruction\"\` | none |"
     echo "| pi | worker only | \`pi --mode json \"\$prompt\"\` | none |"
   } > "$context_file"
@@ -1734,7 +1734,7 @@ run_provider_prompt() {
         fi
         ;;
       copilot)
-        echo "$prompt" | copilot --allow-all-tools --allow-all-paths -p > "$tmp_out" 2>&1 || rc=$?
+        copilot --allow-all-tools --allow-all-paths -p "$prompt" > "$tmp_out" 2>&1 || rc=$?
         ;;
       *)
         error "Unsupported provider in run_provider_prompt: $attempt_provider"
@@ -3240,7 +3240,7 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
         pi --mode json "$launch_prompt" 2>&1 | tee "$tmp_out" | cat || rc=$?
         ;;
       *)  # copilot
-        cat "$tmp_spec" | copilot --allow-all-tools --allow-all-paths -p 2>&1 | tee "$tmp_out" || rc=$?
+        copilot --allow-all-tools --allow-all-paths -p "$(cat "$tmp_spec")" 2>&1 | tee "$tmp_out" || rc=$?
         ;;
     esac
     cat "$tmp_out"
@@ -3485,7 +3485,7 @@ Summarize the changes made."
     elif [[ "$attempt_fix_provider" == "pi" ]]; then
       pi --mode json "$fix_prompt" 2>&1 | tee "$tmp_fix_out" | cat || rc=$?
     else
-      echo "$fix_prompt" | copilot --allow-all-tools --allow-all-paths -p 2>&1 | tee "$tmp_fix_out" || rc=$?
+      copilot --allow-all-tools --allow-all-paths -p "$fix_prompt" 2>&1 | tee "$tmp_fix_out" || rc=$?
     fi
     cat "$tmp_fix_out"
     if _is_rate_limit_error "$(cat "$tmp_fix_out")" || (( rc == 429 )); then
