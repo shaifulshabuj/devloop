@@ -66,3 +66,8 @@ lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
 ├── index.md         Auto-maintained catalog
 └── log.md           Operation log
 ```
+
+## Agent Provider Context
+_See `.devloop/agent-docs/provider-context.md` for the full provider reference._
+_Run `devloop agent-sync` to refresh docs and check for provider updates._
+
