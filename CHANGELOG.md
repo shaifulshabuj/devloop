@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.1.0] — 2026-05-09
+
+### Changed
+
+- `devloop init` now auto-populates stack/config values from project analysis in the first run and reports the auto-config update count.
+- README and USAGE docs updated for auto-analysis-first setup flow.
+- VERSION bumped to `4.1.0`.
+
+---
+
+## [4.0.0] — 2026-05-09
+
+### Changed
+
+- `devloop init` now merges/upserts existing project files instead of skipping them:
+  - `devloop.config.sh`: appends missing default keys without overwriting existing values.
+  - `CLAUDE.md`: updates/inserts the DevLoop-managed block (`DEVLOOP:CLAUDE` markers) while preserving custom content.
+  - `.github/copilot-instructions.md`: updates/inserts the DevLoop-managed block (`DEVLOOP:COPILOT` markers) while preserving custom content.
+- `devloop init` now analyzes the current project to auto-populate placeholder config fields (`PROJECT_STACK`, `PROJECT_PATTERNS`, `PROJECT_CONVENTIONS`, `TEST_FRAMEWORK`).
+- VERSION bumped to `4.0.0`.
+
+---
+
 ## [3.1.0] — Tools, Skills & MCP Management
 
 ### Added

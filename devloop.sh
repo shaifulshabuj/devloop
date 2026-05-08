@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="3.1.0"
+VERSION="4.1.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -1594,28 +1594,11 @@ cmd_install() {
   echo -e "  Run ${CYAN}devloop init${RESET} in any project to get started"
 }
 
-# ── cmd: init ────────────────────────────────────────────────────────────────
+# ── Init helpers ───────────────────────────────────────────────────────────────
 
-cmd_init() {
-  load_config
-  ensure_dirs
-
-  step "Initializing DevLoop in: ${CYAN}$(basename "$(find_project_root)")${RESET}"
-  divider
-
-  # 1. Write agent definitions — FIX #5: pass CLAUDE_MODEL so agents stay in sync with config
-  write_agent_orchestrator
-  success "Agent: ${CYAN}$AGENTS_PATH/devloop-orchestrator.md${RESET}"
-  write_agent_architect "$CLAUDE_MODEL"
-  success "Agent: ${CYAN}$AGENTS_PATH/devloop-architect.md${RESET}"
-  write_agent_reviewer "$CLAUDE_MODEL"
-  success "Agent: ${CYAN}$AGENTS_PATH/devloop-reviewer.md${RESET}"
-
-  # 2. Project config
-  if [[ -f "$CONFIG_PATH" ]]; then
-    warn "devloop.config.sh already exists — skipping"
-  else
-    cat > "$CONFIG_PATH" <<'CONFIG'
+_write_default_config() {
+  local target="$1"
+  cat > "$target" <<'CONFIG'
 # DevLoop Project Configuration — edit to match your stack
 
 PROJECT_NAME="$(basename "$PWD")"
@@ -1653,13 +1636,346 @@ CLAUDE_MODEL="sonnet"
 # Optional: set to enable 'devloop update'
 # DEVLOOP_SOURCE_URL="https://raw.githubusercontent.com/you/devloop/main/devloop.sh"
 CONFIG
-    success "Created: ${CYAN}devloop.config.sh${RESET}"
-    warn "Edit devloop.config.sh then re-run ${CYAN}devloop init${RESET} to apply stack to all files"
+}
+
+_merge_devloop_config_defaults() {
+  local file="$1"
+  local additions=""
+  local added=0
+  local -a entries=(
+    'PROJECT_NAME="$(basename "$PWD")"'
+    'PROJECT_STACK="C#, .NET 8, ASP.NET Web API, MSSQL"'
+    'PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"'
+    'PROJECT_CONVENTIONS="async/await throughout, custom exception classes, no magic strings, XML doc comments on public APIs"'
+    'TEST_FRAMEWORK="xUnit"'
+    'DEVLOOP_MAIN_PROVIDER="claude"'
+    'DEVLOOP_WORKER_PROVIDER="copilot"'
+    'DEVLOOP_FAILOVER_ENABLED="true"'
+    'DEVLOOP_PROBE_INTERVAL="5"'
+    'DEVLOOP_WORKER_MODE="cli"'
+    'CLAUDE_MODEL="sonnet"'
+  )
+
+  for entry in "${entries[@]}"; do
+    local key="${entry%%=*}"
+    if ! grep -qE "^[[:space:]]*${key}=" "$file"; then
+      additions+="$entry"$'\n'
+      added=$((added + 1))
+    fi
+  done
+
+  if (( added > 0 )); then
+    {
+      echo ""
+      echo "# Added by devloop init (missing defaults)"
+      printf "%s" "$additions"
+    } >> "$file"
   fi
 
-  # 3. CLAUDE.md
-  if [[ ! -f "CLAUDE.md" ]]; then
-    cat > CLAUDE.md <<'CLAUDEMD'
+  echo "$added"
+}
+
+_read_config_value() {
+  local file="$1" key="$2"
+  local line
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | head -1 || true)"
+  line="${line#*=}"
+  line="${line#\"}"
+  line="${line%\"}"
+  printf '%s' "$line"
+}
+
+_is_placeholder_config_value() {
+  local key="$1" value="$2"
+  case "$key" in
+    PROJECT_STACK)
+      [[ -z "$value" || "$value" == "Unknown stack" || "$value" == "C#, .NET 8, ASP.NET Web API, MSSQL" ]]
+      ;;
+    PROJECT_PATTERNS)
+      [[ -z "$value" || "$value" == "SOLID, Repository Pattern, Clean Architecture" ]]
+      ;;
+    PROJECT_CONVENTIONS)
+      [[ -z "$value" || "$value" == "async/await throughout, custom exception classes, no magic strings, XML doc comments on public APIs" || "$value" == "Use async/await, handle all errors explicitly" ]]
+      ;;
+    TEST_FRAMEWORK)
+      [[ -z "$value" || "$value" == "default" || "$value" == "xUnit" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_set_config_value() {
+  local file="$1" key="$2" value="$3"
+  python3 - "$file" "$key" "$value" <<'PYEOF'
+import re
+import sys
+
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, "r", encoding="utf-8") as f:
+    lines = f.read().splitlines()
+
+pattern = re.compile(r"^\s*" + re.escape(key) + r"=")
+replacement = f'{key}="{value}"'
+updated = False
+for idx, line in enumerate(lines):
+    if pattern.match(line):
+        lines[idx] = replacement
+        updated = True
+        break
+
+if not updated:
+    lines.append(replacement)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines).rstrip() + "\n")
+PYEOF
+}
+
+_detect_project_config_local() {
+  local root="$1"
+  python3 - "$root" <<'PYEOF'
+import json
+import os
+import re
+import sys
+
+root = sys.argv[1]
+skip_dirs = {
+    ".git", "node_modules", "dist", "build", "target", "bin", "obj",
+    ".venv", "venv", ".next", ".nuxt", ".devloop", ".claude"
+}
+
+files = set()
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+    for fn in filenames:
+        rel = os.path.relpath(os.path.join(dirpath, fn), root)
+        files.add(rel.replace("\\", "/"))
+
+def has(pattern):
+    rx = re.compile(pattern)
+    return any(rx.search(p) for p in files)
+
+def read_file(path):
+    try:
+        with open(os.path.join(root, path), "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+langs = []
+frameworks = []
+dbs = []
+patterns = []
+conventions = []
+test_framework = "default"
+
+pkg_json = read_file("package.json")
+if "package.json" in files:
+    langs.append("Node.js")
+    if re.search(r'"next"\s*:', pkg_json): frameworks.append("Next.js")
+    elif re.search(r'"react"\s*:', pkg_json): frameworks.append("React")
+    if re.search(r'"nestjs|@nestjs/', pkg_json): frameworks.append("NestJS")
+    if re.search(r'"express"\s*:', pkg_json): frameworks.append("Express")
+    if re.search(r'"vue"\s*:', pkg_json): frameworks.append("Vue")
+    if re.search(r'"svelte"\s*:', pkg_json): frameworks.append("Svelte")
+    if re.search(r'"typescript"\s*:', pkg_json) or "tsconfig.json" in files:
+        langs.append("TypeScript")
+    else:
+        langs.append("JavaScript")
+    if re.search(r'"vitest"\s*:', pkg_json): test_framework = "Vitest"
+    elif re.search(r'"jest"\s*:', pkg_json): test_framework = "Jest"
+    elif re.search(r'"mocha"\s*:', pkg_json): test_framework = "Mocha"
+    elif re.search(r'"playwright"\s*:', pkg_json): test_framework = "Playwright"
+
+if "pyproject.toml" in files or "requirements.txt" in files or has(r"\.py$"):
+    langs.append("Python")
+    pyproject = read_file("pyproject.toml")
+    req = read_file("requirements.txt")
+    blob = pyproject + "\n" + req
+    if re.search(r"\bfastapi\b", blob, re.I): frameworks.append("FastAPI")
+    elif re.search(r"\bdjango\b", blob, re.I): frameworks.append("Django")
+    elif re.search(r"\bflask\b", blob, re.I): frameworks.append("Flask")
+    if re.search(r"\bpytest\b", blob, re.I) or has(r"(^|/)test_.*\.py$") or has(r".*_test\.py$"):
+        test_framework = "pytest"
+    elif test_framework == "default":
+        test_framework = "unittest"
+
+if "go.mod" in files:
+    langs.append("Go")
+    gomod = read_file("go.mod")
+    if re.search(r"\bgin-gonic/gin\b", gomod): frameworks.append("Gin")
+    elif re.search(r"\blabstack/echo\b", gomod): frameworks.append("Echo")
+    elif re.search(r"\bgofiber/fiber\b", gomod): frameworks.append("Fiber")
+    if test_framework == "default":
+        test_framework = "go test"
+
+if "Cargo.toml" in files:
+    langs.append("Rust")
+    cargo = read_file("Cargo.toml")
+    if re.search(r"\baxum\b", cargo): frameworks.append("Axum")
+    elif re.search(r"\bactix-web\b", cargo): frameworks.append("Actix Web")
+    if test_framework == "default":
+        test_framework = "cargo test"
+
+if has(r"\.csproj$") or "global.json" in files:
+    langs.append("C#")
+    frameworks.append(".NET")
+    if has(r"Controllers/.*\.cs$") or has(r"Program\.cs$"):
+        frameworks.append("ASP.NET")
+    if test_framework == "default":
+        test_framework = "xUnit"
+
+if has(r"\.java$") or "pom.xml" in files or "build.gradle" in files:
+    langs.append("Java")
+    if "pom.xml" in files:
+        frameworks.append("Maven")
+    if "build.gradle" in files:
+        frameworks.append("Gradle")
+    if test_framework == "default":
+        test_framework = "JUnit"
+
+if "docker-compose.yml" in files or "docker-compose.yaml" in files:
+    frameworks.append("Docker")
+if has(r"Dockerfile$"):
+    frameworks.append("Docker")
+
+if "prisma/schema.prisma" in files:
+    dbs.append("Prisma")
+if has(r"(postgres|postgresql)"):
+    dbs.append("PostgreSQL")
+if has(r"mysql"):
+    dbs.append("MySQL")
+if has(r"sqlite"):
+    dbs.append("SQLite")
+if has(r"mssql|sqlserver"):
+    dbs.append("MSSQL")
+if has(r"redis"):
+    dbs.append("Redis")
+
+if has(r"src/.*/(service|repository|controller)") or has(r"(service|repository|controller)\."):
+    patterns.extend(["SOLID", "Repository Pattern"])
+if has(r"domain/|application/|infrastructure/|clean"):
+    patterns.append("Clean Architecture")
+if not patterns:
+    patterns = ["SOLID", "Clean Architecture"]
+
+if "TypeScript" in langs:
+    conventions.extend(["strict typing", "explicit error handling", "avoid any"])
+elif "Python" in langs:
+    conventions.extend(["type hints", "custom exceptions", "explicit error handling"])
+elif "Go" in langs:
+    conventions.extend(["explicit error checks", "small interfaces", "idiomatic packages"])
+elif "C#" in langs:
+    conventions.extend(["async/await throughout", "custom exceptions", "no magic strings"])
+else:
+    conventions.extend(["explicit error handling", "small focused modules"])
+
+def uniq(xs):
+    out = []
+    seen = set()
+    for x in xs:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+langs = uniq(langs)
+frameworks = uniq(frameworks)
+dbs = uniq(dbs)
+patterns = uniq(patterns)
+conventions = uniq(conventions)
+
+stack_parts = langs + frameworks + dbs
+if not stack_parts:
+    stack_parts = ["Unknown stack"]
+
+data = {
+    "PROJECT_STACK": ", ".join(stack_parts[:6]),
+    "PROJECT_PATTERNS": ", ".join(patterns[:4]),
+    "PROJECT_CONVENTIONS": ", ".join(conventions[:4]),
+    "TEST_FRAMEWORK": test_framework if test_framework != "default" else "default",
+}
+print(json.dumps(data))
+PYEOF
+}
+
+_auto_config_from_project() {
+  local file="$1" root="$2"
+  local detected_json
+  detected_json="$(_detect_project_config_local "$root" 2>/dev/null || true)"
+  [[ -z "$detected_json" ]] && { echo "0"; return; }
+
+  local updates=0
+  local keys=(PROJECT_STACK PROJECT_PATTERNS PROJECT_CONVENTIONS TEST_FRAMEWORK)
+  for key in "${keys[@]}"; do
+    local current detected
+    current="$(_read_config_value "$file" "$key")"
+    detected="$(python3 - "$detected_json" "$key" <<'PYEOF'
+import json
+import sys
+data = json.loads(sys.argv[1])
+print(data.get(sys.argv[2], ""))
+PYEOF
+)"
+
+    if [[ -n "$detected" ]] && _is_placeholder_config_value "$key" "$current"; then
+      if [[ "$current" != "$detected" ]]; then
+        _set_config_value "$file" "$key" "$detected"
+        updates=$((updates + 1))
+      fi
+    fi
+  done
+
+  echo "$updates"
+}
+
+_upsert_managed_block() {
+  local file="$1" start_marker="$2" end_marker="$3" incoming_content="$4"
+  python3 - "$file" "$start_marker" "$end_marker" "$incoming_content" <<'PYEOF'
+import os
+import sys
+
+path, start, end, incoming = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].strip()
+if incoming:
+    incoming += "\n"
+
+if os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+else:
+    text = ""
+
+if not text:
+    new_text = incoming
+else:
+    s = text.find(start)
+    e = text.find(end)
+    if s != -1 and e != -1 and e > s:
+      e = e + len(end)
+      prefix = text[:s].rstrip()
+      suffix = text[e:].lstrip()
+      parts = []
+      if prefix:
+          parts.append(prefix)
+      if incoming:
+          parts.append(incoming.strip())
+      if suffix:
+          parts.append(suffix)
+      new_text = "\n\n".join(parts).rstrip() + "\n"
+    else:
+      new_text = text.rstrip() + "\n\n" + incoming
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(new_text)
+PYEOF
+}
+
+_render_claude_managed_block() {
+  cat <<'CLAUDEMD'
+<!-- DEVLOOP:CLAUDE:START -->
 # Claude Code — DevLoop Project
 
 ## System
@@ -1704,20 +2020,75 @@ See devloop.config.sh for project-specific stack details.
 
 ## Learned Patterns
 <!-- devloop learn appends dated lessons here -->
+<!-- DEVLOOP:CLAUDE:END -->
 CLAUDEMD
+}
+
+# ── cmd: init ────────────────────────────────────────────────────────────────
+
+cmd_init() {
+  load_config
+  ensure_dirs
+
+  step "Initializing DevLoop in: ${CYAN}$(basename "$(find_project_root)")${RESET}"
+  divider
+
+  # 1. Project config
+  if [[ -f "$CONFIG_PATH" ]]; then
+    local added_keys
+    added_keys="$(_merge_devloop_config_defaults "$CONFIG_PATH")"
+    if [[ "$added_keys" -gt 0 ]]; then
+      success "Merged: ${CYAN}devloop.config.sh${RESET} ${GRAY}(added ${added_keys} missing keys)${RESET}"
+    else
+      info "devloop.config.sh already up to date"
+    fi
+  else
+    _write_default_config "$CONFIG_PATH"
+    success "Created: ${CYAN}devloop.config.sh${RESET}"
+  fi
+
+  local root
+  root="$(find_project_root)"
+  local detected_updates
+  detected_updates="$(_auto_config_from_project "$CONFIG_PATH" "$root")"
+  if [[ "${detected_updates:-0}" -gt 0 ]]; then
+    success "Auto-configured: ${CYAN}devloop.config.sh${RESET} ${GRAY}(updated ${detected_updates} values from project analysis)${RESET}"
+  else
+    info "Project auto-config: no placeholder values needed updates"
+  fi
+
+  # Reload so generated files reflect the analyzed project configuration
+  load_config
+
+  # 2. Write agent definitions — FIX #5: pass CLAUDE_MODEL so agents stay in sync with config
+  write_agent_orchestrator
+  success "Agent: ${CYAN}$AGENTS_PATH/devloop-orchestrator.md${RESET}"
+  write_agent_architect "$CLAUDE_MODEL"
+  success "Agent: ${CYAN}$AGENTS_PATH/devloop-architect.md${RESET}"
+  write_agent_reviewer "$CLAUDE_MODEL"
+  success "Agent: ${CYAN}$AGENTS_PATH/devloop-reviewer.md${RESET}"
+
+  # 3. CLAUDE.md
+  local claude_block
+  claude_block="$(_render_claude_managed_block)"
+  if [[ ! -f "CLAUDE.md" ]]; then
+    _upsert_managed_block "CLAUDE.md" "<!-- DEVLOOP:CLAUDE:START -->" "<!-- DEVLOOP:CLAUDE:END -->" "$claude_block"
     success "Created: ${CYAN}CLAUDE.md${RESET}"
   else
-    warn "CLAUDE.md already exists — skipping"
+    _upsert_managed_block "CLAUDE.md" "<!-- DEVLOOP:CLAUDE:START -->" "<!-- DEVLOOP:CLAUDE:END -->" "$claude_block"
+    success "Merged: ${CYAN}CLAUDE.md${RESET} ${GRAY}(updated DevLoop managed block)${RESET}"
   fi
 
   # 4. Copilot instructions — FIX #9 #11: rich template with stack context
   mkdir -p .github
+  local copilot_block
+  copilot_block="$(_write_copilot_instructions)"
   if [[ ! -f ".github/copilot-instructions.md" ]]; then
-    _write_copilot_instructions
+    _upsert_managed_block ".github/copilot-instructions.md" "<!-- DEVLOOP:COPILOT:START -->" "<!-- DEVLOOP:COPILOT:END -->" "$copilot_block"
     success "Created: ${CYAN}.github/copilot-instructions.md${RESET}"
   else
-    warn ".github/copilot-instructions.md already exists — skipping"
-    info "Regenerate with: ${CYAN}rm .github/copilot-instructions.md && devloop init${RESET}"
+    _upsert_managed_block ".github/copilot-instructions.md" "<!-- DEVLOOP:COPILOT:START -->" "<!-- DEVLOOP:COPILOT:END -->" "$copilot_block"
+    success "Merged: ${CYAN}.github/copilot-instructions.md${RESET} ${GRAY}(updated DevLoop managed block)${RESET}"
   fi
 
   # 5. copilot-setup-steps.yml (only for github-agent mode)
@@ -1734,24 +2105,26 @@ CLAUDEMD
   echo ""
   echo -e "${GREEN}${BOLD}✅ DevLoop initialized!${RESET}\n"
   echo -e "${BOLD}Next steps:${RESET}"
-  echo -e "  1. Edit ${CYAN}devloop.config.sh${RESET} with your project stack"
-  echo -e "  2. Re-run ${CYAN}devloop init${RESET} to apply stack to agent + copilot files"
-  echo -e "  3. Run ${CYAN}devloop hooks${RESET} to install Claude pipeline hooks"
-  echo -e "  4. Run ${CYAN}devloop tools suggest${RESET} for stack-specific MCP/skill recommendations"
-  echo -e "  5. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
-  echo -e "  6. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
-  echo -e "  7. Send a feature request — the pipeline runs automatically"
+  echo -e "  1. Review ${CYAN}devloop.config.sh${RESET} (auto-generated from project analysis)"
+  echo -e "  2. Run ${CYAN}devloop hooks${RESET} to install Claude pipeline hooks"
+  echo -e "  3. Run ${CYAN}devloop tools suggest${RESET} for stack-specific MCP/skill recommendations"
+  echo -e "  4. Run ${CYAN}devloop start${RESET} to launch the orchestrator"
+  echo -e "  5. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
+  echo -e "  6. Send a feature request — the pipeline runs automatically"
   echo ""
 }
 
 # ── Copilot instructions writer ────────────────────────────────────────────────
 # FIX #9 #11: Detailed template with live stack config values.
-# Called from cmd_init. Re-run `devloop init` after editing devloop.config.sh
-# to refresh this file with new stack values.
+# Called from cmd_init. Regenerated from the analyzed project config on each init.
 
 _write_copilot_instructions() {
   mkdir -p .github
-  cat > .github/copilot-instructions.md <<COPILOT
+  python3 - "$PROJECT_STACK" "$PROJECT_PATTERNS" "$PROJECT_CONVENTIONS" "$TEST_FRAMEWORK" <<'PYEOF'
+import sys
+
+stack, patterns, conventions, test_framework = sys.argv[1:5]
+content = f"""<!-- DEVLOOP:COPILOT:START -->
 # GitHub Copilot Instructions — DevLoop Worker
 
 ## Your Role
@@ -1760,10 +2133,10 @@ Follow DEVLOOP TASK specs exactly — no improvisation on behaviour not specifie
 If `DEVLOOP_WORKER_PROVIDER` is set to `claude`, DevLoop will route worker tasks through Claude instead of Copilot.
 
 ## Project Stack
-- **Stack**: $PROJECT_STACK
-- **Patterns**: $PROJECT_PATTERNS
-- **Conventions**: $PROJECT_CONVENTIONS
-- **Test framework**: $TEST_FRAMEWORK
+- **Stack**: {stack}
+- **Patterns**: {patterns}
+- **Conventions**: {conventions}
+- **Test framework**: {test_framework}
 
 ## Understanding the Spec
 Each task spec has these sections — read all of them before writing any code:
@@ -1779,17 +2152,17 @@ Each task spec has these sections — read all of them before writing any code:
 
 ## Workflow
 1. Read the **full** spec — especially Files to Touch, Implementation Steps, Edge Cases
-2. Use \`/plan\` to build a step-by-step implementation checklist
+2. Use `/plan` to build a step-by-step implementation checklist
 3. Implement each step in order, following every rule listed
 4. Write tests for every row in the Test Scenarios table
-5. Run tests (\`$TEST_FRAMEWORK\`) — fix failures before committing
+5. Run tests (`{test_framework}`) — fix failures before committing
 6. Stage **all** changed files and commit in a single commit
 
 ## Commit Message Format
-\`\`\`
+```
 feat(TASK-ID): <one-line summary of what was implemented>
-\`\`\`
-Example: \`feat(TASK-20260506-143022): add GET /orders endpoint with date range filter\`
+```
+Example: `feat(TASK-20260506-143022): add GET /orders endpoint with date range filter`
 
 Stage ALL changed files in a SINGLE commit with the TASK ID in the message.
 
@@ -1803,9 +2176,12 @@ Stage ALL changed files in a SINGLE commit with the TASK ID in the message.
 ## Definition of Done
 - [ ] All Acceptance Criteria satisfied
 - [ ] All Edge Cases handled
-- [ ] Tests written and passing (framework: $TEST_FRAMEWORK)
+- [ ] Tests written and passing (framework: {test_framework})
 - [ ] Single commit with TASK ID in message (feat(TASK-ID): ...)
-COPILOT
+<!-- DEVLOOP:COPILOT:END -->
+"""
+print(content, end="")
+PYEOF
 }
 
 # ── cmd: start ───────────────────────────────────────────────────────────────
@@ -3678,7 +4054,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop install${RESET}"
   echo -e "    Install devloop to /usr/local/bin (run once)\n"
   echo -e "  ${CYAN}devloop init${RESET}"
-  echo -e "    Set up DevLoop in current project. Re-run after editing devloop.config.sh"
+  echo -e "    Set up DevLoop in current project (auto-analyzes stack/config from project files)"
   echo -e "    Writes: agents, CLAUDE.md, devloop.config.sh, copilot-instructions\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch Claude with remote control + orchestrator agent"

@@ -29,6 +29,7 @@ devloop init
 Output:
 ```
 ✔  Created: devloop.config.sh
+✔  Auto-configured: devloop.config.sh (updated N values from project analysis)
 ✔  Created: CLAUDE.md
 ✔  Created: .github/copilot-instructions.md
 ✔  Created: .claude/agents/devloop-orchestrator.md
@@ -37,7 +38,7 @@ Output:
 ```
 
 ### Step 2 — Configure your stack
-Edit `devloop.config.sh`:
+`devloop init` now auto-populates `devloop.config.sh` by analyzing your project files. Review and adjust if needed:
 ```bash
 PROJECT_NAME="my-api"
 PROJECT_STACK="Python, FastAPI, PostgreSQL"
@@ -47,11 +48,6 @@ TEST_FRAMEWORK="pytest"
 DEVLOOP_MAIN_PROVIDER="claude"    # architect + reviewer
 DEVLOOP_WORKER_PROVIDER="copilot" # implementer
 CLAUDE_MODEL="sonnet"
-```
-
-Re-run `devloop init` to regenerate agent files with your stack:
-```bash
-devloop init
 ```
 
 ### Step 3 — Validate your setup
@@ -126,7 +122,7 @@ Work on an existing codebase entirely from your phone while your Mac runs headle
 cd ~/projects/existing-app
 devloop init
 ```
-Existing files are **not overwritten** — only missing files are created.
+Existing files are merged safely: DevLoop updates its own managed blocks and appends missing config keys while preserving custom content.
 
 Configure your actual stack in `devloop.config.sh`.
 

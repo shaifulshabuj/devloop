@@ -48,7 +48,7 @@ devloop install              # → /usr/local/bin/devloop
 devloop install ~/bin/devloop  # custom path
 
 # Verify
-devloop --version            # DevLoop v3.1.0
+devloop --version            # DevLoop v4.1.0
 ```
 
 Enable self-updates by setting in `devloop.config.sh`:
@@ -67,7 +67,7 @@ cd your-project/
 # 1. Initialize (one-time per project)
 devloop init
 
-# 2. Configure your stack
+# 2. Review auto-generated stack/config (optional adjustments)
 nano devloop.config.sh
 
 # 3. Validate everything is wired up
@@ -116,7 +116,7 @@ Copies the script to `/usr/local/bin/devloop` (or a custom path). Uses `sudo` if
 ---
 
 ### `devloop init`
-Sets up DevLoop in the current project. Run once per project (safe to re-run — existing files are skipped).
+Sets up DevLoop in the current project. Run once per project (safe to re-run — existing files are merged/upserted).
 
 **Creates:**
 | File | Purpose |
@@ -130,7 +130,9 @@ Sets up DevLoop in the current project. Run once per project (safe to re-run —
 | `.devloop/specs/` | Task specs and reviews |
 | `.devloop/prompts/` | Extracted Copilot instruction blocks |
 
-**After init, edit `devloop.config.sh`:**
+Running `devloop init` again is safe — existing files are merged: DevLoop-managed blocks are updated and missing config keys are appended, while custom content is preserved.
+
+`devloop init` auto-populates stack/config values by analyzing the current project. Review and adjust as needed:
 ```bash
 PROJECT_NAME="MyProject"
 PROJECT_STACK="Python, FastAPI, PostgreSQL"
@@ -597,4 +599,3 @@ devloop clean --days 14             # apply
 
 **Understand the full data flow:**
 See [DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md) for 11 Mermaid diagrams.
-
