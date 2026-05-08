@@ -371,12 +371,52 @@ devloop check
 ### `devloop hooks`
 Installs Claude Code pipeline hooks into `.claude/settings.json`.
 
-| Hook event | What it captures |
-|------------|-----------------|
-| `Stop` | Task summary when Claude finishes |
-| `SubagentStop` | Which subagent completed + verdict keywords |
-| `Notification` | All Claude notifications → `.devloop/notifications.log` |
-| `SessionStart/End` | Session boundaries → `.devloop/sessions.log` |
+```bash
+devloop hooks
+```
+
+| Hook event | Matcher | What it captures |
+|------------|---------|-----------------|
+| `PreToolUse` | Bash | 3-tier permission classification (BLOCK / ALLOW / ESCALATE) |
+| `PostToolUse` | All | Audit log of every tool call → `.devloop/permissions.log` |
+| `Stop` | — | Task summary when Claude finishes |
+| `SubagentStop` | — | Which subagent completed + verdict keywords |
+| `Notification` | — | All Claude notifications → `.devloop/notifications.log` |
+| `SessionStart/End` | — | Session boundaries → `.devloop/sessions.log` |
+
+**Smart permission tiers** (PreToolUse on Bash, applied in the interactive Claude session):
+
+| Tier | Action | Examples |
+|------|--------|---------|
+| 🚫 BLOCK | Immediate deny | `rm -rf /`, `curl|bash`, `dd of=/dev/sda`, fork bombs |
+| ✅ ALLOW | Auto-approve | `git *`, `cat/grep/find`, `pytest`, `npm test`, `make`, linters |
+| ❓ ESCALATE | Ask user | Everything else — dialog → queue → auto-deny after timeout |
+
+Worker providers (non-interactive pipe mode) are not affected by hooks. Instead, Claude worker calls use `--allowedTools` to scope allowed operations, and Copilot calls use `--allow-all-tools --allow-all-paths` which is required for non-interactive scripting.
+
+---
+
+### `devloop permit [subcmd]`
+Inspect and manage the permission gate.
+
+```bash
+devloop permit status       # show current mode, pending requests, recent log
+devloop permit watch        # live-poll pending requests (Linux headless)
+devloop permit grant "CMD"  # manually approve a queued command
+devloop permit deny "CMD"   # manually deny a queued command
+devloop permit log          # show last 50 audit log entries
+devloop permit mode smart   # smart (default) | auto | strict | off
+```
+
+**Permission modes:**
+| Mode | Behaviour |
+|------|-----------|
+| `smart` | Block dangerous, allow known-safe, escalate unknown |
+| `auto` | Allow everything (no interactive prompts — use carefully) |
+| `strict` | Escalate everything except BLOCK list |
+| `off` | Disable DevLoop permission hook entirely |
+
+Set `DEVLOOP_PERMISSION_MODE` in `devloop.config.sh`. Set `DEVLOOP_PERMISSION_TIMEOUT` (default: 60s) for auto-deny timeout.
 
 ---
 
@@ -512,8 +552,14 @@ your-project/
 │   └── mcp.json                             ← Copilot/VS Code MCP servers
 ├── .mcp.json                                ← Claude project MCP servers
 ├── .claude/
-│   ├── settings.json                        ← Claude hooks config
-│   ├── hooks/                               ← Pipeline hook scripts
+│   ├── settings.json                        ← Claude hooks config (7 events)
+│   ├── hooks/
+│   │   ├── devloop-permission.sh            ← PreToolUse: 3-tier bash classifier
+│   │   ├── devloop-audit.sh                 ← PostToolUse: tool call audit logger
+│   │   ├── devloop-stop.sh                  ← Stop: task summary capture
+│   │   ├── devloop-subagent-stop.sh         ← SubagentStop: verdict detection
+│   │   ├── devloop-notification.sh          ← Notification logger
+│   │   └── devloop-session.sh               ← SessionStart/End logger
 │   ├── skills/                              ← Claude skills
 │   └── agents/
 │       ├── devloop-orchestrator.md          ← main agent
@@ -525,6 +571,8 @@ your-project/
     │   ├── claude-docs.md
     │   ├── copilot-docs.md
     │   └── provider-context.md
+    ├── permission-queue/                    ← escalated permission requests (runtime)
+    ├── permissions.log                      ← PostToolUse audit log (runtime)
     ├── daemon.pid / daemon.log              ← daemon state
     ├── pipeline.log                         ← hook-captured events
     ├── notifications.log / sessions.log     ← Claude logs
@@ -544,6 +592,8 @@ your-project/
 .devloop/daemon.log
 .devloop/launchd*.log
 .devloop/provider-health.sh
+.devloop/permission-queue/
+.devloop/permissions.log
 # keep: .devloop/specs/  .devloop/prompts/  .devloop/agent-docs/
 ```
 

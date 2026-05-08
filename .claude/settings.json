@@ -1,0 +1,81 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-stop.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-subagent-stop.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-notification.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-session.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-session.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-permission.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.claude/hooks/devloop-audit.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

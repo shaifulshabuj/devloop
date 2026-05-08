@@ -1,0 +1,5 @@
+[2026-05-09 03:50:21] BLOCKED: [Bash] Destructive command blocked by DevLoop safety policy. Run manually in terminal if needed.
+[2026-05-09 03:50:26] APPROVED: [Bash] safe
+[2026-05-09 03:50:26] APPROVED: [Bash] safe
+[2026-05-09 03:50:26] APPROVED: [Read] non-bash tool
+[2026-05-09 03:50:30] BLOCKED: [Bash] Destructive command blocked by DevLoop safety policy. Run manually in terminal if needed.
