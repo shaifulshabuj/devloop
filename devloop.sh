@@ -86,12 +86,16 @@ load_config() {
   DEVLOOP_VERSION_URL=""
   DEVLOOP_FAILOVER_ENABLED="true"
   DEVLOOP_PROBE_INTERVAL="5"    # minutes between availability probes when a provider is limited
+  DEVLOOP_PERMISSION_MODE="smart"   # off | auto | smart | strict
+  DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
 
 ensure_dirs() {
   mkdir -p "$SPECS_PATH" "$PROMPTS_PATH" "$AGENTS_PATH"
+  local root; root="$(find_project_root)"
+  mkdir -p "$root/$DEVLOOP_DIR/permission-queue"
 }
 
 check_deps() {
@@ -870,69 +874,278 @@ HOOK
   chmod +x "$hooks_dir/devloop-session.sh"
 }
 
-_write_claude_settings() {
+# ── Permission hook (PreToolUse — Bash) ──────────────────────────────────────
+
+_write_hook_pre_tool_use() {
+  local hooks_dir="$1"
+  cat > "$hooks_dir/devloop-permission.sh" <<'HOOK'
+#!/usr/bin/env bash
+# devloop-permission.sh — PreToolUse hook
+# Classifies Bash tool calls into: BLOCK / ALLOW / ESCALATE-to-user
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+QUEUE_DIR="$ROOT/.devloop/permission-queue"
+LOG="$ROOT/.devloop/permissions.log"
+PERMISSION_MODE="smart"
+PERMISSION_TIMEOUT="60"
+
+# Load just the permission config lines (safe, no side effects)
+if [[ -f "$ROOT/devloop.config.sh" ]]; then
+  _TMP="$(mktemp)"
+  grep -E '^DEVLOOP_PERMISSION_(MODE|TIMEOUT)' "$ROOT/devloop.config.sh" > "$_TMP" 2>/dev/null || true
+  source "$_TMP"
+  rm -f "$_TMP"
+  PERMISSION_MODE="${DEVLOOP_PERMISSION_MODE:-smart}"
+  PERMISSION_TIMEOUT="${DEVLOOP_PERMISSION_TIMEOUT:-60}"
+fi
+
+mkdir -p "$QUEUE_DIR" "$(dirname "$LOG")"
+
+_log()     { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"; }
+_approve() { _log "APPROVED: [$TOOL_NAME] $1"; exit 0; }
+_block()   {
+  _log "BLOCKED: [$TOOL_NAME] $1"
+  printf '{"decision":"block","reason":"%s"}\n' "$1"
+  exit 2
+}
+
+# Parse tool call from Claude (JSON on stdin)
+_INPUT="$(cat)"
+_TMPF="$(mktemp)"
+printf '%s' "$_INPUT" > "$_TMPF"
+
+TOOL_NAME="$(python3 -c "
+import sys, json
+d = json.load(open(sys.argv[1]))
+print(d.get('tool_name',''))
+" "$_TMPF" 2>/dev/null || echo "")"
+
+CMD=""
+if [[ "$TOOL_NAME" == "Bash" ]]; then
+  CMD="$(python3 -c "
+import sys, json
+d = json.load(open(sys.argv[1]))
+print(d.get('tool_input', {}).get('command',''))
+" "$_TMPF" 2>/dev/null || echo "")"
+fi
+rm -f "$_TMPF"
+
+# ── Off / auto mode: approve everything ─────────────────────────────────────
+if [[ "$PERMISSION_MODE" == "off" ]] || [[ "$PERMISSION_MODE" == "auto" ]]; then
+  _approve "permission-mode=$PERMISSION_MODE"
+fi
+
+# ── Non-Bash tools: always approve (file read/write handled by acceptEdits) ─
+if [[ "$TOOL_NAME" != "Bash" ]]; then
+  _approve "non-bash tool"
+fi
+
+# ── Tier 1: ALWAYS BLOCK — provably destructive patterns ────────────────────
+_is_always_block() {
+  local c="$1"
+  # rm -rf on critical paths
+  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+/' && return 0
+  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+~' && return 0
+  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+\$HOME' && return 0
+  echo "$c" | grep -qE 'sudo\s+rm\s+-' && return 0
+  # Download + execute (code injection)
+  echo "$c" | grep -qE '(curl|wget)\s+[^|]+\|\s*(bash|sh|python[23]?|ruby|perl|node)\b' && return 0
+  # Disk destruction
+  echo "$c" | grep -qE '\bdd\b.*\bof=/dev/(sd|nvme|hd|disk)' && return 0
+  echo "$c" | grep -qE '\bmkfs\b' && return 0
+  # Fork bomb
+  echo "$c" | grep -qE ':\s*\(\s*\)\s*\{.*\|.*:' && return 0
+  # chmod 777 on system paths
+  echo "$c" | grep -qE 'chmod\s+[0-9]*7[0-9]*7\s*/' && return 0
+  return 1
+}
+
+# ── Tier 2: ALWAYS ALLOW — provably safe read/test/build operations ──────────
+_is_always_safe() {
+  local c="$1"
+  # Grab just the first logical command (before pipes/semicolons)
+  local first
+  first="$(printf '%s' "$c" | sed 's/^[[:space:]]*//' | head -1 | sed 's/[;|&].*//')"
+
+  # Read-only shell builtins and utilities
+  echo "$first" | grep -qE '^(cat|head|tail|grep|rg|ag|find|ls|ll|la|wc|stat|file|which|type|echo|printf|pwd|whoami|date|env|printenv|uname|id|tree|diff|sort|uniq|awk|sed|jq|yq|less|more)\b' && return 0
+
+  # Git read ops (status, log, diff, show, etc.)
+  echo "$first" | grep -qE '^git\s+(status|log|diff|branch|show|remote|tag|describe|shortlog|reflog|ls-files|ls-tree|stash\s+list|rev-parse|symbolic-ref|config\s+--get)\b' && return 0
+
+  # Git safe write ops (add, commit, checkout, stash save)
+  echo "$first" | grep -qE '^git\s+(add|commit|checkout|switch|restore|stash\s+(push|pop|drop|apply)|reset\s+--(soft|mixed)|clean\s+-fd|cherry-pick|merge|rebase)\b' && return 0
+
+  # Test runners
+  echo "$first" | grep -qE '^(pytest|python3?\s+-m\s+pytest|npm\s+(test|run\s+test)|yarn\s+test|pnpm\s+test|go\s+test|cargo\s+test|jest|mocha|vitest|rspec|phpunit|mvn\s+test|gradle\s+test|dotnet\s+test)\b' && return 0
+
+  # Build tools
+  echo "$first" | grep -qE '^(make|cmake|cargo\s+(build|check|clippy|fmt)|go\s+build|npm\s+run\s+build|yarn\s+build|pnpm\s+build|tsc|vite\s+build|webpack|rollup|dotnet\s+build|mvn\s+package|gradle\s+build|swift\s+build)\b' && return 0
+
+  # Package install from lockfile / project-scoped
+  echo "$first" | grep -qE '^(npm\s+(install|ci)|yarn\s+install|pnpm\s+install|pip\s+install\s+-r\s+requirements|pip\s+install\s+-e\s+\.|poetry\s+install|pipenv\s+install|bundle\s+install|go\s+mod\s+(download|tidy)|cargo\s+fetch)\b' && return 0
+
+  # Linting / formatting
+  echo "$first" | grep -qE '^(eslint|prettier|black|ruff|flake8|pylint|mypy|rubocop|golangci-lint|clippy|shellcheck|hadolint)\b' && return 0
+
+  # Safe file ops within typical dev dirs (mkdir, cp, mv — narrow patterns)
+  echo "$first" | grep -qE '^mkdir\s+(-p\s+)?\.' && return 0
+
+  return 1
+}
+
+# Apply tiers
+if _is_always_block "$CMD"; then
+  _block "Destructive command blocked by DevLoop safety policy. Run manually in terminal if needed."
+fi
+
+if _is_always_safe "$CMD"; then
+  _approve "safe"
+fi
+
+# ── Tier 3: Strict mode — block everything not in safe list ─────────────────
+if [[ "$PERMISSION_MODE" == "strict" ]]; then
+  _block "Command not in allowed-list (DEVLOOP_PERMISSION_MODE=strict). Add to safe patterns or switch to smart mode."
+fi
+
+# ── Tier 3: Smart mode — escalate to user ───────────────────────────────────
+_REQ_ID="req-$$-$(date '+%s')"
+_REQ_FILE="$QUEUE_DIR/$_REQ_ID.json"
+_RESP_FILE="$QUEUE_DIR/$_REQ_ID.response"
+_CMD_DISPLAY="$(printf '%s' "$CMD" | head -c 400)"
+
+python3 -c "
+import sys, json
+print(json.dumps({'id': sys.argv[1], 'tool': sys.argv[2], 'command': sys.argv[3], 'ts': sys.argv[4]}))
+" "$_REQ_ID" "$TOOL_NAME" "$_CMD_DISPLAY" "$(date '+%Y-%m-%d %H:%M:%S')" > "$_REQ_FILE" 2>/dev/null || true
+
+_log "PENDING: [$TOOL_NAME] $_CMD_DISPLAY → $_REQ_ID"
+
+# ── Path A: interactive terminal (/dev/tty available) ───────────────────────
+if [ -e /dev/tty ] && { printf '' > /dev/tty; } 2>/dev/null; then
+  {
+    printf '\n'
+    printf '⚠️  DevLoop Permission Request\n'
+    printf '   Tool:    %s\n' "$TOOL_NAME"
+    printf '   Command: %s\n' "$(printf '%s' "$_CMD_DISPLAY" | head -c 300)"
+    printf '   Allow? [y/N]: '
+  } > /dev/tty
+  if read -t "$PERMISSION_TIMEOUT" -r _resp < /dev/tty 2>/dev/null; then
+    rm -f "$_REQ_FILE"
+    case "${_resp,,}" in
+      y|yes|allow) _approve "user granted via terminal" ;;
+      *)           _block "user denied via terminal" ;;
+    esac
+  fi
+fi
+
+# ── Path B: macOS dialog (daemon / no tty) ───────────────────────────────────
+if command -v osascript &>/dev/null; then
+  _SHORT="$(printf '%s' "$_CMD_DISPLAY" | head -c 200 | sed "s/\"/'/g; s/\\\\/\\\\\\\\/g")"
+  _mac_btn="$(osascript -e "
+    set d to \"DevLoop Permission Request\n\nTool: $TOOL_NAME\nCommand: $_SHORT\n\nAllow this command?\"
+    button returned of (display dialog d buttons {\"Deny\", \"Allow\"} default button \"Deny\" with icon caution giving up after $PERMISSION_TIMEOUT)
+  " 2>/dev/null || echo "gave up")"
+  rm -f "$_REQ_FILE"
+  case "$_mac_btn" in
+    Allow) _approve "user granted via macOS dialog" ;;
+    *)     _block "user denied (or timed out) via macOS dialog" ;;
+  esac
+fi
+
+# ── Path C: Linux notify-send + queue poll (devloop permit watch) ────────────
+if command -v notify-send &>/dev/null; then
+  notify-send "DevLoop Permission Request" \
+    "Command: $(printf '%s' "$_CMD_DISPLAY" | head -c 100)" \
+    --urgency=critical --expire-time=0 2>/dev/null || true
+fi
+printf '\n[DevLoop] Permission request queued: %s\nRun: devloop permit watch\n' "$_REQ_ID" > /dev/tty 2>/dev/null || true
+
+_waited=0
+while (( _waited < PERMISSION_TIMEOUT )); do
+  if [[ -f "$_RESP_FILE" ]]; then
+    _decision="$(cat "$_RESP_FILE")"
+    rm -f "$_REQ_FILE" "$_RESP_FILE"
+    case "$_decision" in
+      allow) _approve "user granted via devloop permit" ;;
+      *)     _block "user denied via devloop permit" ;;
+    esac
+  fi
+  sleep 1
+  (( _waited++ )) || true
+done
+
+rm -f "$_REQ_FILE"
+_block "No response in ${PERMISSION_TIMEOUT}s — auto-denied for safety"
+HOOK
+  chmod +x "$hooks_dir/devloop-permission.sh"
+}
+
+# ── Audit hook (PostToolUse — all tools) ─────────────────────────────────────
+
+_write_hook_post_tool_use() {
+  local hooks_dir="$1"
+  cat > "$hooks_dir/devloop-audit.sh" <<'HOOK'
+#!/usr/bin/env bash
+# devloop-audit.sh — PostToolUse hook — logs every executed tool call
+LOG="$(git rev-parse --show-toplevel 2>/dev/null)/.devloop/permissions.log"
+mkdir -p "$(dirname "$LOG")"
+INPUT="$(cat)"
+_TMPF="$(mktemp)"
+printf '%s' "$INPUT" > "$_TMPF"
+TOOL="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('tool_name','?'))" "$_TMPF" 2>/dev/null || echo "?")"
+CMD="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); ti=d.get('tool_input',{}); print((ti.get('command') or ti.get('path',''))[:200])" "$_TMPF" 2>/dev/null || echo "")"
+rm -f "$_TMPF"
+printf '[%s] EXECUTED: [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TOOL" "$CMD" >> "$LOG"
+HOOK
+  chmod +x "$hooks_dir/devloop-audit.sh"
+}
+
+# ── Merge hooks into existing settings.json (python3-based) ──────────────────
+_merge_claude_settings_hooks() {
   local settings_file="$1"
   local hooks_dir="$2"
-  if [[ -f "$settings_file" ]]; then
-    warn ".claude/settings.json already exists — skipping (merge hooks manually if needed)"
-    return
-  fi
-  cat > "$settings_file" <<SETTINGS
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${hooks_dir}/devloop-stop.sh"
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${hooks_dir}/devloop-subagent-stop.sh"
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${hooks_dir}/devloop-notification.sh"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${hooks_dir}/devloop-session.sh"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${hooks_dir}/devloop-session.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-SETTINGS
+
+  python3 - "$settings_file" "$hooks_dir" <<'PY'
+import sys, json, os
+
+settings_file = sys.argv[1]
+hooks_dir     = sys.argv[2]
+
+data = {}
+if os.path.exists(settings_file):
+    try:
+        with open(settings_file) as f:
+            data = json.load(f)
+    except Exception:
+        pass
+
+hooks = data.setdefault("hooks", {})
+
+def upsert_hook(event, matcher, script):
+    entries = hooks.setdefault(event, [])
+    # Remove any existing DevLoop entry for this event+matcher
+    entries[:] = [e for e in entries if not any(
+        'devloop' in h.get('command','') for h in e.get('hooks',[])
+    )]
+    entries.append({
+        "matcher": matcher,
+        "hooks": [{"type": "command", "command": script}]
+    })
+
+upsert_hook("Stop",         "", os.path.join(hooks_dir, "devloop-stop.sh"))
+upsert_hook("SubagentStop", "", os.path.join(hooks_dir, "devloop-subagent-stop.sh"))
+upsert_hook("Notification", "", os.path.join(hooks_dir, "devloop-notification.sh"))
+upsert_hook("SessionStart", "", os.path.join(hooks_dir, "devloop-session.sh"))
+upsert_hook("SessionEnd",   "", os.path.join(hooks_dir, "devloop-session.sh"))
+upsert_hook("PreToolUse",   "Bash", os.path.join(hooks_dir, "devloop-permission.sh"))
+upsert_hook("PostToolUse",  "",     os.path.join(hooks_dir, "devloop-audit.sh"))
+
+os.makedirs(os.path.dirname(os.path.abspath(settings_file)), exist_ok=True)
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+print("ok")
+PY
 }
 
 cmd_hooks() {
@@ -945,7 +1158,7 @@ cmd_hooks() {
   divider
 
   mkdir -p "$hooks_dir"
-  mkdir -p "$root/$DEVLOOP_DIR"
+  mkdir -p "$root/$DEVLOOP_DIR/permission-queue"
 
   _write_hook_stop         "$hooks_dir"
   success "Hook: ${CYAN}$hooks_dir/devloop-stop.sh${RESET}"
@@ -955,10 +1168,17 @@ cmd_hooks() {
   success "Hook: ${CYAN}$hooks_dir/devloop-notification.sh${RESET}"
   _write_hook_session       "$hooks_dir"
   success "Hook: ${CYAN}$hooks_dir/devloop-session.sh${RESET}"
+  _write_hook_pre_tool_use  "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-permission.sh${RESET}  ${GRAY}(PreToolUse — Bash)${RESET}"
+  _write_hook_post_tool_use "$hooks_dir"
+  success "Hook: ${CYAN}$hooks_dir/devloop-audit.sh${RESET}       ${GRAY}(PostToolUse — all tools)${RESET}"
 
-  _write_claude_settings "$settings_file" "$hooks_dir"
-  if [[ -f "$settings_file" ]] && grep -q 'devloop-stop' "$settings_file"; then
-    success "Settings: ${CYAN}$settings_file${RESET}"
+  local merge_result
+  merge_result="$(_merge_claude_settings_hooks "$settings_file" "$hooks_dir" 2>&1)"
+  if [[ "$merge_result" == "ok" ]]; then
+    success "Settings: ${CYAN}$settings_file${RESET}  ${GRAY}(hooks merged — PreToolUse + PostToolUse added)${RESET}"
+  else
+    warn "Could not update $settings_file: $merge_result"
   fi
 
   divider
@@ -968,9 +1188,167 @@ cmd_hooks() {
   echo -e "    ${CYAN}.devloop/pipeline.log${RESET}       — Claude turns + agent completions"
   echo -e "    ${CYAN}.devloop/notifications.log${RESET}  — Claude notifications"
   echo -e "    ${CYAN}.devloop/sessions.log${RESET}       — session start/end boundaries"
+  echo -e "    ${CYAN}.devloop/permissions.log${RESET}    — permission decisions (allow/block/pending)"
   echo ""
-  echo -e "  Run ${CYAN}devloop logs${RESET} to view"
+  info "Permission mode: ${BOLD}${DEVLOOP_PERMISSION_MODE:-smart}${RESET}  ${GRAY}(change: DEVLOOP_PERMISSION_MODE in devloop.config.sh)${RESET}"
+  echo -e "  Run ${CYAN}devloop permit watch${RESET} to handle pending requests interactively"
+  echo -e "  Run ${CYAN}devloop logs${RESET} to view all logs"
   echo ""
+}
+
+# ── cmd_permit ────────────────────────────────────────────────────────────────
+
+cmd_permit() {
+  load_config
+  local root; root="$(find_project_root)"
+  local queue="$root/$DEVLOOP_DIR/permission-queue"
+  local log="$root/$DEVLOOP_DIR/permissions.log"
+  local subcmd="${1:-status}"
+
+  case "$subcmd" in
+
+    status)
+      step "🔐 DevLoop Permissions"
+      divider
+      info "Mode: ${BOLD}${DEVLOOP_PERMISSION_MODE:-smart}${RESET}  timeout: ${DEVLOOP_PERMISSION_TIMEOUT:-60}s"
+      echo ""
+      local pending=()
+      if [[ -d "$queue" ]]; then
+        while IFS= read -r f; do
+          [[ "$f" == *.json ]] && pending+=("$f")
+        done < <(ls -1t "$queue"/*.json 2>/dev/null || true)
+      fi
+      if [[ ${#pending[@]} -eq 0 ]]; then
+        success "No pending permission requests"
+      else
+        warn "${#pending[@]} pending request(s):"
+        for f in "${pending[@]}"; do
+          local id cmd_preview
+          id="$(basename "$f" .json)"
+          cmd_preview="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('command','?')[:120])" "$f" 2>/dev/null || echo "?")"
+          echo -e "  ${YELLOW}⏳ $id${RESET}"
+          echo -e "     ${GRAY}$cmd_preview${RESET}"
+        done
+        echo ""
+        echo -e "  Run ${CYAN}devloop permit watch${RESET} to handle interactively"
+        echo -e "  Run ${CYAN}devloop permit grant${RESET} / ${CYAN}devloop permit deny${RESET} to resolve latest"
+      fi
+      ;;
+
+    watch)
+      step "🔐 DevLoop Permit Watch — waiting for permission requests…"
+      divider
+      echo -e "  ${GRAY}Press Ctrl+C to stop${RESET}"
+      echo ""
+      local seen=()
+      while true; do
+        local new_reqs=()
+        if [[ -d "$queue" ]]; then
+          while IFS= read -r f; do
+            [[ "$f" == *.json ]] && new_reqs+=("$f")
+          done < <(ls -1t "$queue"/*.json 2>/dev/null || true)
+        fi
+        for f in "${new_reqs[@]}"; do
+          local already_seen=false
+          for s in "${seen[@]}"; do [[ "$s" == "$f" ]] && already_seen=true; done
+          if ! $already_seen; then
+            seen+=("$f")
+            local id; id="$(basename "$f" .json)"
+            local resp_file="$queue/$id.response"
+            local tool cmd_text ts
+            tool="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('tool','?'))" "$f" 2>/dev/null || echo "?")"
+            cmd_text="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('command','?')[:400])" "$f" 2>/dev/null || echo "?")"
+            ts="$(python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d.get('ts','?'))" "$f" 2>/dev/null || echo "?")"
+            echo ""
+            echo -e "${YELLOW}⚠️  Permission Request${RESET}  ${GRAY}[$ts]${RESET}"
+            echo -e "   Tool:    ${BOLD}$tool${RESET}"
+            echo -e "   Command: ${CYAN}$cmd_text${RESET}"
+            printf '   Allow? [y/N]: '
+            local _r=""
+            read -t "${DEVLOOP_PERMISSION_TIMEOUT:-60}" -r _r || true
+            case "${_r,,}" in
+              y|yes|allow)
+                echo "allow" > "$resp_file"
+                success "Granted: $id"
+                ;;
+              *)
+                echo "deny" > "$resp_file"
+                warn "Denied: $id"
+                ;;
+            esac
+          fi
+        done
+        sleep 0.5
+      done
+      ;;
+
+    grant)
+      local target="${2:-}"
+      local req_file=""
+      if [[ -n "$target" ]]; then
+        req_file="$queue/$target.json"
+      else
+        req_file="$(ls -1t "$queue"/*.json 2>/dev/null | head -1 || true)"
+      fi
+      if [[ -z "$req_file" ]] || [[ ! -f "$req_file" ]]; then
+        error "No pending request found${target:+ for: $target}"; exit 1
+      fi
+      local id; id="$(basename "$req_file" .json)"
+      echo "allow" > "$queue/$id.response"
+      success "Granted: $id"
+      ;;
+
+    deny)
+      local target="${2:-}"
+      local req_file=""
+      if [[ -n "$target" ]]; then
+        req_file="$queue/$target.json"
+      else
+        req_file="$(ls -1t "$queue"/*.json 2>/dev/null | head -1 || true)"
+      fi
+      if [[ -z "$req_file" ]] || [[ ! -f "$req_file" ]]; then
+        error "No pending request found${target:+ for: $target}"; exit 1
+      fi
+      local id; id="$(basename "$req_file" .json)"
+      echo "deny" > "$queue/$id.response"
+      warn "Denied: $id"
+      ;;
+
+    log)
+      if [[ -f "$log" ]]; then
+        step "🔐 Permissions Log"
+        divider
+        tail -50 "$log"
+      else
+        info "No permissions log yet. Run devloop hooks first."
+      fi
+      ;;
+
+    mode)
+      local new_mode="${2:-}"
+      case "$new_mode" in
+        off|auto|smart|strict) ;;
+        *) error "Valid modes: off | auto | smart | strict"; exit 1 ;;
+      esac
+      if [[ ! -f "$root/devloop.config.sh" ]]; then
+        error "No devloop.config.sh found. Run: devloop init"; exit 1
+      fi
+      if grep -q 'DEVLOOP_PERMISSION_MODE' "$root/devloop.config.sh"; then
+        sed -i.bak "s/^DEVLOOP_PERMISSION_MODE=.*/DEVLOOP_PERMISSION_MODE=\"$new_mode\"/" "$root/devloop.config.sh"
+      else
+        echo "DEVLOOP_PERMISSION_MODE=\"$new_mode\"" >> "$root/devloop.config.sh"
+      fi
+      rm -f "$root/devloop.config.sh.bak"
+      success "Permission mode set to: ${BOLD}$new_mode${RESET}"
+      info "Reinstall hooks: ${CYAN}devloop hooks${RESET}"
+      ;;
+
+    *)
+      error "Unknown permit subcommand: $subcmd"
+      echo "  devloop permit [status|watch|grant [id]|deny [id]|log|mode <off|auto|smart|strict>]"
+      exit 1
+      ;;
+  esac
 }
 
 cmd_logs() {
@@ -1079,6 +1457,10 @@ cmd_doctor() {
   # Hooks
   ok="false"; [[ -f "$root/.claude/settings.json" ]] && grep -q 'devloop-stop' "$root/.claude/settings.json" 2>/dev/null && ok="true"
   _chk "Claude hooks installed (.claude/settings.json)" "$ok" "devloop hooks"
+  ok="false"; [[ -f "$root/.claude/settings.json" ]] && grep -q 'devloop-permission' "$root/.claude/settings.json" 2>/dev/null && ok="true"
+  _chk "Permission hook installed (PreToolUse → devloop-permission.sh)" "$ok" "devloop hooks"
+  ok="false"; [[ -f "$root/.claude/hooks/devloop-permission.sh" ]] && ok="true"
+  _chk "Permission hook script exists" "$ok" "devloop hooks"
 
   # Tools
   echo -e "\n  ${BOLD}Tools${RESET}"
@@ -1624,6 +2006,14 @@ DEVLOOP_WORKER_PROVIDER="copilot"
 DEVLOOP_FAILOVER_ENABLED="true"
 DEVLOOP_PROBE_INTERVAL="5"   # minutes between availability probes on limited providers
 
+# Smart permission system
+# smart  — BLOCK dangerous, ALLOW safe ops, ESCALATE unknown to user (default)
+# auto   — ALLOW everything (fastest, no interruptions to the pipeline)
+# strict — ALLOW only known-safe ops, BLOCK everything else
+# off    — disable permission hook (Claude's built-in behaviour applies)
+DEVLOOP_PERMISSION_MODE="smart"
+DEVLOOP_PERMISSION_TIMEOUT="60"  # seconds to wait for user response before auto-deny
+
 # Worker mode
 # cli          — use copilot or claude CLI locally (default)
 # github-agent — create a GitHub Issue; Copilot coding agent works on it and opens a PR
@@ -1655,6 +2045,8 @@ _merge_devloop_config_defaults() {
     'DEVLOOP_WORKER_PROVIDER="copilot"'
     'DEVLOOP_FAILOVER_ENABLED="true"'
     'DEVLOOP_PROBE_INTERVAL="5"'
+    'DEVLOOP_PERMISSION_MODE="smart"'
+    'DEVLOOP_PERMISSION_TIMEOUT="60"'
     'DEVLOOP_WORKER_MODE="cli"'
     'CLAUDE_MODEL="sonnet"'
   )
@@ -4151,7 +4543,15 @@ cmd_help() {
   echo -e "  ${CYAN}devloop check${RESET}"
   echo -e "    Check for available DevLoop updates (requires DEVLOOP_VERSION_URL)\n"
   echo -e "  ${CYAN}devloop hooks${RESET}"
-  echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)\n"
+  echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)"
+  echo -e "    Includes: PreToolUse permission hook + PostToolUse audit hook\n"
+  echo -e "  ${CYAN}devloop permit [subcmd]${RESET}  ${GRAY}← manage permission requests${RESET}"
+  echo -e "    ${GRAY}status${RESET}           — show pending permission requests"
+  echo -e "    ${GRAY}watch${RESET}            — interactive prompt for pending requests"
+  echo -e "    ${GRAY}grant [id]${RESET}       — allow latest (or named) pending request"
+  echo -e "    ${GRAY}deny [id]${RESET}        — deny latest (or named) pending request"
+  echo -e "    ${GRAY}log${RESET}              — view permissions audit log"
+  echo -e "    ${GRAY}mode <mode>${RESET}      — set mode: off|auto|smart|strict\n"
   echo -e "  ${CYAN}devloop logs [-f|--follow]${RESET}"
   echo -e "    View recent pipeline/notification/session logs (or tail with -f)\n"
   echo -e "  ${CYAN}devloop doctor${RESET}"
@@ -4201,6 +4601,24 @@ cmd_help() {
   echo -e "  Original provider is probed every ${CYAN}DEVLOOP_PROBE_INTERVAL${RESET} minutes (default 5)"
   echo -e "  and restored immediately when available again — no fixed wait time"
   echo -e "  Run ${CYAN}devloop failover status${RESET} to check current state\n"
+  echo -e "${BOLD}SMART PERMISSIONS${RESET}\n"
+  echo -e "  DevLoop intercepts every Bash tool call via Claude's PreToolUse hook."
+  echo -e "  Commands are classified and handled without blocking the pipeline:\n"
+  echo -e "  ${BOLD}Modes${RESET} (DEVLOOP_PERMISSION_MODE in devloop.config.sh):"
+  echo -e "  ${CYAN}smart${RESET}    BLOCK dangerous, ALLOW safe, ESCALATE everything else ${GRAY}(default)${RESET}"
+  echo -e "  ${CYAN}auto${RESET}     ALLOW everything (fastest, no interruptions)"
+  echo -e "  ${CYAN}strict${RESET}   ALLOW safe ops only, BLOCK everything else + ask user"
+  echo -e "  ${CYAN}off${RESET}      Disable hook entirely (Claude's default behaviour)\n"
+  echo -e "  ${BOLD}Always BLOCKED${RESET}:  rm -rf / or ~, curl|bash, dd to /dev/sd*, mkfs, sudo rm -rf"
+  echo -e "  ${BOLD}Always ALLOWED${RESET}: cat/grep/find/ls, git status/log/diff, pytest/npm test/cargo test,"
+  echo -e "                   builds, package install from lockfile, linters\n"
+  echo -e "  ${BOLD}Escalation${RESET} (unknown commands):"
+  echo -e "    1. Terminal prompt (/dev/tty) — works in foreground sessions"
+  echo -e "    2. macOS dialog (osascript)   — works in daemon/background mode"
+  echo -e "    3. Queue file + devloop permit watch — Linux / headless fallback"
+  echo -e "    Auto-deny after DEVLOOP_PERMISSION_TIMEOUT seconds (default: 60)\n"
+  echo -e "  ${CYAN}devloop permit watch${RESET}   — monitor and respond to pending escalations"
+  echo -e "  ${CYAN}devloop permit mode auto${RESET} — disable escalations entirely\n"
   echo -e "${BOLD}WORKER MODES${RESET}\n"
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
   echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"
@@ -4238,6 +4656,7 @@ main() {
     check)        cmd_check     "$@" ;;
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)     cmd_failover  "$@" ;;
+    permit)       cmd_permit    "$@" ;;
     hooks)        cmd_hooks     "$@" ;;
     logs)         cmd_logs      "$@" ;;
     doctor)       cmd_doctor    "$@" ;;
