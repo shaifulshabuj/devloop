@@ -1,76 +1,54 @@
 # 🔁 DevLoop
 
-**Claude Code + GitHub Copilot CLI — configurable remote-controllable dev pipeline**
+**Multi-agent AI development pipeline — remote-controllable, self-healing, provider-flexible**
 
-A single shell script that wires Claude Code and Copilot CLI into a fully automated development loop. You can route the main roles and worker roles to Claude, Copilot, or a mix, while the v1 launcher stays Claude remote-control.
+A single shell script that orchestrates Claude Code, GitHub Copilot, OpenCode, and Pi into a fully automated design → implement → review loop. Configure which AI handles which role, start a remote session, and send feature requests from your phone.
 
 ```
-You (mobile / browser — remotely)
-         ↓ "add order filtering by date range"
-Claude Code --remote-control (your Mac)
-          ↓
-  provider-selected main role → designs/spec-reviews/orchestrates
-          ↓
-  provider-selected worker   → implements with /plan mode (full spec)
-          ↓
-  provider-selected review    → reviews git diff against spec
+You (mobile / browser — anywhere)
+         ↓  "add order filtering by date range"
+Main provider  (architect + reviewer: Claude or Copilot)
+          ↓  precise implementation spec
+Worker provider (implementer: Claude | Copilot | OpenCode | Pi)
+          ↓  commit
+Main provider  (reviews git diff vs spec)
          ↓
   APPROVED ✅  or  loop back for fixes ⚠️
+         ↓  auto-failover if any provider hits its rate limit
 ```
 
----
+📖 **[USAGE.md](./USAGE.md)** — Five complete end-to-end walkthroughs
 
-## Architecture Diagrams
-
-Detailed Mermaid diagrams covering every aspect of the pipeline, file lifecycle, agent collaboration, daemon behaviour, and data flow:
-
-📊 **[DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md)**
-
-| Diagram | Description |
-|---------|-------------|
-| 1. Full Pipeline | End-to-end flow from user request to APPROVED |
-| 2. Command Reference | Every command grouped by category with aliases |
-| 3. `devloop init` | All files created and provider/model propagation |
-| 4. File Lifecycle | All 4 files per task — who writes, reads, and deletes each |
-| 5. Git Baseline | How `.pre-commit` enables precise multi-commit diffs |
-| 6. `devloop work` prompt | Exact structure sent to the worker provider |
-| 7. `devloop review` prompt | Diff computation, compact spec assembly, main provider prompt |
-| 8. Daemon & Auto-restart | Background loop, backoff, launchd/systemd registration |
-| 9. Status State Machine | `pending → approved/needs_work/rejected` transitions |
-| 10. Agent Collaboration | Orchestrator ↔ Architect ↔ Reviewer ↔ Copilot roles |
-| 11. `devloop clean` | File selection logic and dry-run path |
+📊 **[DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md)** — 11 Mermaid architecture diagrams
 
 ---
 
 ## Requirements
 
-| Tool | Install |
-|------|---------|
-| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
-| `copilot` | `gh extension install github/gh-copilot` |
-| `gh` | `brew install gh` (required for `github-agent` mode) |
-| `git` | https://git-scm.com |
+| Tool | Role | Install |
+|------|------|---------|
+| `claude` | Main/worker CLI | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `copilot` | Main/worker CLI | `npm install -g @github/copilot` |
+| `opencode` | Worker only (optional) | `npm install -g opencode-ai` |
+| `pi` | Worker only (optional) | https://pi.dev/docs/latest |
+| `gh` | GitHub agent mode | `brew install gh` |
+| `git` | Always required | https://git-scm.com |
 
 ---
 
 ## Install
 
 ```bash
-# Download
-curl -fsSL https://raw.githubusercontent.com/you/devloop/main/devloop.sh -o devloop.sh
+# Download and install globally
+curl -fsSL https://raw.githubusercontent.com/you/devloop/main/devloop.sh -o /tmp/devloop
+chmod +x /tmp/devloop && sudo mv /tmp/devloop /usr/local/bin/devloop
 
-# Make executable and install globally
-chmod +x devloop.sh
-sudo mv devloop.sh /usr/local/bin/devloop
+# Or use the built-in installer if you already have the file:
+devloop install              # → /usr/local/bin/devloop
+devloop install ~/bin/devloop  # custom path
 
 # Verify
-devloop --version
-```
-
-Or use the built-in `install` command if you already have the file:
-```bash
-devloop install              # installs to /usr/local/bin/devloop
-devloop install ~/bin/devloop  # custom path
+devloop --version            # DevLoop v3.1.0
 ```
 
 Enable self-updates by setting in `devloop.config.sh`:
@@ -86,20 +64,47 @@ Then run `devloop update` to upgrade in place.
 ```bash
 cd your-project/
 
-# 1. Initialize DevLoop (one-time per project)
+# 1. Initialize (one-time per project)
 devloop init
 
-# 2. Edit your stack
+# 2. Configure your stack
 nano devloop.config.sh
 
-# 3. Start the session
-devloop start
-# → scan QR code or open claude.ai/code on your phone
+# 3. Validate everything is wired up
+devloop doctor
 
-# 4. From your phone, type:
+# 4. Start the session
+devloop start
+# → find "DevLoop: your-project" in Claude app or claude.ai/code
+
+# 5. From your phone:
 #    "add GET /orders endpoint with date range filter"
-#    → the configured providers design, implement, and review automatically
+#    → providers design, implement, and review automatically
 ```
+
+→ Full walkthrough in [USAGE.md — Scenario 1](./USAGE.md#scenario-1--new-project-default-setup-claude--copilot)
+
+---
+
+## Architecture Diagrams
+
+Detailed Mermaid diagrams covering every aspect of the pipeline:
+
+📊 **[DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md)**
+
+| Diagram | Description |
+|---------|-------------|
+| 1. Full Pipeline | End-to-end flow from user request to APPROVED |
+| 2. Command Reference | Every command grouped by category with aliases |
+| 3. `devloop init` | All files created and provider/model propagation |
+| 4. File Lifecycle | All 4 files per task — who writes, reads, and deletes each |
+| 5. Git Baseline | How `.pre-commit` enables precise multi-commit diffs |
+| 6. `devloop work` prompt | Exact structure sent to the worker provider |
+| 7. `devloop review` prompt | Diff computation, compact spec assembly, main provider prompt |
+| 8. Daemon & Auto-restart | Background loop, backoff, launchd/systemd registration |
+| 9. Status State Machine | `pending → approved/needs_work/rejected` transitions |
+| 10. Agent Collaboration | Orchestrator ↔ Architect ↔ Reviewer ↔ Worker roles |
+| 11. `devloop clean` | File selection logic and dry-run path |
 
 ---
 
@@ -111,111 +116,67 @@ Copies the script to `/usr/local/bin/devloop` (or a custom path). Uses `sudo` if
 ---
 
 ### `devloop init`
-Sets up DevLoop in the current project. Run once per project.
+Sets up DevLoop in the current project. Run once per project (safe to re-run — existing files are skipped).
 
 **Creates:**
 | File | Purpose |
 |------|---------|
 | `devloop.config.sh` | Your project stack, patterns, conventions |
 | `CLAUDE.md` | Persistent instructions for Claude Code sessions |
-| `.github/copilot-instructions.md` | Persistent instructions for Copilot (includes stack, patterns, commit format) |
+| `.github/copilot-instructions.md` | Persistent instructions for Copilot |
 | `.claude/agents/devloop-orchestrator.md` | Main agent — coordinates the loop |
 | `.claude/agents/devloop-architect.md` | Subagent — designs specs |
 | `.claude/agents/devloop-reviewer.md` | Subagent — reviews implementation |
-| `.devloop/specs/` | Where task specs and reviews are saved |
+| `.devloop/specs/` | Task specs and reviews |
 | `.devloop/prompts/` | Extracted Copilot instruction blocks |
-
-Running `devloop init` again is safe — existing files are skipped, so your customizations are preserved.
 
 **After init, edit `devloop.config.sh`:**
 ```bash
 PROJECT_NAME="MyProject"
-PROJECT_STACK="Python, Flask, PostgreSQL"
+PROJECT_STACK="Python, FastAPI, PostgreSQL"
 PROJECT_PATTERNS="SOLID, Repository Pattern, Clean Architecture"
 PROJECT_CONVENTIONS="type hints everywhere, custom exceptions, no magic strings"
 TEST_FRAMEWORK="pytest"
-DEVLOOP_MAIN_PROVIDER="claude"   # or "copilot"
-DEVLOOP_WORKER_PROVIDER="copilot" # or "claude"
-CLAUDE_MODEL="sonnet"            # used when a role routes to Claude
+DEVLOOP_MAIN_PROVIDER="claude"    # claude | copilot
+DEVLOOP_WORKER_PROVIDER="copilot" # claude | copilot | opencode | pi
+CLAUDE_MODEL="sonnet"             # sonnet | opus
+DEVLOOP_FAILOVER_ENABLED="true"   # auto-switch on rate limits
+DEVLOOP_PROBE_INTERVAL="5"        # minutes between provider availability probes
 ```
-
-Agent `.md` files in `.claude/agents/` are regenerated automatically to stay in sync with the config whenever you run `devloop init`.
-
-### Provider routing
-
-| Mode | Main roles | Worker roles | Notes |
-|------|------------|--------------|-------|
-| Current | Claude | Copilot | default |
-| All Copilot | Copilot | Copilot | launcher still Claude in v1 |
-| All Claude | Claude | Claude | simplest uniform mode |
-| Mixed | Copilot | Claude | reverse of current |
-
-`devloop.config.sh` is the switch. Set `DEVLOOP_MAIN_PROVIDER` and `DEVLOOP_WORKER_PROVIDER` to the pair you want.
 
 ---
 
 ### `devloop start [project-name]`  · alias: `s`
-Launches Claude Code with remote control and the orchestrator agent.
-In v1 the launcher remains Claude; provider routing applies behind that session.
+Launches the main provider session with remote control enabled.
 
-- **Prevents Mac sleep** via `caffeinate -is` for the entire session duration
-- Sleep prevention is stopped automatically when you press Ctrl+C
+- **Prevents Mac sleep** via `caffeinate -is` for the entire session
+- Session name appears in Claude app / claude.ai/code for remote access
 
 ```bash
 devloop start
 devloop start "Avail OMS"   # custom session name
 ```
 
-**Connect from:**
-- 📱 Claude app → look for `"DevLoop: project-name"` with a green dot
-- 🌐 https://claude.ai/code → session list
-
 ---
 
 ### `devloop daemon [project-name]`  · alias: `d`
-Runs DevLoop in the **background** with auto-restart and sleep prevention. Best for long sessions or when you want to close the terminal.
+Runs DevLoop in the **background** with auto-restart and sleep prevention.
 
 ```bash
-devloop daemon              # start in background
+devloop daemon              # start in background (close terminal safely)
 devloop daemon status       # check if running + last 10 log lines
 devloop daemon log          # tail live logs
 devloop daemon stop         # stop the daemon
-devloop daemon uninstall    # remove auto-start entry (launchd or systemd)
+devloop daemon uninstall    # remove auto-start (launchd or systemd)
 ```
 
-**What daemon does differently from `start`:**
-- Runs the Claude session in a background process — you can close the terminal
-- **Auto-restarts** if Claude crashes or the connection drops
-- Uses exponential backoff between restarts (5s → 10s → ... → 60s max, 20 retries)
-- Restarts `caffeinate -is` fresh on each attempt — survives wake from sleep
-- **macOS**: Registers a launchd agent so DevLoop starts automatically on login
-- **Linux**: Registers a systemd user service so DevLoop starts automatically on login
-- Logs everything to `.devloop/daemon.log`
+**What daemon does differently:**
+- Runs in a background process — you can close the terminal
+- **Auto-restarts** on crash with exponential backoff (5s → 60s max, 20 retries)
+- **macOS**: Registers a launchd agent → starts on login automatically
+- **Linux**: Registers a systemd user service → starts on login automatically
 
-**Recommended for Mac mini (always-on):**
-```bash
-devloop daemon        # start once, close terminal
-# work from phone all day
-devloop daemon stop   # done for the day
-```
-
-**Logs:**
-```
-.devloop/daemon.log              ← session events + restart history
-.devloop/launchd.log             ← stdout from launchd-managed process (macOS)
-.devloop/launchd-error.log       ← stderr from launchd-managed process (macOS)
-```
-
-**macOS launchd agent** (`~/Library/LaunchAgents/com.devloop.projectname.plist`):
-- `RunAtLoad: true` — starts when you log in
-- `KeepAlive: true` — macOS restarts it if it crashes
-- `ProcessType: Interactive` — hints to macOS not to aggressively suspend it
-- Remove with: `devloop daemon uninstall`
-
-**Linux systemd user service** (`~/.config/systemd/user/devloop-projectname.service`):
-- `WantedBy: default.target` — starts on user login
-- `Restart: on-failure` — systemd restarts on crash
-- Remove with: `devloop daemon uninstall`
+→ Walkthrough: [USAGE.md — Scenario 2](./USAGE.md#scenario-2--existing-project-mobile-first-remote-control-via-phone)
 
 ---
 
@@ -230,39 +191,32 @@ devloop architect "extract IOrderRepository interface" refactor
 
 Types: `feature` (default) | `bugfix` | `refactor` | `test`
 
-**What it produces:**
-- Full spec in `.devloop/specs/TASK-YYYYMMDD-HHMMSS.md` (seconds precision — no same-minute collisions)
+**Produces:**
+- Full spec in `.devloop/specs/TASK-YYYYMMDD-HHMMSS.md`
 - Copilot Instructions Block printed to terminal and saved to `.devloop/prompts/`
-- Task ID for use in subsequent commands
-
-> Normally called automatically by the orchestrator agent. Run manually to design a spec without starting a full session.
 
 ---
 
 ### `devloop work [TASK-ID]`  · alias: `w`
-Launches the configured worker provider with the **full task spec** pre-loaded in `/plan` mode.
+Launches the configured worker provider with the **full task spec** pre-loaded.
 
 ```bash
 devloop work                        # uses latest task
-devloop work TASK-20260504-093022
+devloop work TASK-20260509-143022
 ```
 
-- Validates spec completeness before launching (checks for `## Copilot Instructions Block` section)
-- Records a **git baseline** (current HEAD) to `.devloop/specs/TASK-ID.pre-commit` so `devloop review` can diff exactly what changed
-- Prepends **live runtime context** (stack, patterns, conventions, test framework) from `devloop.config.sh` — always up to date even on re-runs
-- Prints the runtime context to terminal for visibility
-- In `github-agent` mode, creates a GitHub Issue and waits for the Copilot coding agent to open a PR
+- Records a **git baseline** so `devloop review` diffs exactly what changed
+- Prepends live runtime context (stack, patterns, conventions, test framework)
+- **Worker failover**: if the worker hits its limit, automatically cascades to the next in chain (copilot → opencode → pi)
 
 #### Worker modes
-
-Set `DEVLOOP_WORKER_MODE` in `devloop.config.sh`:
 
 | Mode | Behaviour |
 |------|-----------|
 | `cli` (default) | Runs the worker provider as a local CLI process |
-| `github-agent` | Creates a GitHub Issue with the spec; Copilot coding agent works on it and opens a PR automatically |
+| `github-agent` | Creates a GitHub Issue; Copilot coding agent opens a PR |
 
-`github-agent` mode requires `gh` CLI authenticated with repo write access and a `copilot` label in the repository. Run `devloop init` after setting this mode to generate `copilot-setup-steps.yml`.
+Set `DEVLOOP_WORKER_MODE` in `devloop.config.sh`.
 
 ---
 
@@ -271,36 +225,69 @@ The configured main provider reviews the implementation against the original spe
 
 ```bash
 devloop review
-devloop review TASK-20260504-093022
+devloop review TASK-20260509-143022
 ```
 
-**How the diff is computed:**
-- Uses the git baseline saved by `devloop work` (`TASK-ID.pre-commit`) to diff exactly what Copilot added — even across multiple commits
-- Falls back to uncommitted `git diff` / `git diff --cached` if no baseline exists
-
-**Returns:**
+**Verdicts:**
 | Verdict | Meaning |
 |---------|---------|
 | `✅ APPROVED` | Implementation matches spec, tests present |
-| `⚠️ NEEDS_WORK` | Fixable issues — Copilot Instructions block provided |
-| `❌ REJECTED` | Wrong approach or security issue — consider restarting |
+| `⚠️ NEEDS_WORK` | Fixable issues — fix instructions provided |
+| `❌ REJECTED` | Wrong approach — consider redesigning spec |
 
-Review is saved to `.devloop/specs/TASK-ID-review.md` and the spec status is updated.
+Review is saved to `.devloop/specs/TASK-ID-review.md`.
 
 ---
 
 ### `devloop fix [TASK-ID]`  · alias: `f`
-Launches the configured worker provider with fix instructions from the latest review.
+Launches the configured worker provider with the reviewer's fix instructions.
 
 ```bash
 devloop fix
-devloop fix TASK-20260504-093022
+devloop fix TASK-20260509-143022
 ```
 
-- Extracts fix instructions from the review (handles fenced code blocks with or without language tags)
-- **Updates the git baseline** after Copilot commits so the next `devloop review` diffs only the new changes
+Updates the git baseline after fixing, so the next `devloop review` diffs only the new changes.
 
-Run `devloop review` again after Copilot fixes. Repeat until `APPROVED`.
+---
+
+### `devloop failover [subcmd]`
+Manage automatic provider failover when rate limits hit.
+
+```bash
+devloop failover status                  # show current health + probe timing
+devloop failover reset                   # clear all overrides, restore configured providers
+devloop failover probe                   # test all providers right now
+devloop failover main copilot            # force main to Copilot
+devloop failover main clear              # restore configured main
+devloop failover worker opencode         # force worker to OpenCode
+devloop failover worker clear            # restore configured worker
+```
+
+**How auto-failover works:**
+1. Every provider call captures output and checks for rate-limit patterns
+2. On detection: saves health state, switches to next provider in chain, continues
+3. On every subsequent command: probes the limited provider (at most every `DEVLOOP_PROBE_INTERVAL` minutes)
+4. Restores the original provider the moment the probe succeeds — no fixed wait time
+
+**Failover chains:**
+- Main: `claude → copilot`
+- Worker: `copilot → opencode → pi`
+
+→ Walkthrough: [USAGE.md — Scenario 5](./USAGE.md#scenario-5--smart-provider-failover-automatic-limit-handling)
+
+---
+
+### `devloop agent-sync`  · aliases: `sync-agents`, `agentsync`
+Fetches and caches the latest documentation for all configured providers (24h TTL), checks installed versions, and uses the main AI to analyse what's new.
+
+```bash
+devloop agent-sync
+```
+
+- Cached in `.devloop/agent-docs/` — read by Claude on every session
+- Updates `CLAUDE.md` with provider-specific insights
+- `devloop doctor` warns if docs are stale (>7 days)
 
 ---
 
@@ -310,40 +297,39 @@ Lists all task specs with status icons.
 ```bash
 devloop tasks
 
-# Output:
-# ✅ TASK-20260504-093022   add order filtering by date range   ✅ approved
-# ⚠️  TASK-20260503-141530   paginate product listing            ⚠️ needs-work
-# ⏳ TASK-20260503-110045   add auth middleware                  pending
+# ✅ TASK-20260509-143022   add order filtering by date range   ✅ approved
+# ⚠️  TASK-20260508-141530   paginate product listing            ⚠️ needs-work
+# ⏳ TASK-20260508-110045   add auth middleware                  pending
 ```
 
 ---
 
 ### `devloop status [TASK-ID]`
-Shows the full spec and latest review for a task.
+Shows the full spec, latest review, and current provider health.
 
 ```bash
 devloop status                          # latest task
-devloop status TASK-20260504-093022
+devloop status TASK-20260509-143022
 ```
 
 ---
 
 ### `devloop open [TASK-ID]`  · alias: `o`
-Opens the task spec in `$EDITOR` (falls back to `vi`).
+Opens the task spec in `$EDITOR`.
 
 ```bash
-devloop open                            # latest task
-devloop open TASK-20260504-093022
+devloop open
+devloop open TASK-20260509-143022
 ```
 
 ---
 
 ### `devloop block [TASK-ID]`  · alias: `b`
-Prints the Copilot Instructions Block from a spec — useful for manually pasting into Copilot chat.
+Prints the Copilot Instructions Block — useful for pasting into Copilot chat manually.
 
 ```bash
-devloop block                           # latest task
-devloop block TASK-20260504-093022
+devloop block
+devloop block TASK-20260509-143022
 ```
 
 ---
@@ -352,56 +338,43 @@ devloop block TASK-20260504-093022
 Removes finalized specs (approved/rejected) older than N days. Pending and needs-work tasks are **always preserved**.
 
 ```bash
-devloop clean                   # remove approved/rejected specs older than 30 days
-devloop clean --days 7          # use 7-day threshold
-devloop clean --dry-run         # preview what would be removed, no changes made
+devloop clean                   # remove approved/rejected older than 30 days
+devloop clean --days 7
+devloop clean --dry-run         # preview — no changes made
 ```
-
-Also removes associated files per task: review `.md`, `.pre-commit` baseline, and `-copilot.txt` prompt.
 
 ---
 
 ### `devloop learn [TASK-ID]`
-Extracts lessons from the latest review cycle and appends them to `CLAUDE.md` under `## Learned Patterns`. This is the self-improvement mechanism — Claude reads these patterns in future sessions.
+Extracts lessons from the latest review and appends them to `CLAUDE.md → ## Learned Patterns`. Claude reads these patterns in every future session — this is the self-improvement loop.
 
 ```bash
-devloop learn                       # extract lessons from latest task
-devloop learn TASK-20260504-093022
+devloop learn
+devloop learn TASK-20260509-143022
 ```
 
 ---
 
 ### `devloop check`
-Checks for a newer version of DevLoop against the manifest URL.
+Checks for a newer DevLoop version against `DEVLOOP_VERSION_URL`.
 
 ```bash
-devloop check
-
-# Set the manifest URL in devloop.config.sh:
+# Set in devloop.config.sh:
 DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/you/devloop/main/VERSION"
+devloop check
 ```
-
-The manifest is a plain text file with a semver string on the first line (e.g., `3.0.0`). `devloop start` also performs a silent background check and shows a hint if an update is available.
 
 ---
 
 ### `devloop hooks`
-Installs Claude Code pipeline hooks into `.claude/settings.json` and `.claude/hooks/`. These hooks provide visibility into Claude's activity without polling.
+Installs Claude Code pipeline hooks into `.claude/settings.json`.
 
-```bash
-devloop hooks
-```
-
-**Hooks installed:**
-
-| Event | Script | What it does |
-|-------|--------|--------------|
-| `Stop` | `devloop-stop.sh` | Logs task summary when Claude finishes |
-| `SubagentStop` | `devloop-subagent-stop.sh` | Records which subagent completed and keywords from its verdict |
-| `Notification` | `devloop-notification.sh` | Saves all Claude notifications to `.devloop/notifications.log` |
-| `SessionStart` / `SessionEnd` | `devloop-session.sh` | Records session boundaries to `.devloop/sessions.log` |
-
-After installing, use `devloop logs` to view the collected data.
+| Hook event | What it captures |
+|------------|-----------------|
+| `Stop` | Task summary when Claude finishes |
+| `SubagentStop` | Which subagent completed + verdict keywords |
+| `Notification` | All Claude notifications → `.devloop/notifications.log` |
+| `SessionStart/End` | Session boundaries → `.devloop/sessions.log` |
 
 ---
 
@@ -409,111 +382,112 @@ After installing, use `devloop logs` to view the collected data.
 Views DevLoop pipeline logs.
 
 ```bash
-devloop logs                        # show pipeline log
-devloop logs pipeline               # same
-devloop logs notifications          # notification log
-devloop logs sessions               # session boundaries log
+devloop logs                  # pipeline log
+devloop logs notifications    # Claude notifications
+devloop logs sessions         # session boundaries
 ```
 
 ---
 
 ### `devloop doctor`
-Validates that all DevLoop dependencies and configuration are healthy before starting.
+Validates all dependencies and configuration.
 
 ```bash
 devloop doctor
 ```
 
-Checks: `claude` auth, `copilot` auth, `gh` auth, git config, agent files, `devloop.config.sh`, version currency.
+Checks: provider auth, git config, agent files, config file, version currency, stale agent docs.
 
 ---
 
 ### `devloop ci`
 Generates `.github/workflows/devloop-review.yml` — a GitHub Actions workflow that triggers Claude to review PRs automatically.
 
-```bash
-devloop ci
-```
-
-Requires `ANTHROPIC_API_KEY` secret in the GitHub repository. The workflow runs `devloop review` on every pull request using the `anthropics/claude-code-action` integration.
+Requires `ANTHROPIC_API_KEY` secret in the repository.
 
 ---
 
 ### `devloop tools [audit|suggest|add|sync]`
-Manage MCP servers, Claude skills, plugins, and Copilot path-specific instructions at the project level.
+Manage MCP servers, Claude skills, plugins, and Copilot path-specific instructions.
 
 ```bash
-devloop tools audit    # inventory: global vs project tools
-devloop tools suggest  # stack-specific recommendations
-devloop tools add      # interactive installer (pick from suggestions)
-devloop tools sync     # copy global MCP/skills down to project level
+devloop tools audit    # global vs project tool inventory
+devloop tools suggest  # stack-based recommendations
+devloop tools add      # interactive install
+devloop tools sync     # copy global tools to project level
 ```
 
-**Explicit add flags (non-interactive):**
 ```bash
-# Add an MCP server to both .mcp.json (Claude) and .vscode/mcp.json (Copilot)
+# Non-interactive flags:
 devloop tools add --mcp context7 npx -y @upstash/context7-mcp
-
-# Scaffold a Claude skill
 devloop tools add --skill code-review "Thorough code review with security checks"
-
-# Create a Copilot path-specific instruction file
 devloop tools add --instruction tests "**/*.test.ts,**/*.spec.ts"
-
-# Print plugin install command (plugins require interactive Claude)
 devloop tools add --plugin playwright
 ```
-
-**Key design decisions:**
-- Claude uses `.mcp.json` (`mcpServers` key); Copilot/VS Code uses `.vscode/mcp.json` (`servers` key). DevLoop automatically writes **both** and translates the schema.
-- Skills live at `.claude/skills/<name>/SKILL.md`; global skills are at `~/.claude/skills/`.
-- `devloop tools audit` reads all layers and shows a gap analysis.
-- `devloop tools suggest` uses `PROJECT_STACK` from `devloop.config.sh` to recommend relevant tools.
-- Plugins can only be installed via an interactive Claude session — DevLoop prints the command.
 
 ---
 
 ### `devloop update`
-Self-upgrades devloop by downloading from `DEVLOOP_SOURCE_URL`.
+Self-upgrades devloop from `DEVLOOP_SOURCE_URL`.
 
 ```bash
-# Set in devloop.config.sh:
-DEVLOOP_SOURCE_URL="https://raw.githubusercontent.com/you/devloop/main/devloop.sh"
-
-# Then run:
-devloop update
+devloop update   # shows diff, backs up current binary, applies update
 ```
 
-Shows a diff of what changed before applying. Backs up the current binary to `devloop.sh.bak`. Exits with an error (and instructions) if `DEVLOOP_SOURCE_URL` is not configured.
+---
+
+## Provider Routing & Auto-Failover
+
+### Supported provider combinations
+
+| Main | Worker | Use case |
+|------|--------|----------|
+| `claude` | `copilot` | Default — best balance |
+| `claude` | `claude` | Uniform Claude, no Copilot needed |
+| `copilot` | `copilot` | Uniform Copilot, no Claude needed |
+| `copilot` | `claude` | Copilot orchestrates, Claude implements |
+| `claude` | `opencode` | Lightweight worker for smaller tasks |
+| `claude` | `pi` | Minimal footprint worker |
+
+Set in `devloop.config.sh`:
+```bash
+DEVLOOP_MAIN_PROVIDER="claude"
+DEVLOOP_WORKER_PROVIDER="copilot"
+```
+
+> **Note:** `opencode` and `pi` are worker-only — they have no remote-control support.
+
+### Auto-failover chains
+
+When a provider hits its rate limit, DevLoop automatically switches to the next:
+```
+Main:   claude → copilot
+Worker: copilot → opencode → pi
+```
+
+Each provider is probed for availability every `DEVLOOP_PROBE_INTERVAL` minutes (default: 5). When it responds, it is restored immediately — no fixed waiting period.
+
+→ Walkthrough: [USAGE.md — Scenario 5](./USAGE.md#scenario-5--smart-provider-failover-automatic-limit-handling)
 
 ---
 
 ## The Full Remote Loop
 
 ```bash
-# On your Mac (terminal):
-devloop daemon            # start once, close terminal
+# On your Mac (once):
+devloop daemon            # start, close terminal
 
-# On your phone (Claude app):
-# Find "DevLoop: MyProject" → open session
-
-# Type:
+# On your phone (Claude app → "DevLoop: MyProject"):
 "add pagination to the orders list endpoint"
 
-# Claude orchestrator responds:
-# 📐 Designing spec...
-#    @devloop-architect is creating the implementation spec
-
-# 🤖 Copilot implementing...
-#    devloop work TASK-20260504-103022
-
-# 🔍 Reviewing...
-#    @devloop-reviewer is checking the git diff
-
-# ✅ Approved!
-#    Added GetOrdersPaged() with page/pageSize params and pytest tests.
-#    3 files modified: routes.py, repository.py, tests/test_orders.py
+# Orchestrator responds automatically:
+# 📐 Designing spec...  (Claude architect)
+# 🤖 Implementing...    (Copilot worker)
+# 🔍 Reviewing...       (Claude reviewer)
+# ✅ Approved — routes.py, repository.py, test_orders.py changed
 ```
+
+→ Full walkthroughs: **[USAGE.md](./USAGE.md)**
 
 ---
 
@@ -523,67 +497,54 @@ devloop daemon            # start once, close terminal
 your-project/
 ├── devloop.config.sh                        ← edit this with your stack
 ├── CLAUDE.md                                ← Claude Code persistent context
-├── copilot-setup-steps.yml                  ← Copilot agent environment setup (github-agent mode)
+├── copilot-setup-steps.yml                  ← Copilot agent env (github-agent mode)
 ├── .github/
-│   ├── copilot-instructions.md              ← Copilot persistent context (stack + commit format)
-│   ├── instructions/                        ← Path-specific Copilot instructions (devloop tools add --instruction)
-│   │   └── tests.instructions.md
+│   ├── copilot-instructions.md              ← Copilot persistent context
+│   ├── instructions/                        ← Path-specific Copilot instructions
 │   └── workflows/
-│       └── devloop-review.yml               ← CI review workflow (generated by devloop ci)
+│       └── devloop-review.yml               ← CI review workflow (devloop ci)
 ├── .vscode/
-│   └── mcp.json                             ← Copilot/VS Code MCP servers (devloop tools add/sync)
-├── .mcp.json                                ← Claude project MCP servers (devloop tools add/sync)
+│   └── mcp.json                             ← Copilot/VS Code MCP servers
+├── .mcp.json                                ← Claude project MCP servers
 ├── .claude/
-│   ├── settings.json                        ← Claude hooks config (generated by devloop hooks)
+│   ├── settings.json                        ← Claude hooks config
 │   ├── hooks/                               ← Pipeline hook scripts
-│   │   ├── devloop-stop.sh
-│   │   ├── devloop-subagent-stop.sh
-│   │   ├── devloop-notification.sh
-│   │   └── devloop-session.sh
-│   ├── skills/                              ← Claude skills (devloop tools add --skill / sync)
-│   │   └── <name>/SKILL.md
+│   ├── skills/                              ← Claude skills
 │   └── agents/
-│       ├── devloop-orchestrator.md          ← main agent (written by init)
-│       ├── devloop-architect.md             ← subagent (written by init)
-│       └── devloop-reviewer.md              ← subagent (written by init)
+│       ├── devloop-orchestrator.md          ← main agent
+│       ├── devloop-architect.md             ← subagent
+│       └── devloop-reviewer.md              ← subagent
 └── .devloop/
-    ├── daemon.pid                           ← daemon process ID
-    ├── daemon.log                           ← restart history + events
-    ├── pipeline.log                         ← hook-captured pipeline events
-    ├── notifications.log                    ← Claude notifications
-    ├── sessions.log                         ← session start/end boundaries
+    ├── provider-health.sh                   ← auto-failover state (runtime, gitignore)
+    ├── agent-docs/                          ← cached provider docs (devloop agent-sync)
+    │   ├── claude-docs.md
+    │   ├── copilot-docs.md
+    │   └── provider-context.md
+    ├── daemon.pid / daemon.log              ← daemon state
+    ├── pipeline.log                         ← hook-captured events
+    ├── notifications.log / sessions.log     ← Claude logs
     ├── specs/
-    │   ├── TASK-20260504-093022.md          ← full spec
-    │   ├── TASK-20260504-093022.pre-commit  ← git baseline for review diff
-    │   ├── TASK-20260504-093022-review.md   ← Claude's review
+    │   ├── TASK-20260509-143022.md          ← full spec
+    │   ├── TASK-20260509-143022.pre-commit  ← git baseline
+    │   ├── TASK-20260509-143022-review.md   ← review
     │   └── ...
     └── prompts/
-        ├── TASK-20260504-093022-copilot.txt ← extracted Copilot block
+        ├── TASK-20260509-143022-copilot.txt ← extracted Copilot block
         └── ...
 ```
 
----
-
-## Provider Routing
-
-Each role uses a configurable provider to balance cost and control:
-
-| Role | Default Provider | Reason |
-|------|------------------|--------|
-| `main` | `claude` | current launcher and review/spec role |
-| `worker` | `copilot` | current implementation role |
-
-Set providers in `devloop.config.sh`:
-```bash
-DEVLOOP_MAIN_PROVIDER="claude"
-DEVLOOP_WORKER_PROVIDER="copilot"
+**Recommended `.gitignore` additions:**
+```
+.devloop/daemon.pid
+.devloop/daemon.log
+.devloop/launchd*.log
+.devloop/provider-health.sh
+# keep: .devloop/specs/  .devloop/prompts/  .devloop/agent-docs/
 ```
 
-Agent `.md` files are regenerated on `devloop init` to stay in sync with this setting. Edit `.claude/agents/*.md` directly for per-agent overrides.
-
 ---
 
-## Sleep & Connectivity Issues (Mac mini / Linux server)
+## Sleep & Connectivity Issues
 
 | Problem | Solution |
 |---------|----------|
@@ -591,61 +552,49 @@ Agent `.md` files are regenerated on `devloop init` to stay in sync with this se
 | Terminal closed → session dies | `devloop daemon` runs in background |
 | Mac reboots → session gone | `devloop daemon` registers launchd agent |
 | Linux reboots → session gone | `devloop daemon` registers systemd user service |
+| Provider hits rate limit | Auto-failover to next in chain |
 | Crash loop | Exponential backoff (5s→60s), stops after 20 restarts |
 | Check what happened | `devloop daemon log` |
 | Start fresh | `devloop daemon stop && devloop daemon` |
 | Remove auto-start | `devloop daemon uninstall` |
-
-**Mac mini tip:** System Preferences → Battery → Prevent automatic sleeping is also recommended for always-on use.
 
 ---
 
 ## Tips
 
 **Model cost control:**
-Use `CLAUDE_MODEL="sonnet"` in `devloop.config.sh` when a role routes to Claude. Switch to `opus` only for complex architecture tasks.
+```bash
+CLAUDE_MODEL="sonnet"   # fast + cheap (default)
+CLAUDE_MODEL="opus"     # more capable for complex architecture
+```
 
 **Multiple projects:**
-Each project gets its own daemon with its own launchd/systemd entry. Run `devloop daemon` in each project directory.
+Each project gets its own daemon. Run `devloop daemon` in each project directory.
 
 **Refresh Copilot instructions after config changes:**
 ```bash
-rm .github/copilot-instructions.md
-devloop init
+rm .github/copilot-instructions.md && devloop init
 ```
 
-**VS Code integration** — add to `.vscode/tasks.json`:
-```json
-{
-  "label": "DevLoop Review",
-  "type": "shell",
-  "command": "devloop review",
-  "group": "build"
-}
+**Keep agent docs current:**
+```bash
+devloop agent-sync   # refresh provider docs and check for updates
 ```
 
 **Keep specs in git:**
-Add `.devloop/specs/` to version control. Specs document every feature decision and review outcome.
-```bash
-# .gitignore
-.devloop/daemon.pid
-.devloop/daemon.log
-.devloop/launchd*.log
-# keep: .devloop/specs/
-# keep: .devloop/prompts/
-```
+Add `.devloop/specs/` to version control — specs document every decision and review.
 
-**Open a spec quickly:**
-```bash
-devloop open          # opens latest spec in $EDITOR
-devloop block         # print just the Copilot Instructions Block
+**VS Code integration:**
+```json
+{ "label": "DevLoop Review", "type": "shell", "command": "devloop review", "group": "build" }
 ```
 
 **Preview before cleaning:**
 ```bash
-devloop clean --days 14 --dry-run   # see what would be removed
+devloop clean --days 14 --dry-run   # preview
 devloop clean --days 14             # apply
 ```
 
 **Understand the full data flow:**
-See [DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md) for 11 Mermaid diagrams covering the pipeline, file lifecycle, git baseline mechanism, agent collaboration, daemon behaviour, and every command in detail.
+See [DEVLOOP-GRAPH.md](./DEVLOOP-GRAPH.md) for 11 Mermaid diagrams.
+
