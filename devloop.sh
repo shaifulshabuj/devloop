@@ -1094,7 +1094,10 @@ cmd_doctor() {
 
   local skill_count=0
   [[ -d "$root/.claude/skills" ]] && skill_count="$(ls -1 "$root/.claude/skills" 2>/dev/null | wc -l | tr -d ' ')"
-  echo -e "  ${GRAY}—${RESET}  Project skills (.claude/skills/): ${CYAN}$skill_count${RESET}"
+  local copilot_skill_count=0
+  copilot_skill_count="$(_read_project_copilot_skills "$root" | wc -l | tr -d ' ')"
+  echo -e "  ${GRAY}—${RESET}  Project skills (Claude .claude/skills/): ${CYAN}$skill_count${RESET}"
+  echo -e "  ${GRAY}—${RESET}  Project skills (Copilot .github/copilot/skills + .copilot/skills): ${CYAN}$copilot_skill_count${RESET}"
 
   local path_instr_count=0
   [[ -d "$root/.github/instructions" ]] && path_instr_count="$(ls -1 "$root/.github/instructions/"*.instructions.md 2>/dev/null | wc -l | tr -d ' ')"
@@ -3412,6 +3415,37 @@ except Exception: pass
 
 _read_global_claude_skills()  { local d="$HOME/.claude/skills"; [[ -d "$d" ]] && ls -1 "$d" 2>/dev/null | sort || true; }
 _read_project_claude_skills() { local d="$1/.claude/skills"; [[ -d "$d" ]] && ls -1 "$d" 2>/dev/null | sort || true; }
+_read_project_copilot_skills() {
+  local root="$1"
+  python3 - "$root" << 'PYEOF'
+import os
+import sys
+
+root = sys.argv[1]
+paths = [
+    os.path.join(root, ".github", "copilot", "skills"),
+    os.path.join(root, ".copilot", "skills"),
+]
+names = set()
+for base in paths:
+    if not os.path.isdir(base):
+        continue
+    for dirpath, _, filenames in os.walk(base):
+        for fn in filenames:
+            if not fn.lower().endswith(".md"):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, base)
+            if fn.upper() == "SKILL.MD":
+                skill = os.path.basename(os.path.dirname(full))
+            else:
+                skill = os.path.splitext(os.path.basename(full))[0]
+            if skill:
+                names.add(skill)
+for n in sorted(names):
+    print(n)
+PYEOF
+}
 
 _read_hooks_from_file() {
   local f="$1"
@@ -3507,10 +3541,18 @@ PYEOF
 
 _scaffold_skill() {
   local root="$1" name="$2" desc="${3:-A custom skill for this project}"
-  local f="$root/.claude/skills/$name/SKILL.md"
-  mkdir -p "$(dirname "$f")"
-  if [[ -f "$f" ]]; then warn "Skill already exists: $f"; return 0; fi
-  cat > "$f" << SKILL
+  local claude_file="$root/.claude/skills/$name/SKILL.md"
+  local copilot_repo_file="$root/.github/copilot/skills/$name/SKILL.md"
+  local copilot_local_file="$root/.copilot/skills/$name/SKILL.md"
+  local created=0
+
+  for f in "$claude_file" "$copilot_repo_file" "$copilot_local_file"; do
+    mkdir -p "$(dirname "$f")"
+    if [[ -f "$f" ]]; then
+      warn "Skill already exists: $f"
+      continue
+    fi
+    cat > "$f" << SKILL
 # Skill: $name
 
 $desc
@@ -3527,7 +3569,13 @@ $desc
 
 <!-- Caveats and edge cases -->
 SKILL
-  success "Created skill: $f"
+    created=$((created + 1))
+    success "Created skill: $f"
+  done
+
+  if (( created > 0 )); then
+    info "Skill is available for Claude and Copilot project skill paths."
+  fi
 }
 
 _add_path_instruction() {
@@ -3607,6 +3655,11 @@ cmd_tools_audit() {
   [[ -n "$g_skills" ]] && echo "$g_skills" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
   echo -e "    ${CYAN}Project (.claude/skills/):${RESET}"
   [[ -n "$p_skills" ]] && echo "$p_skills" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
+
+  echo -e "\n  ${BOLD}Copilot Skills${RESET}"
+  local p_copilot_skills; p_copilot_skills="$(_read_project_copilot_skills "$root")"
+  echo -e "    ${CYAN}Project (.github/copilot/skills/ + .copilot/skills/):${RESET}"
+  [[ -n "$p_copilot_skills" ]] && echo "$p_copilot_skills" | sed 's/^/      • /' || echo -e "      ${GRAY}(none)${RESET}"
 
   echo -e "\n  ${BOLD}Claude Plugins (global)${RESET}"
   local plugins; plugins="$(_read_global_claude_plugins)"
@@ -4064,13 +4117,13 @@ cmd_help() {
   echo -e "    Registers launchd (macOS) or systemd (Linux) for auto-start on login"
   echo -e "    Sub-commands: stop | status | log | uninstall\n"
   echo -e "  ${CYAN}devloop architect \"feature\" [type] [files]${RESET}  ${GRAY}alias: a${RESET}"
-  echo -e "    Claude designs an implementation spec (called by orchestrator)\n"
+  echo -e "    Main provider designs an implementation spec (called by orchestrator)\n"
   echo -e "  ${CYAN}devloop work [TASK-ID]${RESET}  ${GRAY}alias: w${RESET}"
-  echo -e "    Launch Copilot CLI to implement the full spec\n"
+  echo -e "    Launch configured worker provider to implement the full spec\n"
   echo -e "  ${CYAN}devloop review [TASK-ID]${RESET}  ${GRAY}alias: r${RESET}"
-  echo -e "    Claude reviews git diff → APPROVED / NEEDS_WORK / REJECTED\n"
+  echo -e "    Main provider reviews git diff → APPROVED / NEEDS_WORK / REJECTED\n"
   echo -e "  ${CYAN}devloop fix [TASK-ID]${RESET}  ${GRAY}alias: f${RESET}"
-  echo -e "    Launch Copilot with Claude's fix instructions\n"
+  echo -e "    Launch configured worker provider with review fix instructions\n"
   echo -e "  ${CYAN}devloop tasks${RESET}  ${GRAY}alias: t${RESET}"
   echo -e "    List all task specs with status\n"
   echo -e "  ${CYAN}devloop status [TASK-ID]${RESET}"
@@ -4084,7 +4137,7 @@ cmd_help() {
   echo -e "    Use ${CYAN}--dry-run${RESET} to preview what would be removed\n"
   echo -e "  ${CYAN}devloop learn [TASK-ID]${RESET}"
   echo -e "    Extract lessons from the latest review and append to CLAUDE.md\n"
-  echo -e "  ${CYAN}devloop agent-sync${RESET}"
+  echo -e "  ${CYAN}devloop agent-sync${RESET} ${GRAY}(aliases: sync-agents, agentsync)${RESET}"
   echo -e "    Check provider versions, refresh cached docs (24h TTL), and use main AI"
   echo -e "    to analyse what's new. Updates CLAUDE.md with latest provider insights."
   echo -e "    Cached in: ${GRAY}.devloop/agent-docs/${RESET}\n"
@@ -4099,18 +4152,20 @@ cmd_help() {
   echo -e "    Check for available DevLoop updates (requires DEVLOOP_VERSION_URL)\n"
   echo -e "  ${CYAN}devloop hooks${RESET}"
   echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)\n"
-  echo -e "  ${CYAN}devloop logs [pipeline|notifications|sessions]${RESET}"
-  echo -e "    View DevLoop pipeline, notification, or session logs\n"
+  echo -e "  ${CYAN}devloop logs [-f|--follow]${RESET}"
+  echo -e "    View recent pipeline/notification/session logs (or tail with -f)\n"
   echo -e "  ${CYAN}devloop doctor${RESET}"
   echo -e "    Validate all DevLoop dependencies and configuration\n"
   echo -e "  ${CYAN}devloop ci${RESET}"
   echo -e "    Generate .github/workflows/devloop-review.yml for CI-triggered review\n"
   echo -e "  ${CYAN}devloop tools [audit|suggest|add|sync]${RESET}"
-  echo -e "    Manage MCP servers, skills, plugins, and path instructions"
+  echo -e "    Manage MCP servers, cross-agent skills (Claude + Copilot), plugins, and path instructions"
   echo -e "    ${GRAY}audit${RESET}   — show global vs project tool inventory"
   echo -e "    ${GRAY}suggest${RESET} — stack-based tool recommendations"
   echo -e "    ${GRAY}add${RESET}     — interactive install (or: --mcp --skill --instruction --plugin)"
   echo -e "    ${GRAY}sync${RESET}    — copy global tools to project level\n"
+  echo -e "  ${CYAN}devloop --version${RESET} ${GRAY}or${RESET} ${CYAN}devloop -v${RESET}"
+  echo -e "    Print installed DevLoop version\n"
   echo -e "  ${CYAN}devloop update${RESET}"
   echo -e "    Self-upgrade devloop (requires DEVLOOP_SOURCE_URL in devloop.config.sh)\n"
   echo -e "${BOLD}SETUP (one-time)${RESET}\n"

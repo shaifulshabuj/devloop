@@ -410,7 +410,7 @@ Requires `ANTHROPIC_API_KEY` secret in the repository.
 ---
 
 ### `devloop tools [audit|suggest|add|sync]`
-Manage MCP servers, Claude skills, plugins, and Copilot path-specific instructions.
+Manage MCP servers, cross-agent skills (Claude + Copilot), plugins, and Copilot path-specific instructions.
 
 ```bash
 devloop tools audit    # global vs project tool inventory
@@ -502,9 +502,12 @@ your-project/
 ├── copilot-setup-steps.yml                  ← Copilot agent env (github-agent mode)
 ├── .github/
 │   ├── copilot-instructions.md              ← Copilot persistent context
+│   ├── copilot/skills/                      ← Copilot project skills (repo-shared)
 │   ├── instructions/                        ← Path-specific Copilot instructions
 │   └── workflows/
 │       └── devloop-review.yml               ← CI review workflow (devloop ci)
+├── .copilot/
+│   └── skills/                              ← Copilot local skills
 ├── .vscode/
 │   └── mcp.json                             ← Copilot/VS Code MCP servers
 ├── .mcp.json                                ← Claude project MCP servers
