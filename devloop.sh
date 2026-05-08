@@ -85,7 +85,7 @@ load_config() {
   DEVLOOP_WORKER_MODE="cli"
   DEVLOOP_VERSION_URL=""
   DEVLOOP_FAILOVER_ENABLED="true"
-  DEVLOOP_RECOVERY_HOURS="6"
+  DEVLOOP_PROBE_INTERVAL="5"    # minutes between availability probes when a provider is limited
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -199,8 +199,10 @@ _health_load() {
   # Set safe defaults then source the file if it exists
   HEALTH_MAIN_LIMITED_SINCE=""
   HEALTH_MAIN_OVERRIDE=""
+  HEALTH_MAIN_LAST_PROBE=""
   HEALTH_WORKER_LIMITED_SINCE=""
   HEALTH_WORKER_OVERRIDE=""
+  HEALTH_WORKER_LAST_PROBE=""
   local hf; hf="$(_health_file)"
   [[ -f "$hf" ]] && source "$hf" 2>/dev/null || true
 }
@@ -213,8 +215,10 @@ _health_save() {
 # DevLoop provider health state — auto-managed, do not edit manually
 HEALTH_MAIN_LIMITED_SINCE="${HEALTH_MAIN_LIMITED_SINCE:-}"
 HEALTH_MAIN_OVERRIDE="${HEALTH_MAIN_OVERRIDE:-}"
+HEALTH_MAIN_LAST_PROBE="${HEALTH_MAIN_LAST_PROBE:-}"
 HEALTH_WORKER_LIMITED_SINCE="${HEALTH_WORKER_LIMITED_SINCE:-}"
 HEALTH_WORKER_OVERRIDE="${HEALTH_WORKER_OVERRIDE:-}"
+HEALTH_WORKER_LAST_PROBE="${HEALTH_WORKER_LAST_PROBE:-}"
 EOF
 }
 
@@ -302,41 +306,51 @@ _fallback_worker() {
 }
 
 _maybe_recover() {
-  # Called at start of work/architect/review — if a provider has been limited
-  # for DEVLOOP_RECOVERY_HOURS (default 6), probe it and restore if healthy.
+  # Called at start of work/architect/review — probes limited providers and
+  # restores them the moment they are available again.
+  # Probes run at most every DEVLOOP_PROBE_INTERVAL minutes (default: 5) to
+  # avoid hammering the provider API.
   _health_load
-  local recovery_secs=$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 3600 ))
+  local probe_secs=$(( ${DEVLOOP_PROBE_INTERVAL:-5} * 60 ))
   local now; now="$(date +%s)"
 
-  if [[ -n "$HEALTH_MAIN_OVERRIDE" && -n "$HEALTH_MAIN_LIMITED_SINCE" ]]; then
-    local age=$(( now - HEALTH_MAIN_LIMITED_SINCE ))
-    if (( age >= recovery_secs )); then
-      local orig; orig="$(main_provider)"
-      info "Checking if $(provider_label "$orig") has recovered..."
+  if [[ -n "$HEALTH_MAIN_OVERRIDE" ]]; then
+    local orig; orig="$(main_provider)"
+    local last_probe="${HEALTH_MAIN_LAST_PROBE:-0}"
+    local since_probe=$(( now - last_probe ))
+    if (( since_probe >= probe_secs )); then
+      info "Probing $(provider_label "$orig") for availability..."
+      HEALTH_MAIN_LAST_PROBE="$now"
+      _health_save
       if _probe_provider "$orig"; then
-        warn "$(provider_label "$orig") is back — restoring as main provider"
+        success "$(provider_label "$orig") is available — restoring as main provider"
         _health_clear main
       else
         info "$(provider_label "$orig") still limited — keeping override: $(provider_label "$HEALTH_MAIN_OVERRIDE")"
-        # Reset the clock so we try again in another recovery window
-        HEALTH_MAIN_LIMITED_SINCE="$now"
-        _health_save
       fi
+    else
+      local wait_sec=$(( probe_secs - since_probe ))
+      info "$(provider_label "$HEALTH_MAIN_OVERRIDE") active (next probe for $(provider_label "$orig") in ${wait_sec}s)"
     fi
   fi
 
-  if [[ -n "$HEALTH_WORKER_OVERRIDE" && -n "$HEALTH_WORKER_LIMITED_SINCE" ]]; then
-    local age=$(( now - HEALTH_WORKER_LIMITED_SINCE ))
-    if (( age >= recovery_secs )); then
-      local orig; orig="$(worker_provider)"
-      info "Checking if $(provider_label "$orig") worker has recovered..."
+  if [[ -n "$HEALTH_WORKER_OVERRIDE" ]]; then
+    local orig; orig="$(worker_provider)"
+    local last_probe="${HEALTH_WORKER_LAST_PROBE:-0}"
+    local since_probe=$(( now - last_probe ))
+    if (( since_probe >= probe_secs )); then
+      info "Probing $(provider_label "$orig") worker for availability..."
+      HEALTH_WORKER_LAST_PROBE="$now"
+      _health_save
       if _probe_provider "$orig"; then
-        warn "$(provider_label "$orig") is back — restoring as worker provider"
+        success "$(provider_label "$orig") is available — restoring as worker provider"
         _health_clear worker
       else
-        HEALTH_WORKER_LIMITED_SINCE="$now"
-        _health_save
+        info "$(provider_label "$orig") worker still limited — keeping override: $(provider_label "$HEALTH_WORKER_OVERRIDE")"
       fi
+    else
+      local wait_sec=$(( probe_secs - since_probe ))
+      info "$(provider_label "$HEALTH_WORKER_OVERRIDE") active worker (next probe for $(provider_label "$orig") in ${wait_sec}s)"
     fi
   fi
 }
@@ -1618,11 +1632,11 @@ DEVLOOP_MAIN_PROVIDER="claude"
 DEVLOOP_WORKER_PROVIDER="copilot"
 
 # Auto-failover: when a provider hits its rate limit, DevLoop automatically
-# switches to the next provider in the chain and restores when limit clears.
+# switches to the next provider in the chain and restores as soon as available.
 # Main chain:   claude → copilot
 # Worker chain: copilot → opencode → pi
 DEVLOOP_FAILOVER_ENABLED="true"
-DEVLOOP_RECOVERY_HOURS="6"   # hours to wait before testing if original provider recovered
+DEVLOOP_PROBE_INTERVAL="5"   # minutes between availability probes on limited providers
 
 # Worker mode
 # cli          — use copilot or claude CLI locally (default)
@@ -3537,15 +3551,24 @@ cmd_failover() {
       local effective_worker; effective_worker="$(effective_worker_provider)"
 
       echo -e "  ${BOLD}Failover enabled:${RESET} ${DEVLOOP_FAILOVER_ENABLED:-true}"
-      echo -e "  ${BOLD}Recovery window:${RESET}  ${DEVLOOP_RECOVERY_HOURS:-6}h"
+      echo -e "  ${BOLD}Probe interval:${RESET}   every ${DEVLOOP_PROBE_INTERVAL:-5}m (checks if limited provider is back)"
       echo ""
       echo -e "  ${BOLD}Main provider${RESET}"
       echo -e "    Configured: $(provider_label "$configured_main")"
       if [[ -n "$HEALTH_MAIN_OVERRIDE" ]]; then
         local age=$(( $(date +%s) - ${HEALTH_MAIN_LIMITED_SINCE:-0} ))
         local age_min=$(( age / 60 ))
+        local last_probe="${HEALTH_MAIN_LAST_PROBE:-0}"
+        local since_probe=$(( $(date +%s) - last_probe ))
+        local probe_min=$(( since_probe / 60 ))
+        local next_min=$(( ${DEVLOOP_PROBE_INTERVAL:-5} - probe_min ))
+        [[ $next_min -lt 0 ]] && next_min=0
         echo -e "    ${YELLOW}⚠️  Limited!${RESET} Switched to: $(provider_label "$HEALTH_MAIN_OVERRIDE") (${age_min}m ago)"
-        echo -e "    Recovery in: ~$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 60 - age_min ))m"
+        if [[ "$last_probe" == "0" || -z "$last_probe" ]]; then
+          echo -e "    Probe: will run on next devloop command"
+        else
+          echo -e "    Last probed: ${probe_min}m ago | Next probe in: ~${next_min}m"
+        fi
       else
         echo -e "    ${GREEN}✔  Healthy${RESET} — active: $(provider_label "$effective_main")"
       fi
@@ -3555,8 +3578,17 @@ cmd_failover() {
       if [[ -n "$HEALTH_WORKER_OVERRIDE" ]]; then
         local age=$(( $(date +%s) - ${HEALTH_WORKER_LIMITED_SINCE:-0} ))
         local age_min=$(( age / 60 ))
+        local last_probe="${HEALTH_WORKER_LAST_PROBE:-0}"
+        local since_probe=$(( $(date +%s) - last_probe ))
+        local probe_min=$(( since_probe / 60 ))
+        local next_min=$(( ${DEVLOOP_PROBE_INTERVAL:-5} - probe_min ))
+        [[ $next_min -lt 0 ]] && next_min=0
         echo -e "    ${YELLOW}⚠️  Limited!${RESET} Switched to: $(provider_label "$HEALTH_WORKER_OVERRIDE") (${age_min}m ago)"
-        echo -e "    Recovery in: ~$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 60 - age_min ))m"
+        if [[ "$last_probe" == "0" || -z "$last_probe" ]]; then
+          echo -e "    Probe: will run on next devloop command"
+        else
+          echo -e "    Last probed: ${probe_min}m ago | Next probe in: ~${next_min}m"
+        fi
       else
         echo -e "    ${GREEN}✔  Healthy${RESET} — active: $(provider_label "$effective_worker")"
       fi
@@ -3735,7 +3767,8 @@ cmd_help() {
   echo -e "  When a provider hits its rate limit, DevLoop auto-switches to the next in chain:"
   echo -e "  Main:   ${CYAN}claude → copilot${RESET}"
   echo -e "  Worker: ${CYAN}copilot → opencode → pi${RESET}"
-  echo -e "  Providers are auto-restored after ${CYAN}DEVLOOP_RECOVERY_HOURS${RESET} (default 6h)"
+  echo -e "  Original provider is probed every ${CYAN}DEVLOOP_PROBE_INTERVAL${RESET} minutes (default 5)"
+  echo -e "  and restored immediately when available again — no fixed wait time"
   echo -e "  Run ${CYAN}devloop failover status${RESET} to check current state\n"
   echo -e "${BOLD}WORKER MODES${RESET}\n"
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
