@@ -103,12 +103,12 @@ check_deps() {
 
   case "$main_p" in
     claude)  command -v claude  &>/dev/null || missing+=("claude  → curl -fsSL https://claude.ai/install.sh | bash") ;;
-    copilot) command -v copilot &>/dev/null || missing+=("copilot → gh extension install github/gh-copilot") ;;
+    copilot) command -v copilot &>/dev/null || missing+=("copilot → npm install -g @github/copilot") ;;
   esac
 
   case "$worker_p" in
     claude)   command -v claude   &>/dev/null || missing+=("claude   → curl -fsSL https://claude.ai/install.sh | bash") ;;
-    copilot)  command -v copilot  &>/dev/null || missing+=("copilot  → gh extension install github/gh-copilot") ;;
+    copilot)  command -v copilot  &>/dev/null || missing+=("copilot  → npm install -g @github/copilot") ;;
     opencode) command -v opencode &>/dev/null || missing+=("opencode → npm install -g opencode-ai  or  https://opencode.ai") ;;
     pi)       command -v pi       &>/dev/null || missing+=("pi       → https://pi.dev/docs/latest") ;;
   esac
@@ -564,7 +564,7 @@ cmd_doctor() {
   ok="false"; command -v claude   &>/dev/null && ok="true"
   _chk "claude CLI installed"   "$ok" "curl -fsSL https://claude.ai/install.sh | bash"
   ok="false"; command -v copilot &>/dev/null && ok="true"
-  _chk "copilot CLI installed"  "$ok" "gh extension install github/gh-copilot"
+  _chk "copilot CLI installed"  "$ok" "npm install -g @github/copilot"
   ok="false"; command -v gh      &>/dev/null && ok="true"
   _chk "gh CLI installed"       "$ok" "https://cli.github.com"
   ok="false"; command -v git     &>/dev/null && ok="true"
@@ -925,7 +925,7 @@ Mark "Review" completed.
 
 ## Error handling
 - `devloop: not found` → tell user: `sudo devloop install`
-- `copilot: not found` → tell user: `gh extension install github/gh-copilot`
+- `copilot: not found` → tell user: `npm install -g @github/copilot`
 - No git changes after work → ask user to confirm Copilot finished
 
 ## Mobile push notifications
@@ -2997,7 +2997,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop start${RESET}           ${GRAY}← connect from mobile/browser${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
   echo -e "  ${CYAN}claude${RESET}    Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
-  echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}gh extension install github/gh-copilot${RESET}"
+  echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}npm install -g @github/copilot${RESET}"
   echo -e "  ${CYAN}gh${RESET}        GitHub CLI         ${GRAY}brew install gh  (required for github-agent mode)${RESET}"
   echo -e "  ${CYAN}git${RESET}       Git\n"
   echo -e "${BOLD}PROVIDER ROUTING${RESET}\n"
