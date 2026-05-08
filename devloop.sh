@@ -84,6 +84,8 @@ load_config() {
   DEVLOOP_WORKER_PROVIDER="copilot"
   DEVLOOP_WORKER_MODE="cli"
   DEVLOOP_VERSION_URL=""
+  DEVLOOP_FAILOVER_ENABLED="true"
+  DEVLOOP_RECOVERY_HOURS="6"
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -184,6 +186,179 @@ worker_provider() {
   normalize_worker_provider "${DEVLOOP_WORKER_PROVIDER:-copilot}"
 }
 
+# ── Provider Health / Auto-Failover ──────────────────────────────────────────
+# State file lives at <project-root>/.devloop/provider-health.sh
+# Shell-sourced vars; human-readable; gitignored at init time.
+
+_health_file() {
+  local root; root="$(find_project_root)"
+  echo "$root/$DEVLOOP_DIR/provider-health.sh"
+}
+
+_health_load() {
+  # Set safe defaults then source the file if it exists
+  HEALTH_MAIN_LIMITED_SINCE=""
+  HEALTH_MAIN_OVERRIDE=""
+  HEALTH_WORKER_LIMITED_SINCE=""
+  HEALTH_WORKER_OVERRIDE=""
+  local hf; hf="$(_health_file)"
+  [[ -f "$hf" ]] && source "$hf" 2>/dev/null || true
+}
+
+_health_save() {
+  local hf; hf="$(_health_file)"
+  local dir; dir="$(dirname "$hf")"
+  mkdir -p "$dir"
+  cat > "$hf" <<EOF
+# DevLoop provider health state — auto-managed, do not edit manually
+HEALTH_MAIN_LIMITED_SINCE="${HEALTH_MAIN_LIMITED_SINCE:-}"
+HEALTH_MAIN_OVERRIDE="${HEALTH_MAIN_OVERRIDE:-}"
+HEALTH_WORKER_LIMITED_SINCE="${HEALTH_WORKER_LIMITED_SINCE:-}"
+HEALTH_WORKER_OVERRIDE="${HEALTH_WORKER_OVERRIDE:-}"
+EOF
+}
+
+_health_mark_limited() {
+  # Usage: _health_mark_limited main|worker fallback_provider
+  local role="$1"
+  local fallback="$2"
+  _health_load
+  local ts; ts="$(date +%s)"
+  if [[ "$role" == "main" ]]; then
+    HEALTH_MAIN_LIMITED_SINCE="$ts"
+    HEALTH_MAIN_OVERRIDE="$fallback"
+  else
+    HEALTH_WORKER_LIMITED_SINCE="$ts"
+    HEALTH_WORKER_OVERRIDE="$fallback"
+  fi
+  _health_save
+}
+
+_health_clear() {
+  # Usage: _health_clear main|worker
+  local role="$1"
+  _health_load
+  if [[ "$role" == "main" ]]; then
+    HEALTH_MAIN_LIMITED_SINCE=""
+    HEALTH_MAIN_OVERRIDE=""
+  else
+    HEALTH_WORKER_LIMITED_SINCE=""
+    HEALTH_WORKER_OVERRIDE=""
+  fi
+  _health_save
+}
+
+_is_rate_limit_error() {
+  local text="$1"
+  echo "$text" | grep -qiE \
+    "hit your (usage )?limit|rate.?limit|usage limit reached|429|Too Many Requests|overloaded|try again later|exceeded.*quota|quota.*exceeded"
+}
+
+_probe_provider() {
+  local provider="$1"
+  local tmp; tmp="$(mktemp /tmp/devloop-probe-XXXXXX)"
+  local rc=0
+  case "$provider" in
+    claude)
+      if ! echo "Reply with exactly: OK" | claude -p --model "${CLAUDE_MODEL:-sonnet}" > "$tmp" 2>&1; then
+        rc=1
+      fi
+      _is_rate_limit_error "$(cat "$tmp")" && rc=1
+      ;;
+    copilot)
+      if ! echo "Reply with exactly: OK" | copilot > "$tmp" 2>&1; then
+        rc=1
+      fi
+      _is_rate_limit_error "$(cat "$tmp")" && rc=1
+      ;;
+    *)
+      rc=1
+      ;;
+  esac
+  rm -f "$tmp"
+  return $rc
+}
+
+_fallback_main() {
+  # Return the next main provider in the failover chain
+  local current="$1"
+  case "$current" in
+    claude)   echo "copilot" ;;
+    copilot)  echo "" ;;  # no further fallback
+    *)        echo "" ;;
+  esac
+}
+
+_fallback_worker() {
+  # Return the next worker provider in the failover chain
+  local current="$1"
+  case "$current" in
+    copilot)  echo "opencode" ;;
+    claude)   echo "opencode" ;;
+    opencode) echo "pi" ;;
+    pi)       echo "" ;;
+    *)        echo "" ;;
+  esac
+}
+
+_maybe_recover() {
+  # Called at start of work/architect/review — if a provider has been limited
+  # for DEVLOOP_RECOVERY_HOURS (default 6), probe it and restore if healthy.
+  _health_load
+  local recovery_secs=$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 3600 ))
+  local now; now="$(date +%s)"
+
+  if [[ -n "$HEALTH_MAIN_OVERRIDE" && -n "$HEALTH_MAIN_LIMITED_SINCE" ]]; then
+    local age=$(( now - HEALTH_MAIN_LIMITED_SINCE ))
+    if (( age >= recovery_secs )); then
+      local orig; orig="$(main_provider)"
+      info "Checking if $(provider_label "$orig") has recovered..."
+      if _probe_provider "$orig"; then
+        warn "$(provider_label "$orig") is back — restoring as main provider"
+        _health_clear main
+      else
+        info "$(provider_label "$orig") still limited — keeping override: $(provider_label "$HEALTH_MAIN_OVERRIDE")"
+        # Reset the clock so we try again in another recovery window
+        HEALTH_MAIN_LIMITED_SINCE="$now"
+        _health_save
+      fi
+    fi
+  fi
+
+  if [[ -n "$HEALTH_WORKER_OVERRIDE" && -n "$HEALTH_WORKER_LIMITED_SINCE" ]]; then
+    local age=$(( now - HEALTH_WORKER_LIMITED_SINCE ))
+    if (( age >= recovery_secs )); then
+      local orig; orig="$(worker_provider)"
+      info "Checking if $(provider_label "$orig") worker has recovered..."
+      if _probe_provider "$orig"; then
+        warn "$(provider_label "$orig") is back — restoring as worker provider"
+        _health_clear worker
+      else
+        HEALTH_WORKER_LIMITED_SINCE="$now"
+        _health_save
+      fi
+    fi
+  fi
+}
+
+effective_main_provider() {
+  _health_load
+  if [[ "${DEVLOOP_FAILOVER_ENABLED:-true}" == "true" && -n "$HEALTH_MAIN_OVERRIDE" ]]; then
+    echo "$HEALTH_MAIN_OVERRIDE"
+  else
+    main_provider
+  fi
+}
+
+effective_worker_provider() {
+  _health_load
+  if [[ "${DEVLOOP_FAILOVER_ENABLED:-true}" == "true" && -n "$HEALTH_WORKER_OVERRIDE" ]]; then
+    echo "$HEALTH_WORKER_OVERRIDE"
+  else
+    worker_provider
+  fi
+}
+
 # ── Version checking ──────────────────────────────────────────────────────────
 
 _check_version_bg() {
@@ -262,9 +437,7 @@ cmd_learn() {
   step "🧠 Learning from: ${BOLD}$id${RESET}"
   divider
 
-  local provider; provider="$(main_provider)"
-
-  local learn_prompt
+  local provider; provider="$(effective_main_provider)"
   learn_prompt="You are analyzing a code review to extract reusable lessons for future development.
 
 ## Task spec (excerpt)
@@ -1148,20 +1321,52 @@ run_provider_prompt() {
   local prompt="$2"
   local output_file="$3"
 
-  case "$provider" in
-    claude)
-      if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$output_file" 2>/dev/null; then
-        echo "$prompt" | claude -p > "$output_file"
+  local attempt_provider="$provider"
+  while true; do
+    local tmp_out; tmp_out="$(mktemp /tmp/devloop-rpp-XXXXXX)"
+    local rc=0
+
+    case "$attempt_provider" in
+      claude)
+        if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1; then
+          echo "$prompt" | claude -p > "$tmp_out" 2>&1 || rc=$?
+        fi
+        ;;
+      copilot)
+        echo "$prompt" | copilot > "$tmp_out" 2>&1 || rc=$?
+        ;;
+      *)
+        error "Unsupported provider in run_provider_prompt: $attempt_provider"
+        rm -f "$tmp_out"; exit 1
+        ;;
+    esac
+
+    local out_text; out_text="$(cat "$tmp_out")"
+
+    if _is_rate_limit_error "$out_text" || (( rc == 429 )); then
+      local role="main"
+      local fallback; fallback="$(_fallback_main "$attempt_provider")"
+      warn "$(provider_label "$attempt_provider") hit its limit — switching main to $(provider_label "${fallback:-none}")"
+      if [[ -z "$fallback" ]]; then
+        error "All main providers are rate-limited. Try again later."
+        rm -f "$tmp_out"; exit 1
       fi
-      ;;
-    copilot)
-      echo "$prompt" | copilot > "$output_file"
-      ;;
-    *)
-      error "Unsupported provider: $provider"
-      exit 1
-      ;;
-  esac
+      _health_mark_limited "$role" "$fallback"
+      attempt_provider="$fallback"
+      rm -f "$tmp_out"
+      continue
+    fi
+
+    cp "$tmp_out" "$output_file"
+    rm -f "$tmp_out"
+
+    # If we used a fallback, show a reminder
+    if [[ "$attempt_provider" != "$provider" ]]; then
+      info "Completed via fallback provider: $(provider_label "$attempt_provider")"
+      info "Original provider $(provider_label "$provider") will be re-tested after ${DEVLOOP_RECOVERY_HOURS:-6}h"
+    fi
+    break
+  done
 }
 
 # ── Embedded Agent Definitions ────────────────────────────────────────────────
@@ -1411,6 +1616,13 @@ TEST_FRAMEWORK="xUnit"
 # opencode and pi are worker-only — they have no remote-control support
 DEVLOOP_MAIN_PROVIDER="claude"
 DEVLOOP_WORKER_PROVIDER="copilot"
+
+# Auto-failover: when a provider hits its rate limit, DevLoop automatically
+# switches to the next provider in the chain and restores when limit clears.
+# Main chain:   claude → copilot
+# Worker chain: copilot → opencode → pi
+DEVLOOP_FAILOVER_ENABLED="true"
+DEVLOOP_RECOVERY_HOURS="6"   # hours to wait before testing if original provider recovered
 
 # Worker mode
 # cli          — use copilot or claude CLI locally (default)
@@ -1995,7 +2207,8 @@ cmd_architect() {
   id="$(task_id)"
   local spec_file="$SPECS_PATH/$id.md"
   local provider
-  provider="$(main_provider)"
+  _maybe_recover
+  provider="$(effective_main_provider)"
 
   step "📐 $(provider_label "$provider") designing spec: ${BOLD}\"$feature\"${RESET}"
   divider
@@ -2124,7 +2337,8 @@ cmd_work() {
   local spec_file="$SPECS_PATH/$id.md"
   [[ ! -f "$spec_file" ]] && { error "Spec not found: $id"; exit 1; }
   local provider
-  provider="$(worker_provider)"
+  _maybe_recover
+  provider="$(effective_worker_provider)"
 
   # Copilot coding agent mode — create GitHub Issue and hand off to cloud agent
   if [[ "${DEVLOOP_WORKER_MODE:-cli}" == "github-agent" ]]; then
@@ -2218,22 +2432,45 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
   tmp_spec="$(mktemp /tmp/devloop_task_XXXXXX.md)"
   echo "$launch_prompt" > "$tmp_spec"
 
-  case "$provider" in
-    claude)
-      if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL"; then
-        cat "$tmp_spec" | claude -p
+  local attempt_provider="$provider"
+  while true; do
+    local tmp_out; tmp_out="$(mktemp /tmp/devloop_work_out_XXXXXX)"
+    local rc=0
+    case "$attempt_provider" in
+      claude)
+        if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1; then
+          cat "$tmp_spec" | claude -p > "$tmp_out" 2>&1 || rc=$?
+        fi
+        ;;
+      opencode)
+        opencode run --file "$tmp_spec" "Implement the DevLoop task spec in the attached file exactly as described. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented." 2>&1 | tee "$tmp_out" || rc=$?
+        ;;
+      pi)
+        pi --mode json "$launch_prompt" 2>&1 | tee "$tmp_out" | cat || rc=$?
+        ;;
+      *)  # copilot
+        cat "$tmp_spec" | copilot 2>&1 | tee "$tmp_out" || rc=$?
+        ;;
+    esac
+    cat "$tmp_out"
+    if _is_rate_limit_error "$(cat "$tmp_out")" || (( rc == 429 )); then
+      local fallback; fallback="$(_fallback_worker "$attempt_provider")"
+      warn "$(provider_label "$attempt_provider") hit its limit — switching worker to $(provider_label "${fallback:-none}")"
+      if [[ -z "$fallback" ]]; then
+        error "All worker providers are rate-limited. Try again later."
+        rm -f "$tmp_out" "$tmp_spec"; exit 1
       fi
-      ;;
-    opencode)
-      opencode run --file "$tmp_spec" "Implement the DevLoop task spec in the attached file exactly as described. Stage ALL changed files and commit with the TASK ID in the message. Summarize what was implemented."
-      ;;
-    pi)
-      pi --mode json "$launch_prompt" 2>&1 | cat
-      ;;
-    *)  # copilot
-      cat "$tmp_spec" | copilot
-      ;;
-  esac
+      _health_mark_limited worker "$fallback"
+      attempt_provider="$fallback"
+      rm -f "$tmp_out"
+      continue
+    fi
+    if [[ "$attempt_provider" != "$provider" ]]; then
+      info "Completed via fallback worker: $(provider_label "$attempt_provider")"
+    fi
+    rm -f "$tmp_out"
+    break
+  done
   rm -f "$tmp_spec"
 
   echo ""
@@ -2256,7 +2493,8 @@ cmd_review() {
   local spec_file="$SPECS_PATH/$id.md"
   [[ ! -f "$spec_file" ]] && { error "Spec not found: $id"; exit 1; }
   local provider
-  provider="$(main_provider)"
+  _maybe_recover
+  provider="$(effective_main_provider)"
 
   step "🔍 $(provider_label "$provider") reviewing: ${BOLD}$id${RESET}"
   divider
@@ -2407,7 +2645,8 @@ cmd_fix() {
   local review_file="$SPECS_PATH/$id-review.md"
   [[ ! -f "$review_file" ]] && { error "No review found. Run: devloop review $id"; exit 1; }
   local provider
-  provider="$(worker_provider)"
+  _maybe_recover
+  provider="$(effective_worker_provider)"
 
   step "🔧 $(provider_label "$provider") fixing: ${BOLD}$id${RESET}"
   divider
@@ -2438,20 +2677,43 @@ Fix all CRITICAL and HIGH severity issues. After fixing, stage all changed files
 feat($id): fix review issues — <one-line summary of what was fixed>
 Summarize the changes made."
 
-  if [[ "$provider" == "claude" ]]; then
-    if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL"; then
-      echo "$fix_prompt" | claude -p
+  local attempt_fix_provider="$provider"
+  while true; do
+    local tmp_fix_out; tmp_fix_out="$(mktemp /tmp/devloop_fix_out_XXXXXX)"
+    local rc=0
+    if [[ "$attempt_fix_provider" == "claude" ]]; then
+      if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_fix_out" 2>&1; then
+        echo "$fix_prompt" | claude -p > "$tmp_fix_out" 2>&1 || rc=$?
+      fi
+    elif [[ "$attempt_fix_provider" == "opencode" ]]; then
+      local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
+      echo "$fix_prompt" > "$tmp_fix"
+      opencode run --file "$tmp_fix" "Fix the issues described in the attached file exactly. Stage all changed files and commit." 2>&1 | tee "$tmp_fix_out" || rc=$?
+      rm -f "$tmp_fix"
+    elif [[ "$attempt_fix_provider" == "pi" ]]; then
+      pi --mode json "$fix_prompt" 2>&1 | tee "$tmp_fix_out" | cat || rc=$?
+    else
+      echo "$fix_prompt" | copilot 2>&1 | tee "$tmp_fix_out" || rc=$?
     fi
-  elif [[ "$provider" == "opencode" ]]; then
-    local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
-    echo "$fix_prompt" > "$tmp_fix"
-    opencode run --file "$tmp_fix" "Fix the issues described in the attached file exactly. Stage all changed files and commit."
-    rm -f "$tmp_fix"
-  elif [[ "$provider" == "pi" ]]; then
-    pi --mode json "$fix_prompt" 2>&1 | cat
-  else
-    echo "$fix_prompt" | copilot
-  fi
+    cat "$tmp_fix_out"
+    if _is_rate_limit_error "$(cat "$tmp_fix_out")" || (( rc == 429 )); then
+      local fallback; fallback="$(_fallback_worker "$attempt_fix_provider")"
+      warn "$(provider_label "$attempt_fix_provider") hit its limit — switching to $(provider_label "${fallback:-none}")"
+      if [[ -z "$fallback" ]]; then
+        error "All worker providers are rate-limited. Try again later."
+        rm -f "$tmp_fix_out"; exit 1
+      fi
+      _health_mark_limited worker "$fallback"
+      attempt_fix_provider="$fallback"
+      rm -f "$tmp_fix_out"
+      continue
+    fi
+    if [[ "$attempt_fix_provider" != "$provider" ]]; then
+      info "Fix completed via fallback: $(provider_label "$attempt_fix_provider")"
+    fi
+    rm -f "$tmp_fix_out"
+    break
+  done
 
   echo ""
   success "$(provider_label "$provider") fix session ended"
@@ -2516,9 +2778,17 @@ cmd_status() {
 
   divider
   echo ""
-}
 
-# ── cmd: open — FIX #12 ───────────────────────────────────────────────────────
+  # Show provider health inline
+  _health_load
+  local eff_main; eff_main="$(effective_main_provider)"
+  local eff_worker; eff_worker="$(effective_worker_provider)"
+  echo -e "  ${BOLD}Providers:${RESET}  main=$(provider_label "$eff_main") | worker=$(provider_label "$eff_worker")"
+  if [[ -n "$HEALTH_MAIN_OVERRIDE" || -n "$HEALTH_WORKER_OVERRIDE" ]]; then
+    warn "Failover active — run ${CYAN}devloop failover status${RESET} for details"
+  fi
+  echo ""
+}
 
 cmd_open() {
   load_config
@@ -3249,6 +3519,126 @@ cmd_tools() {
   esac
 }
 
+# ── cmd: failover ─────────────────────────────────────────────────────────────
+
+cmd_failover() {
+  load_config
+  local subcmd="${1:-status}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    status)
+      _health_load
+      step "🔄 Provider Failover Status"
+      divider
+      local configured_main; configured_main="$(main_provider)"
+      local configured_worker; configured_worker="$(worker_provider)"
+      local effective_main; effective_main="$(effective_main_provider)"
+      local effective_worker; effective_worker="$(effective_worker_provider)"
+
+      echo -e "  ${BOLD}Failover enabled:${RESET} ${DEVLOOP_FAILOVER_ENABLED:-true}"
+      echo -e "  ${BOLD}Recovery window:${RESET}  ${DEVLOOP_RECOVERY_HOURS:-6}h"
+      echo ""
+      echo -e "  ${BOLD}Main provider${RESET}"
+      echo -e "    Configured: $(provider_label "$configured_main")"
+      if [[ -n "$HEALTH_MAIN_OVERRIDE" ]]; then
+        local age=$(( $(date +%s) - ${HEALTH_MAIN_LIMITED_SINCE:-0} ))
+        local age_min=$(( age / 60 ))
+        echo -e "    ${YELLOW}⚠️  Limited!${RESET} Switched to: $(provider_label "$HEALTH_MAIN_OVERRIDE") (${age_min}m ago)"
+        echo -e "    Recovery in: ~$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 60 - age_min ))m"
+      else
+        echo -e "    ${GREEN}✔  Healthy${RESET} — active: $(provider_label "$effective_main")"
+      fi
+      echo ""
+      echo -e "  ${BOLD}Worker provider${RESET}"
+      echo -e "    Configured: $(provider_label "$configured_worker")"
+      if [[ -n "$HEALTH_WORKER_OVERRIDE" ]]; then
+        local age=$(( $(date +%s) - ${HEALTH_WORKER_LIMITED_SINCE:-0} ))
+        local age_min=$(( age / 60 ))
+        echo -e "    ${YELLOW}⚠️  Limited!${RESET} Switched to: $(provider_label "$HEALTH_WORKER_OVERRIDE") (${age_min}m ago)"
+        echo -e "    Recovery in: ~$(( ${DEVLOOP_RECOVERY_HOURS:-6} * 60 - age_min ))m"
+      else
+        echo -e "    ${GREEN}✔  Healthy${RESET} — active: $(provider_label "$effective_worker")"
+      fi
+      divider
+      echo ""
+      ;;
+    reset)
+      _health_load
+      HEALTH_MAIN_LIMITED_SINCE=""
+      HEALTH_MAIN_OVERRIDE=""
+      HEALTH_WORKER_LIMITED_SINCE=""
+      HEALTH_WORKER_OVERRIDE=""
+      _health_save
+      success "Provider health state cleared — all providers restored to configured values"
+      echo -e "  Main:   $(provider_label "$(main_provider)")"
+      echo -e "  Worker: $(provider_label "$(worker_provider)")"
+      echo ""
+      ;;
+    main|worker)
+      # devloop failover main copilot   → force main override to copilot
+      # devloop failover main clear     → clear main override
+      local role="$subcmd"
+      local target="${1:-}"
+      if [[ -z "$target" ]]; then
+        error "Usage: devloop failover $role <provider|clear>"
+        exit 1
+      fi
+      if [[ "$target" == "clear" ]]; then
+        _health_clear "$role"
+        success "Cleared $role override — restored to configured provider"
+      else
+        if [[ "$role" == "main" ]]; then
+          normalize_provider "$target" > /dev/null || exit 1
+        else
+          normalize_worker_provider "$target" > /dev/null || exit 1
+        fi
+        _health_load
+        local ts; ts="$(date +%s)"
+        if [[ "$role" == "main" ]]; then
+          HEALTH_MAIN_LIMITED_SINCE="$ts"
+          HEALTH_MAIN_OVERRIDE="$target"
+        else
+          HEALTH_WORKER_LIMITED_SINCE="$ts"
+          HEALTH_WORKER_OVERRIDE="$target"
+        fi
+        _health_save
+        warn "Manual override: $role provider → $(provider_label "$target")"
+        info "To restore: devloop failover $role clear"
+      fi
+      echo ""
+      ;;
+    probe)
+      # devloop failover probe — test all configured providers right now
+      local main_p; main_p="$(main_provider)"
+      local worker_p; worker_p="$(worker_provider)"
+      step "🩺 Probing providers..."
+      divider
+      echo -n "  Main   ($(provider_label "$main_p")): "
+      if _probe_provider "$main_p"; then
+        echo -e "${GREEN}OK${RESET}"
+      else
+        echo -e "${RED}RATE LIMITED${RESET}"
+      fi
+      if [[ "$worker_p" != "$main_p" ]]; then
+        echo -n "  Worker ($(provider_label "$worker_p")): "
+        if _probe_provider "$worker_p"; then
+          echo -e "${GREEN}OK${RESET}"
+        else
+          echo -e "${RED}RATE LIMITED${RESET}"
+        fi
+      fi
+      divider
+      echo ""
+      ;;
+    *)
+      error "Unknown failover subcommand: $subcmd"
+      echo -e "  Usage: ${CYAN}devloop failover [status|reset|probe|main <provider|clear>|worker <provider|clear>]${RESET}"
+      exit 1
+      ;;
+  esac
+}
+
 # ── cmd: help ─────────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -3290,6 +3680,13 @@ cmd_help() {
   echo -e "    Check provider versions, refresh cached docs (24h TTL), and use main AI"
   echo -e "    to analyse what's new. Updates CLAUDE.md with latest provider insights."
   echo -e "    Cached in: ${GRAY}.devloop/agent-docs/${RESET}\n"
+  echo -e "  ${CYAN}devloop failover [status|reset|probe|main <p|clear>|worker <p|clear>]${RESET}"
+  echo -e "    Manage automatic provider failover when rate limits hit"
+  echo -e "    ${GRAY}status${RESET}  — show active overrides and recovery time"
+  echo -e "    ${GRAY}reset${RESET}   — clear all overrides, restore configured providers"
+  echo -e "    ${GRAY}probe${RESET}   — test all providers right now"
+  echo -e "    ${GRAY}main/worker <provider>${RESET}   — force a manual override"
+  echo -e "    Auto-chain: main claude→copilot, worker copilot→opencode→pi\n"
   echo -e "  ${CYAN}devloop check${RESET}"
   echo -e "    Check for available DevLoop updates (requires DEVLOOP_VERSION_URL)\n"
   echo -e "  ${CYAN}devloop hooks${RESET}"
@@ -3323,7 +3720,7 @@ cmd_help() {
   echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}npm install -g @github/copilot${RESET}"
   echo -e "  ${CYAN}gh${RESET}        GitHub CLI         ${GRAY}brew install gh  (required for github-agent mode)${RESET}"
   echo -e "  ${CYAN}git${RESET}       Git\n"
-  echo -e "${BOLD}PROVIDER ROUTING${RESET}\n"
+  echo -e "${BOLD}PROVIDER ROUTING & FAILOVER${RESET}\n"
   echo -e "  ${BOLD}DEVLOOP_MAIN_PROVIDER${RESET}   Role: orchestrator / architect / reviewer"
   echo -e "  ${BOLD}DEVLOOP_WORKER_PROVIDER${RESET} Role: work / fix\n"
   echo -e "  Supported combinations:"
@@ -3334,6 +3731,12 @@ cmd_help() {
   echo -e "  ${CYAN}claude${RESET}    + ${CYAN}opencode${RESET}  main=Claude, worker=OpenCode  ${GRAY}(optional install)${RESET}"
   echo -e "  ${CYAN}claude${RESET}    + ${CYAN}pi${RESET}        main=Claude, worker=Pi        ${GRAY}(optional install)${RESET}"
   echo -e "  ${GRAY}Note: opencode and pi are worker-only (no remote control support)${RESET}\n"
+  echo -e "  ${BOLD}Auto-failover${RESET} (DEVLOOP_FAILOVER_ENABLED=true):"
+  echo -e "  When a provider hits its rate limit, DevLoop auto-switches to the next in chain:"
+  echo -e "  Main:   ${CYAN}claude → copilot${RESET}"
+  echo -e "  Worker: ${CYAN}copilot → opencode → pi${RESET}"
+  echo -e "  Providers are auto-restored after ${CYAN}DEVLOOP_RECOVERY_HOURS${RESET} (default 6h)"
+  echo -e "  Run ${CYAN}devloop failover status${RESET} to check current state\n"
   echo -e "${BOLD}WORKER MODES${RESET}\n"
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
   echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"
@@ -3370,6 +3773,7 @@ main() {
     learn)        cmd_learn     "$@" ;;
     check)        cmd_check     "$@" ;;
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
+    failover)     cmd_failover  "$@" ;;
     hooks)        cmd_hooks     "$@" ;;
     logs)         cmd_logs      "$@" ;;
     doctor)       cmd_doctor    "$@" ;;
