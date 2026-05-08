@@ -1764,7 +1764,7 @@ run_provider_prompt() {
     # If we used a fallback, show a reminder
     if [[ "$attempt_provider" != "$provider" ]]; then
       info "Completed via fallback provider: $(provider_label "$attempt_provider")"
-      info "Original provider $(provider_label "$provider") will be re-tested after ${DEVLOOP_RECOVERY_HOURS:-6}h"
+      info "Original provider $(provider_label "$provider") will be re-probed every ${DEVLOOP_PROBE_INTERVAL:-5}m until available"
     fi
     break
   done
