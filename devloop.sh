@@ -274,7 +274,7 @@ _probe_provider() {
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
       ;;
     copilot)
-      if ! echo "Reply with exactly: OK" | copilot > "$tmp" 2>&1; then
+      if ! echo "Reply with exactly: OK" | copilot --allow-all-tools --allow-all-paths -p > "$tmp" 2>&1; then
         rc=1
       fi
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
@@ -642,7 +642,7 @@ _agent_write_context() {
     echo ""
     echo "### Copilot"
     echo "- **Install:** \`npm install -g @github/copilot\`"
-    echo "- **Non-interactive:** \`echo \"/plan <prompt>\" | copilot\`"
+    echo "- **Non-interactive:** \`echo \"/plan <prompt>\" | copilot --allow-all-tools --allow-all-paths -p\`"
     echo "- **Remote control:** supported (Copilot coding agent)"
     echo "- **Instructions:** \`.github/copilot-instructions.md\`"
     echo "- **Skills:** \`.github/copilot/skills/\` and \`.copilot/\`"
@@ -666,7 +666,7 @@ _agent_write_context() {
     echo "| Provider | Role | Command | Prompt prefix |"
     echo "|----------|------|---------|--------------|"
     echo "| claude | main+worker | \`echo \"\$prompt\" | claude -p --model \$model\` | none |"
-    echo "| copilot | main+worker | \`echo \"\$prompt\" | copilot\` | /plan |"
+    echo "| copilot | main+worker | \`echo \"\$prompt\" | copilot --allow-all-tools --allow-all-paths -p\` | /plan |"
     echo "| opencode | worker only | \`opencode run --file spec.md \"instruction\"\` | none |"
     echo "| pi | worker only | \`pi --mode json \"\$prompt\"\` | none |"
   } > "$context_file"
@@ -1734,7 +1734,7 @@ run_provider_prompt() {
         fi
         ;;
       copilot)
-        echo "$prompt" | copilot > "$tmp_out" 2>&1 || rc=$?
+        echo "$prompt" | copilot --allow-all-tools --allow-all-paths -p > "$tmp_out" 2>&1 || rc=$?
         ;;
       *)
         error "Unsupported provider in run_provider_prompt: $attempt_provider"
@@ -2614,6 +2614,8 @@ _stop_sleep_prevention() {
 
 _launch_claude() {
   local project_name="$1"
+  # Export so any Copilot subprocess spawned by this session inherits permission
+  export COPILOT_ALLOW_ALL=true
   claude \
     --remote-control "DevLoop: $project_name" \
     --agent devloop-orchestrator \
@@ -3238,7 +3240,7 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
         pi --mode json "$launch_prompt" 2>&1 | tee "$tmp_out" | cat || rc=$?
         ;;
       *)  # copilot
-        cat "$tmp_spec" | copilot 2>&1 | tee "$tmp_out" || rc=$?
+        cat "$tmp_spec" | copilot --allow-all-tools --allow-all-paths -p 2>&1 | tee "$tmp_out" || rc=$?
         ;;
     esac
     cat "$tmp_out"
@@ -3483,7 +3485,7 @@ Summarize the changes made."
     elif [[ "$attempt_fix_provider" == "pi" ]]; then
       pi --mode json "$fix_prompt" 2>&1 | tee "$tmp_fix_out" | cat || rc=$?
     else
-      echo "$fix_prompt" | copilot 2>&1 | tee "$tmp_fix_out" || rc=$?
+      echo "$fix_prompt" | copilot --allow-all-tools --allow-all-paths -p 2>&1 | tee "$tmp_fix_out" || rc=$?
     fi
     cat "$tmp_fix_out"
     if _is_rate_limit_error "$(cat "$tmp_fix_out")" || (( rc == 429 )); then
