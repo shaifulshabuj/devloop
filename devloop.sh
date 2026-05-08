@@ -1727,8 +1727,10 @@ run_provider_prompt() {
 
     case "$attempt_provider" in
       claude)
-        if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1; then
-          echo "$prompt" | claude -p > "$tmp_out" 2>&1 || rc=$?
+        # Architect/reviewer: read-only tools sufficient (no bash execution needed)
+        local _readonly_tools="Read,Write,Glob,LS,Bash(git*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(wc*)"
+        if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_readonly_tools" > "$tmp_out" 2>&1; then
+          echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1 || rc=$?
         fi
         ;;
       copilot)
@@ -3223,8 +3225,10 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
     local rc=0
     case "$attempt_provider" in
       claude)
-        if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1; then
-          cat "$tmp_spec" | claude -p > "$tmp_out" 2>&1 || rc=$?
+        # --allowedTools scopes what the worker can call (no system ops outside project)
+        local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
+        if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_worker_tools" > "$tmp_out" 2>&1; then
+          cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1 || rc=$?
         fi
         ;;
       opencode)
@@ -3467,8 +3471,9 @@ Summarize the changes made."
     local tmp_fix_out; tmp_fix_out="$(mktemp /tmp/devloop_fix_out_XXXXXX)"
     local rc=0
     if [[ "$attempt_fix_provider" == "claude" ]]; then
-      if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_fix_out" 2>&1; then
-        echo "$fix_prompt" | claude -p > "$tmp_fix_out" 2>&1 || rc=$?
+      local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
+      if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_worker_tools" > "$tmp_fix_out" 2>&1; then
+        echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_fix_out" 2>&1 || rc=$?
       fi
     elif [[ "$attempt_fix_provider" == "opencode" ]]; then
       local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
