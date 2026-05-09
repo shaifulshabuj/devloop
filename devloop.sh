@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.7.0"
+VERSION="4.8.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -183,6 +183,7 @@ load_config() {
   DEVLOOP_PROBE_INTERVAL="5"    # minutes between availability probes when a provider is limited
   DEVLOOP_PERMISSION_MODE="smart"   # off | auto | smart | strict
   DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
+  DEVLOOP_FIX_STRATEGY="escalate"  # escalate (deep fix + respec) | standard (hard cap, no escalation)
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -3993,6 +3994,13 @@ cmd_fix() {
   load_config
   check_deps
 
+  # Optional --history arg: accumulated prior review text injected into fix prompt
+  local fix_history_text=""
+  if [[ "${1:-}" == "--history" ]]; then
+    fix_history_text="${2:-}"
+    shift 2
+  fi
+
   local id="${1:-$(latest_task)}"
   [[ -z "$id" ]] && { error "No task found."; exit 1; }
 
@@ -4003,6 +4011,7 @@ cmd_fix() {
   provider="$(effective_worker_provider)"
 
   step "🔧 $(provider_label "$provider") fixing: ${BOLD}$id${RESET}"
+  [[ -n "$fix_history_text" ]] && info "Deep-fix mode: prior review history injected"
   divider
 
   # FIX #2: Match ``` with or without language tag (same fix as cmd_architect)
@@ -4019,17 +4028,34 @@ cmd_fix() {
     info "Git baseline updated: ${GRAY}${base_hash:0:12}...${RESET}"
   fi
 
-  info "Launching ${provider} CLI with Claude's fix instructions..."
+  info "Launching ${provider} CLI with fix instructions..."
   echo ""
 
   local fix_prompt
-  fix_prompt="The following issues were identified in a code review. Fix each one exactly as described.
+  if [[ -n "$fix_history_text" ]]; then
+    fix_prompt="You are fixing a code review that has already failed multiple times.
+Study the HISTORY of prior review failures first, then examine the CURRENT review.
+Understand WHY previous fixes did not satisfy the reviewer before attempting new fixes.
+Take a fundamentally different approach where previous attempts failed.
+
+## Prior Fix History (what was tried and still failed)
+$fix_history_text
+
+## Current Review Issues to Fix Now
+$fix_instructions
+
+Fix all CRITICAL and HIGH severity issues. After fixing, stage all changed files and commit:
+feat($id): fix review issues — <one-line summary of what was fixed>
+Summarize the changes made and explain how your approach differs from previous attempts."
+  else
+    fix_prompt="The following issues were identified in a code review. Fix each one exactly as described.
 
 $fix_instructions
 
 Fix all CRITICAL and HIGH severity issues. After fixing, stage all changed files and commit:
 feat($id): fix review issues — <one-line summary of what was fixed>
 Summarize the changes made."
+  fi
 
   local attempt_fix_provider="$provider"
   while true; do
@@ -5181,9 +5207,112 @@ cmd_failover() {
   esac
 }
 
+# ── _run_respec_phase: re-architect and retry after max fix rounds exhausted ──
+# Called from cmd_run when DEVLOOP_FIX_STRATEGY=escalate and all fix rounds fail.
+# Redesigns the spec using accumulated failure context, then runs work + review.
+# Returns: 0 if APPROVED, 1 if still failing.
+
+_run_respec_phase() {
+  local id="$1"
+  local fix_history_text="$2"
+  local spec_file="$SPECS_PATH/$id.md"
+  local review_file="$SPECS_PATH/$id-review.md"
+
+  step "🏗  Re-architecting spec after repeated fix failures..."
+  info "Recurring issues will be used to guide spec redesign"
+  echo ""
+
+  # Build respec prompt
+  local orig_spec=""
+  [[ -f "$spec_file" ]] && orig_spec="$(cat "$spec_file")"
+
+  local respec_prompt
+  respec_prompt="You are redesigning a task spec that has repeatedly failed code review.
+The original implementation kept getting NEEDS_WORK despite multiple fix attempts.
+Your job: rewrite the spec to be clearer, more precise, and avoid the recurring pitfalls.
+
+## Original Spec
+$orig_spec
+
+## Full Review & Fix History (what kept failing)
+$fix_history_text
+
+## Your Task
+1. Identify the ROOT CAUSE of repeated failures (ambiguous requirements? missing edge cases? wrong approach?)
+2. Redesign the spec to eliminate those root causes
+3. Add explicit acceptance criteria for every issue that kept recurring
+4. Be more prescriptive about implementation details where workers went wrong
+
+Output a complete revised spec in the SAME format as the original.
+Keep the same task ID ($id) and title, but mark Status as: ♻️ respecced
+Start the spec with: # $id (Respecced)"
+
+  local main_p; main_p="$(effective_main_provider)"
+  info "Calling $(provider_label "$main_p") to redesign spec..."
+  echo ""
+
+  # Write respec output directly to spec file (overwrite)
+  local tmp_respec; tmp_respec="$(mktemp /tmp/devloop-respec-XXXXXX)"
+  run_provider_prompt "$main_p" "$respec_prompt" "$tmp_respec"
+
+  if [[ -s "$tmp_respec" ]]; then
+    cp "$tmp_respec" "$spec_file"
+    rm -f "$tmp_respec"
+    success "Spec redesigned: ${CYAN}$id${RESET}"
+    echo ""
+  else
+    rm -f "$tmp_respec"
+    warn "Re-architect produced no output — skipping respec phase"
+    return 1
+  fi
+
+  # Update git baseline for fresh diff
+  local base_hash; base_hash="$(git rev-parse HEAD 2>/dev/null || echo "")"
+  [[ -n "$base_hash" ]] && echo "$base_hash" > "$SPECS_PATH/$id.pre-commit"
+
+  # Work with redesigned spec
+  step "🔨 Re-implementing with redesigned spec..."
+  cmd_work "$id"
+  echo ""
+
+  # Review with 2 chances
+  local respec_verdict="NEEDS_WORK"
+  local respec_round=0
+  local respec_max=2
+
+  while [[ "$respec_verdict" != "APPROVED" && "$respec_verdict" != "REJECTED" && $respec_round -le $respec_max ]]; do
+    respec_round=$(( respec_round + 1 ))
+    step "🔍 Re-reviewing after respec (attempt $respec_round/$respec_max)..."
+    cmd_review "$id"
+    echo ""
+    respec_verdict="$(parse_review_verdict "$review_file")"
+
+    case "$respec_verdict" in
+      APPROVED) break ;;
+      REJECTED)
+        error "❌ REJECTED after respec — stopping"
+        return 1
+        ;;
+      NEEDS_WORK)
+        if (( respec_round < respec_max )); then
+          step "🔧 Final fix attempt after respec..."
+          cmd_fix "$id"
+          echo ""
+        fi
+        ;;
+    esac
+  done
+
+  if [[ "$respec_verdict" == "APPROVED" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # ── cmd: run (full automated pipeline) ───────────────────────────────────────
 # Runs the full architect → work → review → [fix → review]* loop in one shot.
-# Usage: devloop run "description" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]
+# Usage: devloop run "description" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]
 
 cmd_run() {
   local feature="${1:-}"
@@ -5191,6 +5320,7 @@ cmd_run() {
   local file_hints=""
   local max_retries=3
   local skip_learn=false
+  local no_respec=false
   shift 2>/dev/null || true
 
   while [[ $# -gt 0 ]]; do
@@ -5199,12 +5329,13 @@ cmd_run() {
       --files|-F)       file_hints="${2:-}";       shift 2 ;;
       --max-retries|-n) max_retries="${2:-3}";     shift 2 ;;
       --no-learn)       skip_learn=true;           shift   ;;
+      --no-respec)      no_respec=true;            shift   ;;
       *)                shift ;;
     esac
   done
 
   if [[ -z "$feature" ]]; then
-    error "Usage: devloop run \"<description>\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]"
+    error "Usage: devloop run \"<description>\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]"
     echo -e "  ${GRAY}Example: devloop run \"add dark mode toggle\"${RESET}"
     echo -e "  ${GRAY}Example: devloop run \"fix login redirect\" --type bug${RESET}"
     exit 1
@@ -5215,8 +5346,16 @@ cmd_run() {
   check_deps
   _maybe_show_version_hint
 
+  # Determine fix strategy: escalate (default) or standard
+  local fix_strategy="${DEVLOOP_FIX_STRATEGY:-escalate}"
+  # deep_threshold: rounds 1..threshold use standard fix; above uses deep fix
+  local deep_threshold=$(( (max_retries + 1) / 2 ))
+
   step "🚀 Full pipeline: ${BOLD}\"$feature\"${RESET}"
   echo -e "  ${GRAY}Stages: arch → work → review → [fix loop ×$max_retries max]${RESET}"
+  if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
+    echo -e "  ${GRAY}Strategy: standard fix (1-$deep_threshold) → deep fix ($((deep_threshold+1))-$max_retries) → re-architect${RESET}"
+  fi
   divider
   echo ""
 
@@ -5258,18 +5397,22 @@ cmd_run() {
   cmd_work "$id"
   echo ""
 
-  # ── Stage 3: Review + fix loop ───────────────────────────────────────────────
+  # ── Stage 3: Review + fix loop (3-phase escalation) ─────────────────────────
   local verdict="NEEDS_WORK"
   local fix_round=0
   local unknown_round=0
   local max_unknown_retries=2
   local review_file="$SPECS_PATH/$id-review.md"
+  # Accumulate all review content for deep-fix and respec context
+  local fix_history_parts=()
 
   while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
     if (( fix_round == 0 )); then
       step "🔍 [3] Reviewing..."
     else
-      step "🔍 Re-reviewing (after fix $fix_round/$max_retries)..."
+      local phase_label="standard"
+      (( fix_round > deep_threshold )) && phase_label="deep"
+      step "🔍 Re-reviewing (fix $fix_round/$max_retries — $phase_label)..."
     fi
 
     cmd_review "$id"
@@ -5289,14 +5432,57 @@ cmd_run() {
         ;;
       NEEDS_WORK)
         unknown_round=0
-        fix_round=$(( fix_round + 1 ))
-        if (( fix_round > max_retries )); then
-          warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
-          echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
-          exit 2
+        # Snapshot this review into history
+        if [[ -f "$review_file" ]]; then
+          fix_history_parts+=("=== Review after fix round $fix_round ===
+$(cat "$review_file")
+")
         fi
-        step "🔧 Fixing (attempt $fix_round/$max_retries)..."
-        cmd_fix "$id"
+
+        fix_round=$(( fix_round + 1 ))
+
+        if (( fix_round > max_retries )); then
+          # ── Phase 3: Re-architect (escalate strategy only) ──────────────
+          if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
+            warn "⚠  Max fix retries ($max_retries) reached — escalating to re-architect phase"
+            echo ""
+            local combined_history=""
+            local h
+            for h in "${fix_history_parts[@]}"; do
+              combined_history+="$h"$'\n'
+            done
+            if _run_respec_phase "$id" "$combined_history"; then
+              verdict="APPROVED"
+            else
+              warn "Re-architect phase also could not get APPROVED"
+              echo -e "  ${GRAY}Task needs manual review: ${CYAN}devloop status $id${RESET}"
+              echo -e "  ${GRAY}Options:"
+              echo -e "    ${CYAN}devloop fix $id${RESET}    — try another fix manually"
+              echo -e "    ${CYAN}devloop status $id${RESET} — read full review"
+              exit 2
+            fi
+            break
+          else
+            warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
+            echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
+            echo -e "  ${GRAY}Tip: ${CYAN}devloop run ... --no-respec${GRAY} disabled re-architect; remove it to enable${RESET}"
+            exit 2
+          fi
+        fi
+
+        # ── Phase 1 or 2: standard vs deep fix ──────────────────────────
+        if (( fix_round <= deep_threshold )); then
+          step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
+          cmd_fix "$id"
+        else
+          step "🔧 Fixing (attempt $fix_round/$max_retries — deep: injecting review history)..."
+          local combined_history=""
+          local h
+          for h in "${fix_history_parts[@]}"; do
+            combined_history+="$h"$'\n'
+          done
+          cmd_fix --history "$combined_history" "$id"
+        fi
         echo ""
         ;;
       *)
@@ -5514,8 +5700,11 @@ cmd_help() {
   echo -e "  ${CYAN}devloop configure${RESET}  ${GRAY}aliases: setup, wizard${RESET}"
   echo -e "    Re-run the interactive setup wizard to change providers, models, and permissions"
   echo -e "    Updates devloop.config.sh and regenerates agent prompt files.\n"
-  echo -e "  ${CYAN}devloop run \"feature\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]${RESET}  ${GRAY}alias: go${RESET}"
+  echo -e "  ${CYAN}devloop run \"feature\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]${RESET}  ${GRAY}alias: go${RESET}"
   echo -e "    Full automated pipeline: architect → work → review → fix loop → learn"
+  echo -e "    Fix escalation (DEVLOOP_FIX_STRATEGY=escalate, default):"
+  echo -e "      Rounds 1-N/2: standard fix   |  Rounds N/2-N: deep fix (history injected)  |  After N: re-architect"
+  echo -e "    ${GRAY}--no-respec${RESET}  skip the re-architect phase after all fix rounds are exhausted"
   echo -e "    One command replaces: architect + work + review + fix + review + ...\n"
   echo -e "  ${CYAN}devloop queue [add|list|run|clear]${RESET}  ${GRAY}alias: q${RESET}"
   echo -e "    Batch mode: queue multiple tasks and run them all sequentially"
@@ -5655,6 +5844,18 @@ cmd_help() {
   echo -e "    Auto-deny after DEVLOOP_PERMISSION_TIMEOUT seconds (default: 60)\n"
   echo -e "  ${CYAN}devloop permit watch${RESET}   — monitor and respond to pending escalations"
   echo -e "  ${CYAN}devloop permit mode auto${RESET} — disable escalations entirely\n"
+  echo -e "${BOLD}FIX ESCALATION STRATEGY${RESET}\n"
+  echo -e "  Controls what happens when the review loop keeps returning NEEDS_WORK:"
+  echo -e "  ${CYAN}escalate${RESET} (default)"
+  echo -e "    Phase 1 (rounds 1..N/2):   standard fix — latest review fed to worker"
+  echo -e "    Phase 2 (rounds N/2+1..N): deep fix — ALL prior review history injected so worker"
+  echo -e "                               understands why previous attempts failed"
+  echo -e "    Phase 3 (after N rounds):  re-architect — spec rewritten using failure context,"
+  echo -e "                               then a fresh work+review cycle (2 attempts)"
+  echo -e "  ${CYAN}standard${RESET}"
+  echo -e "    Hard cap: after N failed fix rounds the pipeline exits with NEEDS_WORK (old behavior)\n"
+  echo -e "  Set ${CYAN}DEVLOOP_FIX_STRATEGY${RESET} in devloop.config.sh"
+  echo -e "  Use ${CYAN}--no-respec${RESET} flag on ${CYAN}devloop run${RESET} to skip Phase 3 for a single run\n"
   echo -e "${BOLD}WORKER MODES${RESET}\n"
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
   echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"

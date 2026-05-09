@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.8.0] — 2026-05-09
+
+### Added
+- **3-phase fix escalation** in `devloop run` — replaces the hard "max retries" exit
+  with a graduated recovery strategy:
+  - **Phase 1** (rounds 1..N/2): standard fix — latest review fed to worker (unchanged)
+  - **Phase 2** (rounds N/2+1..N): deep fix — all accumulated review history injected
+    so the worker understands why previous fixes failed and takes a different approach
+  - **Phase 3** (after N rounds): re-architect — the spec is redesigned using all failure
+    context, then a fresh work + review cycle runs (up to 2 additional attempts)
+- `DEVLOOP_FIX_STRATEGY` config variable (`escalate` default | `standard` = old behaviour)
+- `--no-respec` flag on `devloop run` — skip Phase 3 (re-architect) for a single run
+- `cmd_fix --history <text>` — optional flag to inject accumulated review history into the fix prompt
+- `_run_respec_phase()` internal helper — handles Phase 3 re-architect flow
+- Help text: new **FIX ESCALATION STRATEGY** section documents phases, config, and flags
+
+### Changed
+- `devloop run` usage line updated to include `--no-respec` flag
+- Fix loop stage label now reflects current phase: "standard", "deep", or "re-architect"
+
+---
+
 ## [4.7.0] — 2026-05-09
 
 ### Added
