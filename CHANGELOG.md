@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.11.4] — 2026-05-10
+
+### Fixed
+- **`_launch_copilot_session` was broken**: the previous implementation ran a non-interactive
+  one-shot prompt (`-p`) to inject context, then immediately started a second interactive session
+  without any of that context. Now uses `-i/--interactive` to start interactive mode with the
+  orchestrator context injected as the opening message.
+- **Copilot remote control was disabled**: Copilot CLI v1.0.44+ supports `--remote` for accessing
+  sessions from GitHub web (github.com/copilot) and the GitHub mobile app. DevLoop now passes
+  `--remote` and `--name "DevLoop: <project>"` to `_launch_copilot_session` so Copilot sessions
+  appear in the GitHub remote session list, matching Claude's remote-control capability.
+- **`--allow-all` used for Copilot interactive sessions**: replaces the deprecated
+  `--allow-all-tools --allow-all-paths` combination in `_launch_copilot_session`.
+
+### Updated
+- Help text: Copilot as main provider now correctly described as supporting remote access via
+  GitHub web and mobile (not "local only").
+- `devloop start`, `devloop daemon`, and `devloop help` updated to show GitHub remote access
+  instructions when Copilot is the main provider.
+- Daemon mode no longer warns that Copilot has "no remote control available".
+
+---
+
 ## [4.11.3] — 2026-05-09
 
 ### Fixed (found during todo-app test run)

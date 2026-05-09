@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.11.3"
+VERSION="4.11.4"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -3144,10 +3144,16 @@ $system_ctx
 You are now running as the DevLoop Orchestrator in interactive Copilot mode. Wait for user instructions and coordinate the development pipeline using 'devloop work TASK-ID' to dispatch work."
 
   export COPILOT_ALLOW_ALL=true
-  # Launch copilot with initial context prompt; drops into interactive REPL
-  copilot --allow-all-tools --allow-all-paths -p "$init_prompt" 2>/dev/null || true
-  # After the one-shot prompt, launch interactive session
-  copilot --allow-all-tools --allow-all-paths
+  # Launch copilot with remote control, named session, and initial orchestrator context
+  # --remote: enable access from GitHub web (copilot.github.com) and GitHub mobile app
+  # --name:   session title visible in remote session list
+  # --allow-all: allow all tools/paths/urls without confirmation
+  # -i: start interactive mode and automatically send the initial context prompt
+  copilot \
+    --remote \
+    --name "DevLoop: $project_name" \
+    --allow-all \
+    -i "$init_prompt"
 }
 
 # _launch_session: dispatch to provider-specific session launcher
@@ -3192,7 +3198,7 @@ cmd_start() {
       echo -e "  ${CYAN}--agent orchestrator${RESET}  main thread is the orchestrator"
       ;;
     copilot)
-      echo -e "  ${CYAN}copilot interactive${RESET}   terminal session (no remote control)"
+      echo -e "  ${CYAN}copilot --remote${RESET}      accessible from GitHub web + mobile"
       echo -e "  ${CYAN}--agent context${RESET}       orchestrator role injected as prompt"
       ;;
   esac
@@ -3206,9 +3212,8 @@ cmd_start() {
       echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET} → session list"
       ;;
     copilot)
-      echo -e "  💻 This terminal — session runs locally (no remote access)"
-      echo -e "  ℹ  Copilot CLI has no remote-control equivalent"
-      echo -e "  💡 Set ${CYAN}DEVLOOP_MAIN_PROVIDER=claude${RESET} for remote access"
+      echo -e "  📱 GitHub mobile app → find ${CYAN}\"DevLoop: $project_name\"${RESET} in Copilot sessions"
+      echo -e "  🌐 ${CYAN}https://github.com/copilot${RESET} → session list"
       ;;
   esac
   echo ""
@@ -3318,11 +3323,10 @@ cmd_daemon() {
 
   local main_backend; main_backend="$(effective_main_provider)"
 
-  # Copilot has no persistent remote session — warn and advise
+  # Copilot daemon — remote control is available via --remote flag
   if [[ "$main_backend" == "copilot" ]]; then
-    warn "Daemon mode with Copilot: no remote-control available"
-    echo -e "  The daemon will restart the local Copilot interactive session on exit."
-    echo -e "  For remote access, set ${CYAN}DEVLOOP_MAIN_PROVIDER=claude${RESET}"
+    info "Daemon mode with Copilot: remote control enabled (--remote flag)"
+    echo -e "  Access from ${CYAN}https://github.com/copilot${RESET} or GitHub mobile app."
     echo ""
   fi
 
@@ -3388,8 +3392,8 @@ cmd_daemon() {
       echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET}"
       ;;
     copilot)
-      echo -e "  💻 Copilot session runs locally — tail logs to monitor"
-      echo -e "  ℹ  No remote control available with Copilot provider"
+      echo -e "  📱 GitHub mobile app → find ${CYAN}\"DevLoop: $project_name\"${RESET} in Copilot sessions"
+      echo -e "  🌐 ${CYAN}https://github.com/copilot${RESET} → session list"
       ;;
   esac
   echo ""
@@ -6301,11 +6305,11 @@ cmd_help() {
   echo -e "    Falls back to inline log tail if tmux not installed\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
-  echo -e "    Claude: remote-control (access from mobile/browser); Copilot: local interactive"
+  echo -e "    Claude: remote-control (access from mobile/browser); Copilot: remote (GitHub web + mobile)"
   echo -e "    Prevents Mac sleep via caffeinate for session duration\n"
   echo -e "  ${CYAN}devloop daemon [project-name]${RESET}  ${GRAY}alias: d${RESET}"
   echo -e "    Run in background with auto-restart + sleep prevention"
-  echo -e "    Claude: remote-control daemon; Copilot: local session (no remote access)"
+  echo -e "    Claude: remote-control daemon (claude.ai/code); Copilot: remote daemon (github.com/copilot)"
   echo -e "    Registers launchd (macOS) or systemd (Linux) for auto-start on login"
   echo -e "    Sub-commands: stop | status | log | uninstall\n"
   echo -e "  ${CYAN}devloop architect \"feature\" [type] [files]${RESET}  ${GRAY}alias: a${RESET}"
@@ -6398,7 +6402,7 @@ cmd_help() {
   echo -e "  ${GRAY}Note: opencode and pi are worker-only (no remote control support)${RESET}\n"
   echo -e "  ${BOLD}Session capabilities (devloop start / daemon):${RESET}"
   echo -e "  ${CYAN}claude${RESET} as main → remote-control session (claude.ai/code + Claude mobile app)"
-  echo -e "  ${CYAN}copilot${RESET} as main → local interactive terminal session only (no remote access)\n"
+  echo -e "  ${CYAN}copilot${RESET} as main → remote session (github.com/copilot + GitHub mobile app)\n"
   echo -e "  ${BOLD}Auto-failover${RESET} (DEVLOOP_FAILOVER_ENABLED=true):"
   echo -e "  When a provider hits its rate limit, DevLoop auto-switches to the next in chain:"
   echo -e "  Main:   ${CYAN}claude → copilot${RESET}"
