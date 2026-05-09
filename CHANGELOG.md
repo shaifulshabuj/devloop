@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.13.0] — 2026-05-10
+
+### Added
+- **Project registry (`~/.devloop/projects.json`)**: `devloop init` and `devloop run` now
+  automatically register the current project in a global registry. The registry tracks
+  path, name, stack, providers, and last-run timestamp.
+- **`devloop projects`**: list all registered projects with name, stack, providers, last-run
+  age, and status (IDLE / DAEMON ▶ / MISSING).
+- **`devloop projects switch <name>`**: prints the path to a registered project; use
+  `eval $(devloop projects switch myapp)` to cd into it.
+- **`_register_project()` / `_unregister_project()`**: internal helpers for registry management.
+- **Help text**: `devloop projects` and `devloop projects switch` documented.
+
+---
+
 ## [4.12.0] — 2026-05-10
 
 ### Added

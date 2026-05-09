@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.12.0"
+VERSION="4.13.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -3128,6 +3128,9 @@ cmd_init() {
   echo -e "  5. Open ${CYAN}claude.ai/code${RESET} or the Claude app and find your session"
   echo -e "  6. Send a feature request — the pipeline runs automatically"
   echo ""
+
+  # Register this project in the global registry
+  _register_project "$(find_project_root)"
 }
 
 # ── Copilot instructions writer ────────────────────────────────────────────────
@@ -4070,6 +4073,199 @@ cmd_session() {
     tail -20 "$dir/main.log" 2>/dev/null | sed 's/^/    /'
     echo ""
   fi
+}
+
+# ── cmd: projects — global project registry ────────────────────────────────────
+
+# Register the current project in ~/.devloop/projects.json.
+# Called by cmd_init and cmd_run (idempotent — updates last_run if already present).
+_register_project() {
+  _ensure_global_dirs
+  local root="${1:-$(find_project_root 2>/dev/null || pwd)}"
+  local registry="$DEVLOOP_GLOBAL_DIR/projects.json"
+  local name; name="$(basename "$root")"
+  local stack="${PROJECT_STACK:-Unknown}"
+  local main_p="${DEVLOOP_MAIN_PROVIDER:-claude}"
+  local worker_p="${DEVLOOP_WORKER_PROVIDER:-copilot}"
+  local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+
+  python3 - <<PYEOF
+import json, sys, os
+
+reg_path = "$registry"
+root     = "$root"
+name     = "$name"
+stack    = "$stack"
+main_p   = "$main_p"
+worker_p = "$worker_p"
+now      = "$now"
+
+try:
+    with open(reg_path) as f:
+        projects = json.load(f)
+    if not isinstance(projects, list):
+        projects = []
+except Exception:
+    projects = []
+
+# Find existing entry by path
+idx = next((i for i, p in enumerate(projects) if p.get("path") == root), -1)
+if idx >= 0:
+    projects[idx]["last_run"]        = now
+    projects[idx]["name"]            = name
+    projects[idx]["stack"]           = stack
+    projects[idx]["main_provider"]   = main_p
+    projects[idx]["worker_provider"] = worker_p
+else:
+    projects.append({
+        "path":            root,
+        "name":            name,
+        "stack":           stack,
+        "main_provider":   main_p,
+        "worker_provider": worker_p,
+        "last_run":        now,
+        "last_task_id":    None,
+        "daemon_pid":      None
+    })
+
+with open(reg_path, "w") as f:
+    json.dump(projects, f, indent=2)
+PYEOF
+}
+
+# Unregister current project (called by cmd_clean --unregister)
+_unregister_project() {
+  _ensure_global_dirs
+  local root="${1:-$(find_project_root 2>/dev/null || pwd)}"
+  local registry="$DEVLOOP_GLOBAL_DIR/projects.json"
+
+  python3 - <<PYEOF
+import json
+
+reg_path = "$registry"
+root     = "$root"
+
+try:
+    with open(reg_path) as f:
+        projects = json.load(f)
+    if not isinstance(projects, list):
+        projects = []
+except Exception:
+    projects = []
+
+projects = [p for p in projects if p.get("path") != root]
+
+with open(reg_path, "w") as f:
+    json.dump(projects, f, indent=2)
+PYEOF
+}
+
+cmd_projects() {
+  _ensure_global_dirs
+  local registry="$DEVLOOP_GLOBAL_DIR/projects.json"
+  local subcmd="${1:-list}"; shift 2>/dev/null || true
+
+  case "$subcmd" in
+    # ── switch: print cd command for a project ──────────────────────────────
+    switch)
+      local target="${1:-}"
+      if [[ -z "$target" ]]; then
+        error "Usage: devloop projects switch <name|path>"
+        exit 1
+      fi
+      local found_path
+      found_path="$(python3 - <<PYEOF
+import json
+try:
+    with open("$registry") as f:
+        projects = json.load(f)
+except Exception:
+    projects = []
+for p in projects:
+    if p.get("name") == "$target" or p.get("path") == "$target":
+        print(p.get("path",""))
+        break
+PYEOF
+)"
+      if [[ -z "$found_path" ]]; then
+        error "Project not found: $target"
+        echo -e "  ${GRAY}List projects: ${CYAN}devloop projects${RESET}"
+        exit 1
+      fi
+      echo "$found_path"
+      ;;
+
+    # ── list (default): table of all registered projects ────────────────────
+    list|*)
+      local project_count
+      project_count="$(python3 -c "import json; d=json.load(open('$registry')); print(len(d))" 2>/dev/null || echo 0)"
+
+      echo ""
+      echo -e "${BOLD}DevLoop Projects${RESET}  ${GRAY}(${project_count} registered)${RESET}"
+      divider
+      printf '  %-20s %-20s %-18s %-12s %s\n' "Name" "Stack" "Providers" "Last Run" "Status"
+      echo -e "  ${GRAY}──────────────────── ──────────────────── ────────────────── ──────────── ──────────${RESET}"
+
+      python3 - <<PYEOF
+import json, os, sys
+from datetime import datetime, timezone
+
+try:
+    with open("$registry") as f:
+        projects = json.load(f)
+    if not isinstance(projects, list):
+        projects = []
+except Exception:
+    projects = []
+
+if not projects:
+    print("  (no projects registered — run devloop init in a project to register it)")
+    sys.exit(0)
+
+now_ts = datetime.now(timezone.utc)
+
+for p in projects:
+    name    = (p.get("name") or "?")[:20]
+    stack   = (p.get("stack") or "?")[:20]
+    main_p  = p.get("main_provider", "claude")[:6]
+    wrkr_p  = p.get("worker_provider", "copilot")[:7]
+    provs   = f"{main_p}+{wrkr_p}"
+
+    last_run = p.get("last_run", "")
+    if last_run:
+        try:
+            dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+            diff = now_ts - dt
+            s = int(diff.total_seconds())
+            if s < 60:       ago = f"{s}s ago"
+            elif s < 3600:   ago = f"{s//60}m ago"
+            elif s < 86400:  ago = f"{s//3600}h ago"
+            else:             ago = f"{s//86400}d ago"
+        except Exception:
+            ago = last_run[:10]
+    else:
+        ago = "never"
+
+    # Quick status: check if project path still exists; check for daemon pid
+    path  = p.get("path", "")
+    if not os.path.isdir(path):
+        status = "MISSING"
+    else:
+        dpid = p.get("daemon_pid")
+        if dpid and os.path.exists(f"/proc/{dpid}"):
+            status = "DAEMON ▶"
+        else:
+            status = "IDLE"
+
+    print(f"  {name:<20} {stack:<20} {provs:<18} {ago:<12} {status}")
+
+PYEOF
+      echo ""
+      echo -e "  ${GRAY}devloop projects switch <name>   — print cd path for a project${RESET}"
+      echo -e "  ${GRAY}eval \$(devloop projects switch <name>)   — actually cd to it${RESET}"
+      echo ""
+      ;;
+  esac
 }
 
 # ── cmd: replay — replay session logs with optional phase filter ──────────────
@@ -6047,6 +6243,9 @@ cmd_run() {
     echo -e "  ${GRAY}Session: ${CYAN}devloop session $id${RESET}"
   fi
 
+  # Register this project in the global registry (updates last_run timestamp)
+  _register_project "$(find_project_root)" 2>/dev/null || true
+
   # If we're inside tmux (auto-view exec), add a live status pane on the right
   if [[ -n "${TMUX:-}" && "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
     local _sdir; _sdir="$(_session_dir "$id")"
@@ -6423,6 +6622,10 @@ cmd_help() {
   echo -e "  ${CYAN}devloop view [task-id]${RESET}"
   echo -e "    Open live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions+Permissions"
   echo -e "    Falls back to inline log tail if tmux not installed\n"
+  echo -e "  ${CYAN}devloop projects${RESET}"
+  echo -e "    List all registered DevLoop projects with provider, last-run time, and status"
+  echo -e "  ${CYAN}devloop projects switch <name>${RESET}"
+  echo -e "    Print the path to a registered project (eval to cd: ${GRAY}eval \$(devloop projects switch myapp)${RESET})\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
   echo -e "    Claude: remote-control (access from mobile/browser); Copilot: remote (GitHub web + mobile)"
@@ -6657,6 +6860,7 @@ main() {
     session)          cmd_session  "$@" ;;
     replay)           cmd_replay   "$@" ;;
     view)             cmd_view     "$@" ;;
+    projects)         cmd_projects "$@" ;;
     do|ask|please|nl) cmd_do      "$@" ;;
     install)          cmd_install  "$@" ;;
     init)             cmd_init     "$@" ;;
