@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.13.0"
+VERSION="4.14.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -4357,7 +4357,292 @@ cmd_replay() {
   fi
 }
 
-# ── cmd: architect ────────────────────────────────────────────────────────────
+# ── cmd: inbox — human review queue ──────────────────────────────────────────
+
+# Write an item to the project inbox (called by permission hooks and pipeline phases)
+_inbox_write() {
+  local project_root="${1:-$(find_project_root 2>/dev/null || pwd)}"
+  local type="${2:-permission}"       # permission | needs-work | blocked | info
+  local message="$3"
+  local task_id="${4:-${DEVLOOP_CURRENT_SESSION_ID:-}}"
+  local tool="${5:-}"
+  local command_text="${6:-}"
+
+  local inbox_dir="$project_root/$DEVLOOP_DIR"
+  mkdir -p "$inbox_dir"
+  local inbox_file="$inbox_dir/inbox.json"
+  [[ -f "$inbox_file" ]] || echo "[]" > "$inbox_file"
+
+  local item_id; item_id="inbox-$(date '+%Y%m%d-%H%M%S')-$$"
+  local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+  local project_name; project_name="$(basename "$project_root")"
+
+  python3 - <<PYEOF
+import json, sys
+
+inbox_path  = "$inbox_file"
+item_id     = "$item_id"
+project     = "$project_name"
+task_id     = "$task_id"
+itype       = "$type"
+message     = """$message"""
+tool        = "$tool"
+cmd_text    = """$command_text"""
+now         = "$now"
+
+try:
+    with open(inbox_path) as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        items = []
+except Exception:
+    items = []
+
+items.append({
+    "id":           item_id,
+    "project":      project,
+    "task_id":      task_id,
+    "type":         itype,
+    "message":      message,
+    "tool":         tool,
+    "command":      cmd_text,
+    "created_at":   now,
+    "resolved_at":  None,
+    "resolution":   None
+})
+
+with open(inbox_path, "w") as f:
+    json.dump(items, f, indent=2)
+PYEOF
+
+  # macOS notification (non-blocking)
+  if [[ "${DEVLOOP_NOTIFY_SOUND:-true}" == "true" ]] && command -v osascript &>/dev/null; then
+    local notif_title="DevLoop: $project_name"
+    local notif_body="$message"
+    osascript -e "display notification \"$notif_body\" with title \"$notif_title\" sound name \"Glass\"" 2>/dev/null || true
+  fi
+
+  # Webhook notification
+  if [[ -n "${DEVLOOP_NOTIFY_WEBHOOK:-}" ]]; then
+    local payload; payload="$(python3 -c "
+import json
+print(json.dumps({'project': '$project_name', 'type': '$type', 'message': '''$message''', 'task_id': '$task_id'}))
+" 2>/dev/null || true)"
+    [[ -n "$payload" ]] && \
+      curl -fsSL -X POST -H 'Content-Type: application/json' -d "$payload" "$DEVLOOP_NOTIFY_WEBHOOK" -o /dev/null 2>/dev/null || true
+  fi
+}
+
+cmd_inbox() {
+  load_config 2>/dev/null || true
+  local subcmd="${1:-list}"; shift 2>/dev/null || true
+  local show_all=false
+  local project_root; project_root="$(find_project_root 2>/dev/null || pwd)"
+
+  while [[ "${subcmd}" == --* ]]; do
+    case "$subcmd" in
+      --all) show_all=true; subcmd="${1:-list}"; shift 2>/dev/null || true ;;
+      *)     subcmd="list" ;;
+    esac
+  done
+
+  _inbox_list() {
+    local inbox_file="$1"
+    [[ -f "$inbox_file" ]] || { echo "  (no inbox file)"; return; }
+
+    python3 - <<PYEOF
+import json, sys
+from datetime import datetime, timezone
+
+try:
+    with open("$inbox_file") as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        items = []
+except Exception:
+    items = []
+
+pending = [i for i in items if not i.get("resolved_at")]
+resolved = [i for i in items if i.get("resolved_at")]
+
+if not items:
+    print("  (inbox is empty)")
+    sys.exit(0)
+
+now_ts = datetime.now(timezone.utc)
+
+def ago(ts):
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        diff = now_ts - dt
+        s = int(diff.total_seconds())
+        if s < 60:      return f"{s}s ago"
+        elif s < 3600:  return f"{s//60}m ago"
+        elif s < 86400: return f"{s//3600}h ago"
+        else:            return f"{s//86400}d ago"
+    except Exception:
+        return ts[:10]
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[96m"
+YELLOW = "\033[93m"
+GREEN  = "\033[92m"
+RED    = "\033[91m"
+GRAY   = "\033[90m"
+
+print(f"\n{BOLD}🔔 DevLoop Inbox{RESET}  {GRAY}({len(pending)} pending, {len(resolved)} resolved){RESET}\n")
+
+for item in pending:
+    itype = item.get("type", "?")
+    if itype == "permission":
+        icon = f"{YELLOW}⚠ PERMISSION{RESET}"
+    elif itype == "needs-work":
+        icon = f"{YELLOW}⟳ NEEDS_WORK{RESET}"
+    elif itype == "blocked":
+        icon = f"{RED}⛔ BLOCKED{RESET}"
+    else:
+        icon = f"{CYAN}ℹ {itype.upper()}{RESET}"
+
+    proj    = item.get("project", "?")
+    task_id = item.get("task_id", "?")
+    msg     = item.get("message", "")
+    tool    = item.get("tool", "")
+    cmd     = item.get("command", "")
+    created = ago(item.get("created_at", ""))
+    iid     = item.get("id", "")
+
+    print(f"  {BOLD}▶  [{proj} / {task_id}]{RESET}  {icon}")
+    print(f"     {msg}")
+    if tool:
+        print(f"     Tool: {CYAN}{tool}{RESET}", end="")
+        if cmd:
+            print(f"  →  {GRAY}{cmd}{RESET}", end="")
+        print()
+    print(f"     Created: {GRAY}{created}{RESET}  ID: {GRAY}{iid}{RESET}")
+    print()
+
+if resolved:
+    print(f"  {GRAY}── {len(resolved)} resolved item(s) (run devloop inbox history to view) ──{RESET}")
+PYEOF
+  }
+
+  case "$subcmd" in
+    # ── resolve: mark an item resolved ──────────────────────────────────────
+    resolve)
+      local item_id="${1:-}"
+      local resolution="${2:-approved}"
+      if [[ -z "$item_id" ]]; then
+        error "Usage: devloop inbox resolve <item-id> [approved|denied|skipped]"
+        exit 1
+      fi
+      local inbox_file="$project_root/$DEVLOOP_DIR/inbox.json"
+      local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+      python3 - <<PYEOF
+import json
+inbox_path = "$inbox_file"
+item_id    = "$item_id"
+resolution = "$resolution"
+now        = "$now"
+try:
+    with open(inbox_path) as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        items = []
+except Exception:
+    items = []; ok = False
+ok = False
+for item in items:
+    if item.get("id") == item_id:
+        item["resolved_at"] = now
+        item["resolution"]  = resolution
+        ok = True
+        break
+with open(inbox_path, "w") as f:
+    json.dump(items, f, indent=2)
+print("resolved" if ok else "not-found")
+PYEOF
+      success "Inbox item $item_id marked as: $resolution"
+      ;;
+
+    # ── history: show resolved items ─────────────────────────────────────────
+    history)
+      local inbox_file="$project_root/$DEVLOOP_DIR/inbox.json"
+      [[ -f "$inbox_file" ]] || { info "No inbox history."; return; }
+      python3 - <<PYEOF
+import json
+try:
+    with open("$inbox_file") as f:
+        items = json.load(f)
+except Exception:
+    items = []
+resolved = [i for i in items if i.get("resolved_at")]
+if not resolved:
+    print("  (no resolved items)")
+else:
+    for i in resolved:
+        print(f"  {i.get('id','')}  [{i.get('resolution','')}]  {i.get('message','')[:60]}  ({i.get('resolved_at','')[:10]})")
+PYEOF
+      ;;
+
+    # ── clear: remove all resolved items ─────────────────────────────────────
+    clear)
+      local inbox_file="$project_root/$DEVLOOP_DIR/inbox.json"
+      [[ -f "$inbox_file" ]] || { info "Nothing to clear."; return; }
+      python3 - <<PYEOF
+import json
+try:
+    with open("$inbox_file") as f:
+        items = json.load(f)
+except Exception:
+    items = []
+pending = [i for i in items if not i.get("resolved_at")]
+removed = len(items) - len(pending)
+with open("$inbox_file", "w") as f:
+    json.dump(pending, f, indent=2)
+print(f"Cleared {removed} resolved item(s). {len(pending)} pending remain.")
+PYEOF
+      ;;
+
+    # ── list (default) ────────────────────────────────────────────────────────
+    list|*)
+      if [[ "$show_all" == "true" ]]; then
+        # Scan all registered projects
+        local registry="$DEVLOOP_GLOBAL_DIR/projects.json"
+        local proj_paths
+        proj_paths="$(python3 -c "import json; d=json.load(open('$registry')); [print(p['path']) for p in d]" 2>/dev/null || true)"
+        if [[ -z "$proj_paths" ]]; then
+          info "No registered projects. Run devloop init in each project first."
+          return
+        fi
+        local total_pending=0
+        while IFS= read -r ppath; do
+          local pinbox="$ppath/$DEVLOOP_DIR/inbox.json"
+          if [[ -f "$pinbox" ]]; then
+            local cnt; cnt="$(python3 -c "import json; d=json.load(open('$pinbox')); print(sum(1 for i in d if not i.get('resolved_at')))" 2>/dev/null || echo 0)"
+            (( total_pending += cnt )) || true
+            if (( cnt > 0 )); then
+              echo -e "\n  ${BOLD}Project: $(basename "$ppath")${RESET}  ${GRAY}($cnt pending)${RESET}"
+              _inbox_list "$pinbox"
+            fi
+          fi
+        done <<< "$proj_paths"
+        if (( total_pending == 0 )); then
+          success "All inboxes clear across all registered projects"
+        fi
+      else
+        _inbox_list "$project_root/$DEVLOOP_DIR/inbox.json"
+        echo ""
+        echo -e "  ${GRAY}devloop inbox resolve <id> [approved|denied|skipped]${RESET}"
+        echo -e "  ${GRAY}devloop inbox history   — view resolved items${RESET}"
+        echo -e "  ${GRAY}devloop inbox --all      — view across all registered projects${RESET}"
+        echo ""
+      fi
+      ;;
+  esac
+}
+
+
 
 cmd_architect() {
   local feature="${1:-}"
@@ -6308,6 +6593,7 @@ sleep 2; done'" 2>/dev/null || true
       REJECTED)
         _session_phase_end "reviewer" "rejected"
         _session_finish "rejected"
+        _inbox_write "$(find_project_root)" "blocked" "Pipeline REJECTED for task $id. Reviewer: $(head -5 "$review_file" 2>/dev/null | tr '\n' ' ')" "$id" || true
         error "❌ REJECTED — pipeline stopped"
         echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}"
         echo -e "  ${GRAY}Review: ${CYAN}devloop status $id${RESET}"
@@ -6352,6 +6638,7 @@ $(cat "$review_file")
             break
           else
             _session_finish "needs-work"
+            _inbox_write "$(find_project_root)" "needs-work" "Max fix retries ($max_retries) reached for task $id. Manual review needed." "$id" || true
             warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
             echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
             echo -e "  ${GRAY}Tip: ${CYAN}devloop run ... --no-respec${GRAY} disabled re-architect; remove it to enable${RESET}"
@@ -6626,6 +6913,14 @@ cmd_help() {
   echo -e "    List all registered DevLoop projects with provider, last-run time, and status"
   echo -e "  ${CYAN}devloop projects switch <name>${RESET}"
   echo -e "    Print the path to a registered project (eval to cd: ${GRAY}eval \$(devloop projects switch myapp)${RESET})\n"
+  echo -e "  ${CYAN}devloop inbox${RESET}"
+  echo -e "    View pending human decisions: permissions, NEEDS_WORK, blocked tasks (current project)"
+  echo -e "  ${CYAN}devloop inbox --all${RESET}"
+  echo -e "    View pending items across ALL registered projects"
+  echo -e "  ${CYAN}devloop inbox resolve <id> [approved|denied|skipped]${RESET}"
+  echo -e "    Resolve a specific inbox item by ID"
+  echo -e "  ${CYAN}devloop inbox history${RESET} / ${CYAN}devloop inbox clear${RESET}"
+  echo -e "    View resolved items / remove resolved items from inbox\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
   echo -e "    Claude: remote-control (access from mobile/browser); Copilot: remote (GitHub web + mobile)"
@@ -6861,6 +7156,7 @@ main() {
     replay)           cmd_replay   "$@" ;;
     view)             cmd_view     "$@" ;;
     projects)         cmd_projects "$@" ;;
+    inbox)            cmd_inbox    "$@" ;;
     do|ask|please|nl) cmd_do      "$@" ;;
     install)          cmd_install  "$@" ;;
     init)             cmd_init     "$@" ;;

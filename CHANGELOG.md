@@ -5,7 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.13.0] — 2026-05-10
+## [4.14.0] — 2026-05-10
+
+### Added
+- **Human inbox (`devloop inbox`)**: every REJECTED pipeline result or max-retries NEEDS_WORK
+  event now writes a structured entry to `.devloop/inbox.json`.
+- **`_inbox_write()`**: internal helper to append items to the project inbox; includes type,
+  message, task ID, tool, and command fields.
+- **`devloop inbox`**: view pending items (permission requests, NEEDS_WORK, blocked tasks).
+- **`devloop inbox --all`**: view pending items across all registered projects.
+- **`devloop inbox resolve <id>`**: mark an item as approved/denied/skipped.
+- **`devloop inbox history`** / **`devloop inbox clear`**: view or remove resolved items.
+- **macOS notifications**: `_inbox_write()` fires a native macOS notification (with sound)
+  whenever a new item is added. Controlled by `DEVLOOP_NOTIFY_SOUND` config key.
+- **Webhook support**: `_inbox_write()` posts a JSON payload to `DEVLOOP_NOTIFY_WEBHOOK`
+  (Slack/Discord compatible) on every inbox event.
+- **Help text**: full `devloop inbox` documentation added.
+
+---
+
+
 
 ### Added
 - **Project registry (`~/.devloop/projects.json`)**: `devloop init` and `devloop run` now
