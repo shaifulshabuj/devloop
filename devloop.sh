@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.5.0"
+VERSION="4.6.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -1560,6 +1560,36 @@ cmd_logs() {
   fi
 }
 
+# ── Configure (standalone wizard) ────────────────────────────────────────────
+
+cmd_configure() {
+  load_config
+  ensure_dirs
+
+  step "DevLoop Configure — interactive setup"
+  divider
+
+  if [[ ! -f "$CONFIG_PATH" ]]; then
+    info "No devloop.config.sh found — running full init first..."
+    cmd_init --configure
+    return
+  fi
+
+  info "Current config: ${CYAN}$CONFIG_PATH${RESET}"
+  _setup_wizard "$CONFIG_PATH"
+
+  # After wizard, reload and regenerate agents with new model settings
+  load_config
+  write_agent_orchestrator 2>/dev/null || true
+  write_agent_architect "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
+  write_agent_reviewer   "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
+  success "Configuration saved and agent prompts updated"
+  echo ""
+  echo -e "  Run ${CYAN}devloop hooks${RESET} to re-install permission hooks with new settings"
+  echo -e "  Run ${CYAN}devloop status${RESET} to confirm active providers and models"
+  echo ""
+}
+
 # ── Doctor ────────────────────────────────────────────────────────────────────
 
 cmd_doctor() {
@@ -2158,6 +2188,239 @@ cmd_install() {
 
 # ── Init helpers ───────────────────────────────────────────────────────────────
 
+# ── Interactive setup wizard ───────────────────────────────────────────────────
+# Asks the user to choose providers, models, and permission mode.
+# Writes choices directly into the given config file.
+# Usage: _setup_wizard <config_file>
+_setup_wizard() {
+  local cfg="$1"
+
+  # Detect installed providers
+  local has_claude="false"; command -v claude &>/dev/null && has_claude="true"
+  local has_copilot="false"; command -v copilot &>/dev/null && has_copilot="true"
+  local has_opencode="false"; command -v opencode &>/dev/null && has_opencode="true"
+  local has_pi="false"; command -v pi &>/dev/null && has_pi="true"
+
+  _avail() { [[ "$1" == "true" ]] && echo "${GREEN}✔ installed${RESET}" || echo "${YELLOW}⚠  not found${RESET}"; }
+
+  echo ""
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo -e "${BOLD}  DevLoop Setup Wizard${RESET}"
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo ""
+  echo -e "  Detected providers:"
+  echo -e "    claude   $(_avail "$has_claude")"
+  echo -e "    copilot  $(_avail "$has_copilot")"
+  echo -e "    opencode $(_avail "$has_opencode")"
+  echo -e "    pi       $(_avail "$has_pi")"
+  echo ""
+  echo -e "  ${GRAY}Press Enter to accept default shown in [brackets]${RESET}"
+  echo ""
+
+  # ── Step 1: Main provider ────────────────────────────────────────────────────
+  echo -e "${BOLD}Step 1/4 — Main provider${RESET}"
+  echo -e "  The main provider runs the ${CYAN}orchestrator${RESET}, ${CYAN}architect${RESET}, and ${CYAN}reviewer${RESET}."
+  echo -e "  It must support remote control (mobile/browser → terminal handoff)."
+  echo ""
+  echo -e "  1) claude   — Claude Code CLI  $(_avail "$has_claude")"
+  echo -e "  2) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
+  echo ""
+  local main_default="claude"
+  [[ "$has_claude" == "false" && "$has_copilot" == "true" ]] && main_default="copilot"
+  local wiz_main=""
+  while [[ -z "$wiz_main" ]]; do
+    printf "  Choose main provider [${BOLD}%s${RESET}]: " "$main_default"
+    local _inp=""
+    read -r _inp 2>/dev/null </dev/tty || _inp=""
+    _inp="${_inp:-$main_default}"
+    case "$_inp" in
+      1|claude)  wiz_main="claude" ;;
+      2|copilot) wiz_main="copilot" ;;
+      *) echo -e "  ${RED}Invalid — enter 1 (claude) or 2 (copilot)${RESET}" ;;
+    esac
+  done
+  echo -e "  ${GREEN}✔${RESET} Main provider: ${BOLD}$wiz_main${RESET}"
+  echo ""
+
+  # ── Step 2: Worker provider ──────────────────────────────────────────────────
+  echo -e "${BOLD}Step 2/4 — Worker provider${RESET}"
+  echo -e "  The worker executes ${CYAN}work${RESET} and ${CYAN}fix${RESET} tasks (implements the code)."
+  echo -e "  All providers are supported here."
+  echo ""
+  echo -e "  1) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
+  echo -e "  2) claude   — Claude Code CLI  $(_avail "$has_claude")"
+  echo -e "  3) opencode — OpenCode         $(_avail "$has_opencode")"
+  echo -e "  4) pi       — Pi               $(_avail "$has_pi")"
+  echo ""
+  local worker_default="copilot"
+  [[ "$wiz_main" == "copilot" ]] && worker_default="claude"
+  [[ "$has_copilot" == "false" && "$has_claude" == "true" ]] && worker_default="claude"
+  local wiz_worker=""
+  while [[ -z "$wiz_worker" ]]; do
+    printf "  Choose worker provider [${BOLD}%s${RESET}]: " "$worker_default"
+    local _inp=""
+    read -r _inp 2>/dev/null </dev/tty || _inp=""
+    _inp="${_inp:-$worker_default}"
+    case "$_inp" in
+      1|copilot)  wiz_worker="copilot" ;;
+      2|claude)   wiz_worker="claude" ;;
+      3|opencode) wiz_worker="opencode" ;;
+      4|pi)       wiz_worker="pi" ;;
+      *) echo -e "  ${RED}Invalid — enter 1-4 or provider name${RESET}" ;;
+    esac
+  done
+  echo -e "  ${GREEN}✔${RESET} Worker provider: ${BOLD}$wiz_worker${RESET}"
+  echo ""
+
+  # ── Step 3: Claude model(s) ──────────────────────────────────────────────────
+  echo -e "${BOLD}Step 3/4 — Claude model${RESET}"
+  echo -e "  Used when Claude is the main or worker provider."
+  echo ""
+  echo -e "  ${BOLD}Main model${RESET} (architect / reviewer / orchestrator):"
+  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
+  echo -e "  2) opus    — most capable, slower/costlier"
+  echo -e "  3) haiku   — fastest and cheapest"
+  echo ""
+  local wiz_main_model=""
+  while [[ -z "$wiz_main_model" ]]; do
+    printf "  Choose main model [${BOLD}sonnet${RESET}]: "
+    local _inp=""
+    read -r _inp 2>/dev/null </dev/tty || _inp=""
+    _inp="${_inp:-sonnet}"
+    case "$_inp" in
+      1|sonnet) wiz_main_model="sonnet" ;;
+      2|opus)   wiz_main_model="opus" ;;
+      3|haiku)  wiz_main_model="haiku" ;;
+      *)
+        # allow any model name (custom or future claude-* values)
+        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
+          wiz_main_model="$_inp"
+        else
+          echo -e "  ${RED}Invalid — enter 1 (sonnet), 2 (opus), 3 (haiku), or a model name${RESET}"
+        fi
+        ;;
+    esac
+  done
+  echo ""
+  echo -e "  ${BOLD}Worker model${RESET} (work / fix):"
+  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
+  echo -e "  2) opus    — most capable, slower/costlier"
+  echo -e "  3) haiku   — fastest and cheapest"
+  echo -e "  4) same    — same as main model (${BOLD}$wiz_main_model${RESET})"
+  echo ""
+  local wiz_worker_model=""
+  while [[ -z "$wiz_worker_model" ]]; do
+    printf "  Choose worker model [${BOLD}sonnet${RESET}]: "
+    local _inp=""
+    read -r _inp 2>/dev/null </dev/tty || _inp=""
+    _inp="${_inp:-sonnet}"
+    case "$_inp" in
+      1|sonnet) wiz_worker_model="sonnet" ;;
+      2|opus)   wiz_worker_model="opus" ;;
+      3|haiku)  wiz_worker_model="haiku" ;;
+      4|same)   wiz_worker_model="$wiz_main_model" ;;
+      *)
+        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
+          wiz_worker_model="$_inp"
+        else
+          echo -e "  ${RED}Invalid — enter 1-4 or a model name${RESET}"
+        fi
+        ;;
+    esac
+  done
+  echo -e "  ${GREEN}✔${RESET} Main model: ${BOLD}$wiz_main_model${RESET} | Worker model: ${BOLD}$wiz_worker_model${RESET}"
+  echo ""
+
+  # ── Step 4: Permission mode ──────────────────────────────────────────────────
+  echo -e "${BOLD}Step 4/4 — Permission mode${RESET}"
+  echo -e "  Controls how devloop handles Bash commands from AI agents."
+  echo ""
+  echo -e "  1) smart  — block dangerous, allow safe, ask user for unknowns  ${GRAY}[default]${RESET}"
+  echo -e "  2) auto   — allow everything (fastest, no interruptions)"
+  echo -e "  3) strict — allow only known-safe ops, block + ask for the rest"
+  echo -e "  4) off    — disable hook (Claude's built-in behaviour)"
+  echo ""
+  local wiz_perm=""
+  while [[ -z "$wiz_perm" ]]; do
+    printf "  Choose permission mode [${BOLD}smart${RESET}]: "
+    local _inp=""
+    read -r _inp 2>/dev/null </dev/tty || _inp=""
+    _inp="${_inp:-smart}"
+    case "$_inp" in
+      1|smart)  wiz_perm="smart" ;;
+      2|auto)   wiz_perm="auto" ;;
+      3|strict) wiz_perm="strict" ;;
+      4|off)    wiz_perm="off" ;;
+      *) echo -e "  ${RED}Invalid — enter 1-4 or: smart, auto, strict, off${RESET}" ;;
+    esac
+  done
+  echo -e "  ${GREEN}✔${RESET} Permission mode: ${BOLD}$wiz_perm${RESET}"
+  echo ""
+
+  # ── Summary ──────────────────────────────────────────────────────────────────
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo -e "  ${BOLD}Your selections:${RESET}"
+  echo -e "  Main provider:  ${CYAN}$wiz_main${RESET}"
+  echo -e "  Worker provider: ${CYAN}$wiz_worker${RESET}"
+  echo -e "  Claude main model:   ${CYAN}$wiz_main_model${RESET}"
+  echo -e "  Claude worker model: ${CYAN}$wiz_worker_model${RESET}"
+  echo -e "  Permission mode: ${CYAN}$wiz_perm${RESET}"
+  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo ""
+  printf "  Save to %s? [${BOLD}Y/n${RESET}]: " "$cfg"
+  local _confirm=""
+  read -r _confirm 2>/dev/null </dev/tty || _confirm=""
+  _confirm="${_confirm:-y}"
+  if [[ "$_confirm" =~ ^[Nn] ]]; then
+    warn "Wizard cancelled — keeping existing config"
+    return 0
+  fi
+
+  # ── Write into config file ────────────────────────────────────────────────────
+  # Use sed/python to update the values in-place (config already exists from _write_default_config)
+  _wizard_set_config "$cfg" "DEVLOOP_MAIN_PROVIDER"    "$wiz_main"
+  _wizard_set_config "$cfg" "DEVLOOP_WORKER_PROVIDER"  "$wiz_worker"
+  _wizard_set_config "$cfg" "CLAUDE_MODEL"             "$wiz_main_model"
+  _wizard_set_config "$cfg" "CLAUDE_MAIN_MODEL"        "$wiz_main_model"
+  _wizard_set_config "$cfg" "CLAUDE_WORKER_MODEL"      "$wiz_worker_model"
+  _wizard_set_config "$cfg" "DEVLOOP_PERMISSION_MODE"  "$wiz_perm"
+
+  success "Saved preferences to ${CYAN}$cfg${RESET}"
+  echo ""
+}
+
+# Set or add a key=value line in a config file.
+_wizard_set_config() {
+  local file="$1"
+  local key="$2"
+  local val="$3"
+  # If key exists (even commented out), update it; otherwise append
+  if grep -qE "^[[:space:]#]*${key}=" "$file" 2>/dev/null; then
+    # Replace the line (uncomment + set value)
+    python3 - "$file" "$key" "$val" <<'PYEOF'
+import sys, re
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    lines = f.readlines()
+out = []
+replaced = False
+for line in lines:
+    if re.match(r'^[[:space:]#]*' + re.escape(key) + r'=', line) if False else re.match(r'^\s*#?\s*' + re.escape(key) + r'=', line):
+        out.append(f'{key}="{val}"\n')
+        replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append(f'{key}="{val}"\n')
+with open(path, 'w') as f:
+    f.writelines(out)
+PYEOF
+  else
+    echo "${key}=\"${val}\"" >> "$file"
+  fi
+}
+
+
 _write_default_config() {
   local target="$1"
   cat > "$target" <<'CONFIG'
@@ -2618,6 +2881,19 @@ CLAUDEMD
 # ── cmd: init ────────────────────────────────────────────────────────────────
 
 cmd_init() {
+  # Parse flags: --yes/-y skips wizard; --configure/-c forces wizard even if config exists
+  local skip_wizard="false"
+  local force_wizard="false"
+  local _args=()
+  for _a in "$@"; do
+    case "$_a" in
+      --yes|-y)        skip_wizard="true" ;;
+      --configure|-c)  force_wizard="true" ;;
+      *)               _args+=("$_a") ;;
+    esac
+  done
+  set -- "${_args[@]}"
+
   load_config
   ensure_dirs
 
@@ -2625,6 +2901,7 @@ cmd_init() {
   divider
 
   # 1. Project config
+  local _is_new_config="false"
   if [[ -f "$CONFIG_PATH" ]]; then
     local added_keys
     added_keys="$(_merge_devloop_config_defaults "$CONFIG_PATH")"
@@ -2636,6 +2913,7 @@ cmd_init() {
   else
     _write_default_config "$CONFIG_PATH"
     success "Created: ${CYAN}devloop.config.sh${RESET}"
+    _is_new_config="true"
   fi
 
   local root
@@ -2648,7 +2926,12 @@ cmd_init() {
     info "Project auto-config: no placeholder values needed updates"
   fi
 
-  # Reload so generated files reflect the analyzed project configuration
+  # Run interactive wizard if: new config (first init) OR --configure flag, AND not --yes
+  if [[ "$skip_wizard" == "false" ]] && [[ "$_is_new_config" == "true" || "$force_wizard" == "true" ]]; then
+    _setup_wizard "$CONFIG_PATH"
+  fi
+
+  # Reload so generated files reflect the (potentially wizard-updated) configuration
   load_config
 
   # 2. Write agent definitions — pass CLAUDE_MAIN_MODEL so agents stay in sync with config
@@ -5108,9 +5391,13 @@ cmd_help() {
   echo -e "${BOLD}COMMANDS${RESET}\n"
   echo -e "  ${CYAN}devloop install${RESET}"
   echo -e "    Install devloop to /usr/local/bin (run once)\n"
-  echo -e "  ${CYAN}devloop init${RESET}"
+  echo -e "  ${CYAN}devloop init [--yes|-y] [--configure|-c]${RESET}"
   echo -e "    Set up DevLoop in current project (auto-analyzes stack/config from project files)"
-  echo -e "    Writes: agents, CLAUDE.md, devloop.config.sh, copilot-instructions\n"
+  echo -e "    Runs interactive setup wizard on first init. Use ${GRAY}--yes${RESET} to skip wizard."
+  echo -e "    Use ${GRAY}--configure${RESET} to re-run the wizard on an existing project.\n"
+  echo -e "  ${CYAN}devloop configure${RESET}  ${GRAY}aliases: setup, wizard${RESET}"
+  echo -e "    Re-run the interactive setup wizard to change providers, models, and permissions"
+  echo -e "    Updates devloop.config.sh and regenerates agent prompt files.\n"
   echo -e "  ${CYAN}devloop run \"feature\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]${RESET}  ${GRAY}alias: go${RESET}"
   echo -e "    Full automated pipeline: architect → work → review → fix loop → learn"
   echo -e "    One command replaces: architect + work + review + fix + review + ...\n"
@@ -5189,14 +5476,16 @@ cmd_help() {
   echo -e "    Self-upgrade devloop from GitHub (no config needed) + refresh project configs\n"
   echo -e "${BOLD}SETUP (one-time)${RESET}\n"
   echo -e "  ${GRAY}# Install devloop globally${RESET}"
-  echo -e "  ${CYAN}curl -fsSL https://your-host/devloop -o /tmp/devloop${RESET}"
+  echo -e "  ${CYAN}curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/devloop.sh -o /tmp/devloop${RESET}"
   echo -e "  ${CYAN}chmod +x /tmp/devloop && sudo mv /tmp/devloop /usr/local/bin/devloop${RESET}\n"
-  echo -e "  ${GRAY}# In each project:${RESET}"
+  echo -e "  ${GRAY}# In each project (interactive wizard on first run):${RESET}"
   echo -e "  ${CYAN}cd your-project/${RESET}"
-  echo -e "  ${CYAN}devloop init${RESET}"
-  echo -e "  ${CYAN}devloop hooks${RESET}           ${GRAY}← install pipeline hooks${RESET}"
-  echo -e "  ${CYAN}devloop tools suggest${RESET}   ${GRAY}← discover stack-specific tools${RESET}"
-  echo -e "  ${CYAN}devloop start${RESET}           ${GRAY}← connect from mobile/browser${RESET}\n"
+  echo -e "  ${CYAN}devloop init${RESET}              ${GRAY}← runs setup wizard, auto-detects stack${RESET}"
+  echo -e "  ${CYAN}devloop init --yes${RESET}        ${GRAY}← skip wizard, use auto-detected defaults${RESET}"
+  echo -e "  ${CYAN}devloop configure${RESET}         ${GRAY}← re-run wizard anytime to change settings${RESET}"
+  echo -e "  ${CYAN}devloop hooks${RESET}             ${GRAY}← install pipeline hooks${RESET}"
+  echo -e "  ${CYAN}devloop tools suggest${RESET}     ${GRAY}← discover stack-specific tools${RESET}"
+  echo -e "  ${CYAN}devloop start${RESET}             ${GRAY}← connect from mobile/browser${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
   echo -e "  ${CYAN}claude${RESET}    Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
   echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}npm install -g @github/copilot${RESET}"
@@ -5267,6 +5556,7 @@ main() {
   case "$cmd" in
     install)      cmd_install   "$@" ;;
     init)         cmd_init      "$@" ;;
+    configure|setup|wizard) cmd_configure "$@" ;;
     start|s)      cmd_start     "$@" ;;
     daemon|d)     cmd_daemon    "$@" ;;
     run|go)       cmd_run       "$@" ;;

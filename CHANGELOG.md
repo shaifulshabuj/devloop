@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.0] — 2026-05-09
+
+### Added
+- **Interactive setup wizard** — `devloop init` now runs a 4-step interactive wizard on first initialization:
+  1. **Main provider** — choose claude or copilot (detects what's installed)
+  2. **Worker provider** — choose copilot, claude, opencode, or pi
+  3. **Claude models** — separate model for main roles vs worker roles (sonnet / opus / haiku)
+  4. **Permission mode** — smart / auto / strict / off
+- Wizard detects installed providers and marks them `✔ installed` or `⚠ not found`.
+- Selections are saved directly to `devloop.config.sh` — no manual editing required.
+- **`devloop init --yes` / `-y`** — skip wizard, use auto-detected defaults (CI-friendly).
+- **`devloop init --configure` / `-c`** — re-run wizard on an already-initialized project.
+- **`devloop configure`** (aliases: `setup`, `wizard`) — standalone command to re-run the wizard anytime.
+  After wizard completes, regenerates agent prompt files automatically.
+- Updated SETUP section in `devloop help` with new wizard-aware instructions and correct GitHub raw URL.
+
+### Changed
+- `_write_default_config`: `CLAUDE_MAIN_MODEL` and `CLAUDE_WORKER_MODEL` are now initially commented-out hints in the template — the wizard writes them when chosen.
+
+---
+
 ## [4.5.0] — 2026-05-09
 
 ### Added
