@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.14.0"
+VERSION="4.15.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -4642,6 +4642,152 @@ PYEOF
   esac
 }
 
+# ── cmd: stats — aggregated pipeline metrics ──────────────────────────────────
+
+cmd_stats() {
+  load_config 2>/dev/null || true
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_dir="$root/$DEVLOOP_DIR/sessions"
+  local project_name; project_name="$(basename "$root")"
+
+  echo ""
+  echo -e "${BOLD}DevLoop Stats — ${CYAN}$project_name${RESET}"
+  divider
+
+  if [[ ! -d "$sessions_dir" ]]; then
+    info "No sessions recorded yet."
+    echo -e "  ${GRAY}Run ${CYAN}devloop run \"feature\"${RESET}${GRAY} to start tracking pipeline metrics.${RESET}"
+    return 0
+  fi
+
+  python3 - <<PYEOF
+import os, json, re
+from datetime import datetime, timezone
+
+sessions_dir = "$sessions_dir"
+
+total = 0
+approved = 0
+needs_work = 0
+rejected = 0
+total_fix_rounds = 0
+durations_s = []
+phase_durations = {"architect": [], "worker": [], "reviewer": []}
+
+for entry in sorted(os.listdir(sessions_dir)):
+    d = os.path.join(sessions_dir, entry)
+    if not os.path.isdir(d):
+        continue
+    total += 1
+
+    status_file = os.path.join(d, "status")
+    status = ""
+    if os.path.isfile(status_file):
+        with open(status_file) as f:
+            status = f.read().strip()
+
+    if status == "approved":
+        approved += 1
+    elif "needs" in status:
+        needs_work += 1
+    elif status == "rejected":
+        rejected += 1
+
+    # Count fix rounds by counting fix-N.state files
+    fix_rounds = 0
+    for fname in os.listdir(d):
+        if re.match(r"fix-\d+\.state", fname):
+            fix_rounds += 1
+    total_fix_rounds += fix_rounds
+
+    # Compute total duration
+    started_f  = os.path.join(d, "started_at")
+    finished_f = os.path.join(d, "finished_at")
+    if os.path.isfile(started_f) and os.path.isfile(finished_f):
+        try:
+            with open(started_f) as f:  s_ts = f.read().strip()
+            with open(finished_f) as f: e_ts = f.read().strip()
+            s_dt = datetime.fromisoformat(s_ts.replace("Z","+00:00"))
+            e_dt = datetime.fromisoformat(e_ts.replace("Z","+00:00"))
+            durations_s.append(int((e_dt - s_dt).total_seconds()))
+        except Exception:
+            pass
+
+    # Phase durations from .state files: "done:HH:MM:SS-HH:MM:SS"
+    for phase in ["architect", "worker", "reviewer"]:
+        state_f = os.path.join(d, f"{phase}.state")
+        if os.path.isfile(state_f):
+            try:
+                with open(state_f) as f:
+                    line = f.read().strip()
+                # Format: status:started:ended
+                parts = line.split(":", 2)
+                if len(parts) == 3:
+                    _, ts_start, ts_end = parts
+                    s_dt = datetime.fromisoformat(ts_start.replace("Z","+00:00"))
+                    e_dt = datetime.fromisoformat(ts_end.replace("Z","+00:00"))
+                    phase_durations[phase].append(int((e_dt - s_dt).total_seconds()))
+            except Exception:
+                pass
+
+if total == 0:
+    print("  No completed sessions yet.")
+else:
+    def fmt_s(s):
+        if s < 60:   return f"{s}s"
+        elif s < 3600: return f"{s//60}m {s%60}s"
+        else:          return f"{s//3600}h {(s%3600)//60}m"
+
+    def avg(lst):
+        return sum(lst) // len(lst) if lst else 0
+
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    CYAN   = "\033[96m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    GRAY   = "\033[90m"
+
+    approved_pct = int(approved / total * 100) if total else 0
+    fix_avg = total_fix_rounds / total if total else 0
+
+    print(f"  {BOLD}Total pipeline runs:{RESET}       {CYAN}{total}{RESET}")
+    print(f"  {BOLD}APPROVED (first pass):{RESET}     {GREEN}{approved}{RESET} / {total}  ({approved_pct}%)")
+    print(f"  {BOLD}NEEDS_WORK (exhausted):{RESET}    {YELLOW}{needs_work}{RESET}")
+    print(f"  {BOLD}REJECTED:{RESET}                  {needs_work and str(rejected) or str(rejected)}")
+    print(f"  {BOLD}Avg fix rounds per run:{RESET}    {fix_avg:.1f}")
+    print()
+
+    if durations_s:
+        print(f"  {BOLD}Avg total pipeline time:{RESET}   {fmt_s(avg(durations_s))}")
+    for phase, times in phase_durations.items():
+        if times:
+            print(f"  {BOLD}Avg {phase} time:{RESET}{'':>{20-len(phase)}} {fmt_s(avg(times))}")
+    print()
+
+    # Session run history (last 5)
+    print(f"  {GRAY}── Recent runs ──{RESET}")
+    runs = sorted(
+        [e for e in os.listdir(sessions_dir) if os.path.isdir(os.path.join(sessions_dir, e))],
+        reverse=True
+    )[:5]
+    for run in runs:
+        d2 = os.path.join(sessions_dir, run)
+        feat = ""
+        st   = ""
+        feat_f = os.path.join(d2, "feature.txt")
+        stat_f = os.path.join(d2, "status")
+        if os.path.isfile(feat_f):
+            with open(feat_f) as f: feat = f.read().strip()[:50]
+        if os.path.isfile(stat_f):
+            with open(stat_f) as f: st = f.read().strip()
+        print(f"  {GRAY}{run}{RESET}  [{st:12}]  {feat}")
+PYEOF
+  echo ""
+  echo -e "  ${GRAY}devloop sessions         — full session list${RESET}"
+  echo -e "  ${GRAY}devloop session <id>     — per-run detail${RESET}"
+  echo ""
+}
 
 
 cmd_architect() {
@@ -6921,6 +7067,8 @@ cmd_help() {
   echo -e "    Resolve a specific inbox item by ID"
   echo -e "  ${CYAN}devloop inbox history${RESET} / ${CYAN}devloop inbox clear${RESET}"
   echo -e "    View resolved items / remove resolved items from inbox\n"
+  echo -e "  ${CYAN}devloop stats${RESET}"
+  echo -e "    Show aggregated pipeline metrics: approval rates, avg phase times, fix rounds\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
   echo -e "    Claude: remote-control (access from mobile/browser); Copilot: remote (GitHub web + mobile)"
@@ -7157,6 +7305,7 @@ main() {
     view)             cmd_view     "$@" ;;
     projects)         cmd_projects "$@" ;;
     inbox)            cmd_inbox    "$@" ;;
+    stats)            cmd_stats    "$@" ;;
     do|ask|please|nl) cmd_do      "$@" ;;
     install)          cmd_install  "$@" ;;
     init)             cmd_init     "$@" ;;

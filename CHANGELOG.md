@@ -5,7 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.14.0] — 2026-05-10
+## [4.15.0] — 2026-05-10
+
+### Added
+- **`devloop stats`**: aggregated pipeline metrics across all recorded sessions for the current
+  project: total runs, approval rate, NEEDS_WORK/REJECTED counts, avg fix rounds, avg phase
+  durations (architect/worker/reviewer), and a recent-runs summary table.
+- **Help text**: `devloop stats` documented.
+
+---
+
+
 
 ### Added
 - **Human inbox (`devloop inbox`)**: every REJECTED pipeline result or max-retries NEEDS_WORK
