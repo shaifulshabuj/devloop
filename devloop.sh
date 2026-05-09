@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.0.1"
+VERSION="5.0.2"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -183,7 +183,8 @@ _ensure_global_dirs() {
 #CLAUDE_WORKER_MODEL=""  # override worker/fix roles only
 
 # Auto-open tmux view pane when devloop run starts (true | false)
-#DEVLOOP_AUTO_VIEW="false"
+# Set to false to disable. Requires tmux to be installed.
+#DEVLOOP_AUTO_VIEW="true"
 
 # Fix strategy (escalate | standard)
 #DEVLOOP_FIX_STRATEGY="escalate"
@@ -263,7 +264,7 @@ load_config() {
   DEVLOOP_NOTIFY_SOUND="true"       # play sound on macOS inbox notifications
   # DEVLOOP_AUTO_VIEW and DEVLOOP_SESSION_KEEP_DAYS use :=default so env vars set before devloop
   # (e.g. DEVLOOP_AUTO_VIEW=true devloop run ...) are not overwritten by load_config defaults.
-  : "${DEVLOOP_AUTO_VIEW:=false}"        # auto-open tmux view when devloop run starts
+  : "${DEVLOOP_AUTO_VIEW:=true}"         # auto-open tmux view when devloop run starts
   : "${DEVLOOP_SESSION_KEEP_DAYS:=30}"   # auto-prune sessions older than N days (0 = keep forever)
 
   # Load order: (1) hardcoded defaults above → (2) global user config → (3) project config
@@ -6868,6 +6869,78 @@ cmd_run() {
   divider
   echo ""
 
+  # ── Live status pane (inside tmux) ──────────────────────────────────────────
+  # Launched NOW (before architect) so user sees it from the very first stage.
+  # The pane script dynamically finds the session dir once the architect creates it.
+  if [[ -n "${TMUX:-}" && "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
+    local _specs_path; _specs_path="$SPECS_PATH"
+    local _project_root; _project_root="$(find_project_root 2>/dev/null || echo "$PWD")"
+    local _sessions_base; _sessions_base="$_project_root/.devloop/sessions"
+    local _feature_short; _feature_short="$(echo "$feature" | head -c 50)"
+    tmux split-window -h -p 30 -d "bash -c '
+BOLD=\"\$(tput bold 2>/dev/null)\"
+RESET=\"\$(tput sgr0 2>/dev/null)\"
+GREEN=\"\$(tput setaf 2 2>/dev/null)\"
+YELLOW=\"\$(tput setaf 3 2>/dev/null)\"
+CYAN=\"\$(tput setaf 6 2>/dev/null)\"
+GRAY=\"\$(tput setaf 8 2>/dev/null)\"
+SBASE=\"$_sessions_base\"
+FEATURE=\"$_feature_short\"
+spin=\"⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\"
+si=0
+while true; do
+  clear
+  si=\$(( (si+1) % 10 ))
+  S=\"\${spin:\$si:1}\"
+  echo \"\${BOLD}DevLoop Live View\${RESET}\"
+  echo \"\${GRAY}Feature: \${RESET}\${FEATURE}\"
+  echo \"\${GRAY}────────────────────────────\${RESET}\"
+  # Find newest session dir
+  SDIR=\"\$(ls -dt \"\$SBASE\"/TASK-* 2>/dev/null | head -1)\"
+  if [[ -z \"\$SDIR\" ]]; then
+    echo \"\"
+    echo \"  \$S  Waiting for architect...\"
+    sleep 1; continue
+  fi
+  ID=\"\$(basename \"\$SDIR\")\"
+  echo \"\${CYAN}Task:\${RESET}  \$ID\"
+  echo \"\"
+  # Phases
+  echo \"\${BOLD}Phases:\${RESET}\"
+  for stage in architect worker reviewer fix; do
+    SF=\"\$SDIR/\${stage}.state\"
+    if [[ -f \"\$SF\" ]]; then
+      ST=\"\$(cat \"\$SF\" | head -1)\"
+      case \"\$ST\" in
+        running) IC=\"\${YELLOW}\$S\${RESET}\" ;;
+        done)    IC=\"\${GREEN}✓\${RESET}\" ;;
+        failed)  IC=\"✗\" ;;
+        *)       IC=\"·\" ;;
+      esac
+      printf \"  %s  %-12s %s\n\" \"\$IC\" \"\$stage\" \"\$ST\"
+    fi
+  done
+  # Fix round count
+  RC=\"\$(ls \"\$SDIR\"/fix-*.state 2>/dev/null | wc -l | tr -d \" \")\"
+  [[ \$RC -gt 0 ]] && echo \"\" && echo \"  Fix rounds: \$RC\"
+  # Current status
+  echo \"\"
+  echo \"\${BOLD}Status:\${RESET}\"
+  ST=\"\$(cat \"\$SDIR/status\" 2>/dev/null | tail -1 || echo running)\"
+  echo \"  \$S  \$ST\"
+  # Last 6 lines of session log
+  LOGF=\"\$SDIR/pipeline.log\"
+  if [[ -f \"\$LOGF\" ]]; then
+    echo \"\"
+    echo \"\${BOLD}Log:\${RESET}\"
+    tail -6 \"\$LOGF\" 2>/dev/null | sed \"s/^/  /\" | cat
+  fi
+  echo \"\"
+  echo \"\${GRAY}[Ctrl-b o] focus main  [Ctrl-b d] detach\${RESET}\"
+  sleep 1
+done'" 2>/dev/null || true
+  fi
+
   # ── Stage 1: Architect ───────────────────────────────────────────────────────
   step "📐 [1] Architecting..."
 
@@ -6908,25 +6981,6 @@ cmd_run() {
 
   # Register this project in the global registry (updates last_run timestamp)
   _register_project "$(find_project_root)" 2>/dev/null || true
-
-  # If we're inside tmux (auto-view exec), add a live status pane on the right
-  if [[ -n "${TMUX:-}" && "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
-    local _sdir; _sdir="$(_session_dir "$id")"
-    # Create a 30%-wide status pane that shows phase state + permission queue
-    tmux split-window -h -p 30 -d \
-      "bash -c 'while true; do clear
-echo \"DevLoop: $id\"
-echo \"Feature: $(cat \"$_sdir/feature.txt\" 2>/dev/null | head -c 40)\"
-echo \"\"
-echo \"=== Phases ===\"
-for f in \"$_sdir/\"*.state; do [ -f \"\$f\" ] && printf \"  %-12s %s\n\" \"\$(basename \$f .state)\" \"\$(cat \$f)\"; done
-echo \"\"
-echo \"=== Status ===\"
-cat \"$_sdir/status\" 2>/dev/null | xargs printf \"  %s\n\" || echo \"  running\"
-echo \"\"
-echo \"[Ctrl-b o] main pane | [Ctrl-b d] detach\"
-sleep 2; done'" 2>/dev/null || true
-  fi
 
   success "Spec: ${CYAN}$id${RESET}"
   echo ""
