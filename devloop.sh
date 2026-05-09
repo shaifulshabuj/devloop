@@ -11,7 +11,7 @@
 #
 # Usage:
 #   devloop init                — set up a project (agents, CLAUDE.md, config)
-#   devloop start               — launch Claude remote control + orchestrator agent
+#   devloop start               — launch provider session + orchestrator agent (Claude: remote; Copilot: local)
 #   devloop architect "feature"
 #   devloop work [TASK-ID]
 #   devloop review [TASK-ID]
@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.6.3"
+VERSION="4.7.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -2844,7 +2844,8 @@ This project uses the DevLoop multi-agent pipeline:
 ```bash
 devloop start
 ```
-Then connect from claude.ai/code or the Claude mobile app.
+Then connect from claude.ai/code or the Claude mobile app (when main provider is claude).
+If main provider is copilot, the session runs locally in the terminal.
 
 ## DevLoop commands — Quick (full pipeline in one shot)
 - `devloop run "feature"`       — **full pipeline**: architect → work → review → fix loop → learn
@@ -3097,7 +3098,7 @@ _stop_sleep_prevention() {
   fi
 }
 
-_launch_claude() {
+_launch_claude_session() {
   local project_name="$1"
   # Export so any Copilot subprocess spawned by this session inherits permission
   export COPILOT_ALLOW_ALL=true
@@ -3107,13 +3108,58 @@ _launch_claude() {
     --permission-mode acceptEdits
 }
 
+_launch_copilot_session() {
+  local project_name="$1"
+  # Read orchestrator agent definition to inject as context
+  local agent_file="${DEVLOOP_DIR}/../.claude/agents/devloop-orchestrator.md"
+  [[ ! -f "$agent_file" ]] && agent_file="$(pwd)/.claude/agents/devloop-orchestrator.md"
+
+  local system_ctx=""
+  if [[ -f "$agent_file" ]]; then
+    system_ctx="$(cat "$agent_file")"
+  else
+    system_ctx="You are the DevLoop Orchestrator for project: $project_name. Coordinate tasks using devloop work commands."
+  fi
+
+  local init_prompt="[DevLoop session started for: $project_name]
+
+$system_ctx
+
+You are now running as the DevLoop Orchestrator in interactive Copilot mode. Wait for user instructions and coordinate the development pipeline using 'devloop work TASK-ID' to dispatch work."
+
+  export COPILOT_ALLOW_ALL=true
+  # Launch copilot with initial context prompt; drops into interactive REPL
+  copilot --allow-all-tools --allow-all-paths -p "$init_prompt" 2>/dev/null || true
+  # After the one-shot prompt, launch interactive session
+  copilot --allow-all-tools --allow-all-paths
+}
+
+# _launch_session: dispatch to provider-specific session launcher
+_launch_session() {
+  local project_name="$1"
+  local provider; provider="$(effective_main_provider)"
+
+  case "$provider" in
+    claude)
+      _launch_claude_session "$project_name"
+      ;;
+    copilot)
+      _launch_copilot_session "$project_name"
+      ;;
+    *)
+      error "Unknown main provider '$provider' — cannot start session"
+      exit 1
+      ;;
+  esac
+}
+
 cmd_start() {
   load_config
   check_deps
   _verify_agents
 
   local project_name="${1:-$PROJECT_NAME}"
-  local main_backend; main_backend="$(main_provider)"
+  local main_backend; main_backend="$(effective_main_provider)"
   local worker_backend; worker_backend="$(worker_provider)"
 
   step "Starting DevLoop for: ${CYAN}$project_name${RESET}"
@@ -3124,14 +3170,31 @@ cmd_start() {
   _maybe_show_version_hint
 
   echo -e "${BOLD}Launching:${RESET}"
-  echo -e "  ${CYAN}--remote-control${RESET}      accessible from mobile + browser"
-  echo -e "  ${CYAN}--agent orchestrator${RESET}  main thread is the orchestrator"
+  case "$main_backend" in
+    claude)
+      echo -e "  ${CYAN}--remote-control${RESET}      accessible from mobile + browser"
+      echo -e "  ${CYAN}--agent orchestrator${RESET}  main thread is the orchestrator"
+      ;;
+    copilot)
+      echo -e "  ${CYAN}copilot interactive${RESET}   terminal session (no remote control)"
+      echo -e "  ${CYAN}--agent context${RESET}       orchestrator role injected as prompt"
+      ;;
+  esac
   echo -e "  ${CYAN}caffeinate -is${RESET}        Mac stays awake while session runs"
   echo -e "  ${CYAN}providers${RESET}             main=$(provider_label "$main_backend"), worker=$(provider_label "$worker_backend")"
   echo ""
   echo -e "${BOLD}Connect from:${RESET}"
-  echo -e "  📱 Claude app → find ${CYAN}\"DevLoop: $project_name\"${RESET} with green dot"
-  echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET} → session list"
+  case "$main_backend" in
+    claude)
+      echo -e "  📱 Claude app → find ${CYAN}\"DevLoop: $project_name\"${RESET} with green dot"
+      echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET} → session list"
+      ;;
+    copilot)
+      echo -e "  💻 This terminal — session runs locally (no remote access)"
+      echo -e "  ℹ  Copilot CLI has no remote-control equivalent"
+      echo -e "  💡 Set ${CYAN}DEVLOOP_MAIN_PROVIDER=claude${RESET} for remote access"
+      ;;
+  esac
   echo ""
   echo -e "${GRAY}Press Ctrl+C to stop.${RESET}"
   divider
@@ -3140,7 +3203,7 @@ cmd_start() {
   CAFFEINATE_PID=""
   _prevent_sleep
   trap '_stop_sleep_prevention; exit 0' INT TERM EXIT
-  _launch_claude "$project_name"
+  _launch_session "$project_name"
 }
 
 # ── cmd: daemon ───────────────────────────────────────────────────────────────
@@ -3237,6 +3300,16 @@ cmd_daemon() {
 
   mkdir -p "$DEVLOOP_DIR"
 
+  local main_backend; main_backend="$(effective_main_provider)"
+
+  # Copilot has no persistent remote session — warn and advise
+  if [[ "$main_backend" == "copilot" ]]; then
+    warn "Daemon mode with Copilot: no remote-control available"
+    echo -e "  The daemon will restart the local Copilot interactive session on exit."
+    echo -e "  For remote access, set ${CYAN}DEVLOOP_MAIN_PROVIDER=claude${RESET}"
+    echo ""
+  fi
+
   step "Starting DevLoop daemon: ${CYAN}$project_name${RESET}"
   echo -e "  Auto-restart on crash or wake"
   echo -e "  Sleep prevention via caffeinate"
@@ -3259,7 +3332,7 @@ cmd_daemon() {
     }
     trap '_daemon_cleanup; exit 0' INT TERM EXIT
 
-    echo "[$(date)] DevLoop daemon started for: $project_name" > "$log_file"
+    echo "[$(date)] DevLoop daemon started for: $project_name (main: $main_backend)" > "$log_file"
 
     while (( attempt < max_restarts )); do
       attempt=$(( attempt + 1 ))
@@ -3269,7 +3342,7 @@ cmd_daemon() {
       /usr/bin/caffeinate -is &
       cafpid=$!
 
-      _launch_claude "$project_name" >> "$log_file" 2>&1
+      _launch_session "$project_name" >> "$log_file" 2>&1
       exit_code=$?
 
       echo "[$(date)] Session ended (exit $exit_code)" >> "$log_file"
@@ -3293,8 +3366,16 @@ cmd_daemon() {
   success "Daemon started (PID $daemon_pid)"
   echo ""
   echo -e "${BOLD}Connect from:${RESET}"
-  echo -e "  📱 Claude app → ${CYAN}\"DevLoop: $project_name\"${RESET}"
-  echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET}"
+  case "$main_backend" in
+    claude)
+      echo -e "  📱 Claude app → ${CYAN}\"DevLoop: $project_name\"${RESET}"
+      echo -e "  🌐 ${CYAN}https://claude.ai/code${RESET}"
+      ;;
+    copilot)
+      echo -e "  💻 Copilot session runs locally — tail logs to monitor"
+      echo -e "  ℹ  No remote control available with Copilot provider"
+      ;;
+  esac
   echo ""
   echo -e "${BOLD}Manage:${RESET}"
   echo -e "  ${CYAN}devloop daemon status${RESET}    check if running"
@@ -5443,10 +5524,12 @@ cmd_help() {
   echo -e "    ${GRAY}run [--stop-on-fail]${RESET}     — process all queued tasks"
   echo -e "    ${GRAY}clear${RESET}                    — empty the queue\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
-  echo -e "    Launch Claude with remote control + orchestrator agent"
+  echo -e "    Launch provider session + orchestrator agent"
+  echo -e "    Claude: remote-control (access from mobile/browser); Copilot: local interactive"
   echo -e "    Prevents Mac sleep via caffeinate for session duration\n"
   echo -e "  ${CYAN}devloop daemon [project-name]${RESET}  ${GRAY}alias: d${RESET}"
   echo -e "    Run in background with auto-restart + sleep prevention"
+  echo -e "    Claude: remote-control daemon; Copilot: local session (no remote access)"
   echo -e "    Registers launchd (macOS) or systemd (Linux) for auto-start on login"
   echo -e "    Sub-commands: stop | status | log | uninstall\n"
   echo -e "  ${CYAN}devloop architect \"feature\" [type] [files]${RESET}  ${GRAY}alias: a${RESET}"
@@ -5520,7 +5603,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop configure${RESET}         ${GRAY}← re-run wizard anytime to change settings${RESET}"
   echo -e "  ${CYAN}devloop hooks${RESET}             ${GRAY}← install pipeline hooks${RESET}"
   echo -e "  ${CYAN}devloop tools suggest${RESET}     ${GRAY}← discover stack-specific tools${RESET}"
-  echo -e "  ${CYAN}devloop start${RESET}             ${GRAY}← connect from mobile/browser${RESET}\n"
+  echo -e "  ${CYAN}devloop start${RESET}             ${GRAY}← Claude: connect from mobile/browser | Copilot: local terminal${RESET}\n"
   echo -e "${BOLD}REQUIREMENTS${RESET}\n"
   echo -e "  ${CYAN}claude${RESET}    Claude Code CLI   ${GRAY}curl -fsSL https://claude.ai/install.sh | bash${RESET}"
   echo -e "  ${CYAN}copilot${RESET}   Copilot CLI        ${GRAY}npm install -g @github/copilot${RESET}"

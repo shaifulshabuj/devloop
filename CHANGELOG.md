@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.7.0] — 2026-05-09
+
+### Added
+- **Provider-aware session launch** — `devloop start` and `devloop daemon` now
+  respect `DEVLOOP_MAIN_PROVIDER` and launch the correct provider session:
+  - **Claude** (default): unchanged — `claude --remote-control "DevLoop: <name>"`
+    with orchestrator agent. Access from claude.ai/code or the Claude mobile app.
+  - **Copilot**: launches `copilot` interactive mode locally. Orchestrator agent
+    context is injected as initial prompt. Note: Copilot CLI has no remote-control
+    equivalent; the session runs in the local terminal only.
+
+### Changed
+- `_launch_claude()` renamed to `_launch_session()` (dispatches by provider);
+  `_launch_claude_session()` and `_launch_copilot_session()` are the per-provider
+  implementations.
+- `cmd_start` connect-from messaging is now conditional per provider:
+  - Claude → mobile app + claude.ai/code links
+  - Copilot → "terminal session only" notice with hint to use Claude for remote access
+- `cmd_daemon` messaging likewise conditional; warns when Copilot is main provider
+  (daemon restarts local session; no remote control available).
+- Help text (`devloop help`, `devloop start --help`) updated to document
+  per-provider session capabilities.
+
+---
+
 ## [4.6.3] — 2026-05-09
 
 ### Added
