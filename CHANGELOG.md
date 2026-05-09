@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.0] — 2026-05-09
+
+### Added
+- **`devloop run` (alias: `go`)** — full automated pipeline in one command: `architect → work → review → [fix → review]* → learn`. Replaces the need to manually chain 4–6 commands per task. Supports `--type`, `--files`, `--max-retries` (default 3), `--no-learn` flags.
+- **`devloop queue` (alias: `q`)** — batch task management. Queue multiple tasks with `queue add`, inspect with `queue list`, run them all sequentially with `queue run` (supports `--stop-on-fail`), and `queue clear`. Failed tasks stay in queue for retry. Queue stored in `.devloop/queue.txt`.
+- **Natural language routing** — unknown multi-word commands (e.g. `devloop add a dark mode toggle`) automatically route to `devloop run` with a tip to use the explicit form next time.
+- **Improved unknown-command UX** — single-word unknown commands now show a helpful tip suggesting `devloop run` instead of dumping the full help text.
+
+---
+
 ## [4.2.0] — 2026-05-09
 
 ### Added

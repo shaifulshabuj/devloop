@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.2.0"
+VERSION="4.3.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -4499,6 +4499,308 @@ cmd_failover() {
   esac
 }
 
+# ── cmd: run (full automated pipeline) ───────────────────────────────────────
+# Runs the full architect → work → review → [fix → review]* loop in one shot.
+# Usage: devloop run "description" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]
+
+cmd_run() {
+  local feature="${1:-}"
+  local task_type="feature"
+  local file_hints=""
+  local max_retries=3
+  local skip_learn=false
+  shift 2>/dev/null || true
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --type|-t)        task_type="${2:-feature}"; shift 2 ;;
+      --files|-F)       file_hints="${2:-}";       shift 2 ;;
+      --max-retries|-n) max_retries="${2:-3}";     shift 2 ;;
+      --no-learn)       skip_learn=true;           shift   ;;
+      *)                shift ;;
+    esac
+  done
+
+  if [[ -z "$feature" ]]; then
+    error "Usage: devloop run \"<description>\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]"
+    echo -e "  ${GRAY}Example: devloop run \"add dark mode toggle\"${RESET}"
+    echo -e "  ${GRAY}Example: devloop run \"fix login redirect\" --type bug${RESET}"
+    exit 1
+  fi
+
+  load_config
+  ensure_dirs
+  check_deps
+
+  step "🚀 Full pipeline: ${BOLD}\"$feature\"${RESET}"
+  echo -e "  ${GRAY}Stages: arch → work → review → [fix loop ×$max_retries max]${RESET}"
+  divider
+  echo ""
+
+  # ── Stage 1: Architect ───────────────────────────────────────────────────────
+  step "📐 [1] Architecting..."
+
+  # Snapshot existing specs so we can identify the newly-created one
+  local before_specs=""
+  before_specs="$(ls -t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md' || true)"
+
+  cmd_architect "$feature" "$task_type" "$file_hints"
+
+  # Identify the new spec by diffing the directory listing
+  local id=""
+  while IFS= read -r f; do
+    if [[ -n "$f" ]] && ! echo "$before_specs" | grep -qF "$f"; then
+      id="$(basename "$f" .md)"
+      break
+    fi
+  done < <(ls -t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md' || true)
+
+  # Fallback: newest file (safe if no concurrent runs)
+  if [[ -z "$id" ]]; then
+    local latest_spec
+    latest_spec="$(ls -t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md' | head -1 || true)"
+    [[ -n "$latest_spec" ]] && id="$(basename "$latest_spec" .md)"
+  fi
+
+  if [[ -z "$id" ]]; then
+    error "Architect did not produce a spec. Aborting pipeline."
+    exit 1
+  fi
+
+  success "Spec: ${CYAN}$id${RESET}"
+  echo ""
+
+  # ── Stage 2: Work ────────────────────────────────────────────────────────────
+  step "🔨 [2] Implementing..."
+  cmd_work "$id"
+  echo ""
+
+  # ── Stage 3: Review + fix loop ───────────────────────────────────────────────
+  local verdict="NEEDS_WORK"
+  local fix_round=0
+  local review_file="$SPECS_PATH/$id-review.md"
+
+  while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
+    if (( fix_round == 0 )); then
+      step "🔍 [3] Reviewing..."
+    else
+      step "🔍 Re-reviewing (after fix $fix_round/$max_retries)..."
+    fi
+
+    cmd_review "$id"
+    echo ""
+
+    verdict="$(grep -o 'Verdict: \(APPROVED\|NEEDS_WORK\|REJECTED\)' "$review_file" 2>/dev/null \
+      | head -1 | awk '{print $2}' || echo "UNKNOWN")"
+
+    case "$verdict" in
+      APPROVED)
+        break
+        ;;
+      REJECTED)
+        error "❌ REJECTED — pipeline stopped"
+        echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}"
+        echo -e "  ${GRAY}Review: ${CYAN}devloop status $id${RESET}"
+        exit 1
+        ;;
+      *)
+        fix_round=$(( fix_round + 1 ))
+        if (( fix_round > max_retries )); then
+          warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
+          echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
+          exit 2
+        fi
+        step "🔧 Fixing (attempt $fix_round/$max_retries)..."
+        cmd_fix "$id"
+        echo ""
+        ;;
+    esac
+  done
+
+  # ── Stage 4: Learn ───────────────────────────────────────────────────────────
+  if [[ "$skip_learn" == "false" ]]; then
+    step "📚 Extracting lessons into CLAUDE.md..."
+    cmd_learn "$id" 2>/dev/null || true
+    echo ""
+  fi
+
+  divider
+  success "✅ Pipeline complete: ${CYAN}$id${RESET}"
+  if (( fix_round > 0 )); then
+    echo -e "  ${GRAY}Approved after $fix_round fix round(s)${RESET}"
+  fi
+  echo ""
+}
+
+# ── cmd: queue (batch task management) ────────────────────────────────────────
+# Manages a queue of tasks to run sequentially via devloop run.
+# Queue file: .devloop/queue.txt  (one task per line: TYPE|description)
+
+_queue_file() {
+  local root; root="$(find_project_root)"
+  echo "$root/$DEVLOOP_DIR/queue.txt"
+}
+
+cmd_queue() {
+  local subcmd="${1:-list}"
+  shift 2>/dev/null || true
+
+  case "$subcmd" in
+    add)
+      local task_type="feature"
+      local description=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --type|-t) task_type="${2:-feature}"; shift 2 ;;
+          *)         description="${description:+$description }$1"; shift ;;
+        esac
+      done
+
+      if [[ -z "$description" ]]; then
+        error "Usage: devloop queue add [--type TYPE] \"<description>\""
+        exit 1
+      fi
+
+      load_config
+      local qfile; qfile="$(_queue_file)"
+      mkdir -p "$(dirname "$qfile")"
+      echo "$task_type|$description" >> "$qfile"
+      success "Queued: [${GRAY}$task_type${RESET}] $description"
+      echo -e "  ${GRAY}Run all: ${CYAN}devloop queue run${RESET}"
+      ;;
+
+    list|ls)
+      load_config
+      local qfile; qfile="$(_queue_file)"
+      if [[ ! -f "$qfile" ]] || [[ ! -s "$qfile" ]]; then
+        info "Queue is empty."
+        echo -e "  ${GRAY}Add tasks: ${CYAN}devloop queue add \"description\"${RESET}"
+        return
+      fi
+      step "📋 Pending tasks:"
+      local i=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        i=$(( i + 1 ))
+        local t_type="${line%%|*}"
+        local t_desc="${line#*|}"
+        echo -e "  ${CYAN}$i.${RESET} ${GRAY}[$t_type]${RESET} $t_desc"
+      done < "$qfile"
+      echo ""
+      echo -e "  ${GRAY}Run all: ${CYAN}devloop queue run${RESET}"
+      ;;
+
+    run)
+      load_config
+      ensure_dirs
+      check_deps
+
+      local max_retries=3
+      local stop_on_fail=false
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --max-retries|-n) max_retries="${2:-3}"; shift 2 ;;
+          --stop-on-fail)   stop_on_fail=true;    shift   ;;
+          *)                shift ;;
+        esac
+      done
+
+      local qfile; qfile="$(_queue_file)"
+      if [[ ! -f "$qfile" ]] || [[ ! -s "$qfile" ]]; then
+        info "Queue is empty. Nothing to run."
+        echo -e "  ${GRAY}Add tasks: ${CYAN}devloop queue add \"description\"${RESET}"
+        return
+      fi
+
+      # Count total pending tasks
+      local total=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        total=$(( total + 1 ))
+      done < "$qfile"
+
+      step "🚀 Processing $total queued task(s)..."
+      divider
+
+      local done_count=0
+      local failed_count=0
+      local task_num=0
+      local tmp_remaining; tmp_remaining="$(mktemp /tmp/devloop_queue_XXXXXX)"
+      local stop_now=false
+
+      while IFS= read -r line; do
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        [[ "$stop_now" == "true" ]] && { echo "$line" >> "$tmp_remaining"; continue; }
+
+        task_num=$(( task_num + 1 ))
+        local t_type="${line%%|*}"
+        local t_desc="${line#*|}"
+
+        echo ""
+        divider
+        step "  [Task $task_num/$total] ${BOLD}\"$t_desc\"${RESET}  ${GRAY}($t_type)${RESET}"
+        divider
+        echo ""
+
+        local rc=0
+        cmd_run "$t_desc" --type "$t_type" --max-retries "$max_retries" || rc=$?
+
+        if (( rc == 0 )); then
+          done_count=$(( done_count + 1 ))
+          success "  ✓ Task $task_num done"
+        else
+          failed_count=$(( failed_count + 1 ))
+          warn "  ✗ Task $task_num failed (exit $rc)"
+          echo "$line" >> "$tmp_remaining"
+          if [[ "$stop_on_fail" == "true" ]]; then
+            warn "Stopping queue (--stop-on-fail is set)"
+            stop_now=true
+          fi
+        fi
+      done < "$qfile"
+
+      # Replace queue with failed/remaining tasks
+      if [[ -s "$tmp_remaining" ]]; then
+        cp "$tmp_remaining" "$qfile"
+        warn "$failed_count task(s) failed — kept in queue for retry"
+        echo -e "  ${GRAY}Retry: ${CYAN}devloop queue run${RESET}"
+      else
+        : > "$qfile"
+        success "All $total task(s) completed ✅"
+      fi
+      rm -f "$tmp_remaining"
+
+      divider
+      echo -e "  ${GREEN}✓ Done: $done_count${RESET}  ${YELLOW}✗ Failed: $failed_count${RESET}  Total: $total"
+      echo ""
+      ;;
+
+    clear)
+      load_config
+      local qfile; qfile="$(_queue_file)"
+      if [[ -f "$qfile" ]]; then
+        : > "$qfile"
+        success "Queue cleared"
+      else
+        info "Queue already empty"
+      fi
+      ;;
+
+    *)
+      echo -e "${BOLD}devloop queue${RESET} — batch task management\n"
+      echo -e "  ${CYAN}devloop queue add [--type TYPE] \"description\"${RESET}"
+      echo -e "    Add a task to the queue\n"
+      echo -e "  ${CYAN}devloop queue list${RESET}  ${GRAY}alias: ls${RESET}"
+      echo -e "    Show all pending tasks\n"
+      echo -e "  ${CYAN}devloop queue run [--max-retries N] [--stop-on-fail]${RESET}"
+      echo -e "    Run every queued task through the full pipeline\n"
+      echo -e "  ${CYAN}devloop queue clear${RESET}"
+      echo -e "    Empty the queue\n"
+      echo -e "  ${GRAY}Queue file: .devloop/queue.txt${RESET}"
+      ;;
+  esac
+}
+
 # ── cmd: help ─────────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -4508,6 +4810,15 @@ cmd_help() {
   echo -e "  ${CYAN}devloop init${RESET}"
   echo -e "    Set up DevLoop in current project (auto-analyzes stack/config from project files)"
   echo -e "    Writes: agents, CLAUDE.md, devloop.config.sh, copilot-instructions\n"
+  echo -e "  ${CYAN}devloop run \"feature\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn]${RESET}  ${GRAY}alias: go${RESET}"
+  echo -e "    Full automated pipeline: architect → work → review → fix loop → learn"
+  echo -e "    One command replaces: architect + work + review + fix + review + ...\n"
+  echo -e "  ${CYAN}devloop queue [add|list|run|clear]${RESET}  ${GRAY}alias: q${RESET}"
+  echo -e "    Batch mode: queue multiple tasks and run them all sequentially"
+  echo -e "    ${GRAY}add [--type TYPE] \"desc\"${RESET}  — enqueue a task"
+  echo -e "    ${GRAY}list${RESET}                     — show pending tasks"
+  echo -e "    ${GRAY}run [--stop-on-fail]${RESET}     — process all queued tasks"
+  echo -e "    ${GRAY}clear${RESET}                    — empty the queue\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch Claude with remote control + orchestrator agent"
   echo -e "    Prevents Mac sleep via caffeinate for session duration\n"
@@ -4650,6 +4961,8 @@ main() {
     init)         cmd_init      "$@" ;;
     start|s)      cmd_start     "$@" ;;
     daemon|d)     cmd_daemon    "$@" ;;
+    run|go)       cmd_run       "$@" ;;
+    queue|q)      cmd_queue     "$@" ;;
     architect|a)  cmd_architect "$@" ;;
     work|w)       cmd_work      "$@" ;;
     review|r)     cmd_review    "$@" ;;
@@ -4672,10 +4985,21 @@ main() {
     update)       cmd_update    "$@" ;;
     help)         cmd_help ;;
     *)
-      error "Unknown command: $cmd"
-      echo ""
-      cmd_help
-      exit 1
+      # If the "command" looks like natural language (multiple words after reassembly),
+      # route to the run pipeline automatically.
+      local _nl_candidate="$cmd${*:+ $*}"
+      if [[ "$cmd" != -* ]] && [[ "$_nl_candidate" == *" "* ]]; then
+        warn "Unknown command — routing to full pipeline"
+        echo -e "  ${GRAY}Tip: use ${CYAN}devloop run \"$_nl_candidate\"${GRAY} to be explicit next time${RESET}"
+        echo ""
+        cmd_run "$_nl_candidate"
+      else
+        error "Unknown command: $cmd"
+        echo ""
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop run \"<description>\"${GRAY} — full arch→work→review pipeline${RESET}"
+        echo -e "  ${GRAY}     ${CYAN}devloop help${GRAY}              — all commands${RESET}"
+        exit 1
+      fi
       ;;
   esac
 }
