@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.16.0] — 2026-05-10
+
+### Added
+- **Lesson Federation** (`devloop learn --global`): promotes extracted lessons from a project
+  review into the shared `~/.devloop/lessons.md` global store, tagged by stack.
+- **Global lesson injection**: architect prompts automatically include relevant global lessons
+  from `~/.devloop/lessons.md` filtered by `PROJECT_STACK` (and "All Stacks" entries).
+- **Deduplication**: the AI is shown existing global lessons to avoid adding duplicates when
+  promoting with `devloop learn --global`.
+- **Help text**: `devloop learn --global` documented.
+
+---
+
 ## [4.15.0] — 2026-05-10
 
 ### Added

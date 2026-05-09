@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.15.0"
+VERSION="4.16.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -694,6 +694,13 @@ cmd_learn() {
   ensure_dirs
   check_deps
 
+  # --global: promote recent project lessons to ~/.devloop/lessons.md
+  if [[ "${1:-}" == "--global" ]]; then
+    shift
+    _cmd_learn_global "$@"
+    return
+  fi
+
   local id="${1:-$(latest_task)}"
   [[ -z "$id" ]] && { error "No task found."; exit 1; }
 
@@ -764,6 +771,85 @@ Output ONLY the Markdown list items, one per line, starting with '-'. No headers
 
   success "Lessons appended to ${CYAN}CLAUDE.md${RESET}"
   info "Claude will apply these patterns in future architect sessions"
+  echo ""
+
+  # Offer to also promote to global lessons
+  echo -e "  ${GRAY}Promote to global lessons (all projects):  ${CYAN}devloop learn --global $id${RESET}"
+  echo ""
+}
+
+# Promote lessons from a task review to ~/.devloop/lessons.md
+_cmd_learn_global() {
+  _ensure_global_dirs
+  local id="${1:-$(latest_task)}"
+  [[ -z "$id" ]] && { error "No task found."; exit 1; }
+
+  local review_file="$SPECS_PATH/$id-review.md"
+  local spec_file="$SPECS_PATH/$id.md"
+  [[ ! -f "$review_file" ]] && { error "No review found for $id. Run: devloop review $id"; exit 1; }
+
+  local global_lessons="$DEVLOOP_GLOBAL_DIR/lessons.md"
+  local provider; provider="$(effective_main_provider)"
+
+  step "🌍 Learning globally from: ${BOLD}$id${RESET}"
+  divider
+
+  local stack="${PROJECT_STACK:-All Stacks}"
+
+  local learn_prompt="You are analyzing a code review to extract GLOBAL reusable lessons.
+These lessons will be injected into the architect prompt for ALL future projects with a matching stack.
+
+## Stack: $stack
+## Task spec (excerpt)
+$(head -40 "$spec_file" 2>/dev/null)
+
+## Code review outcome
+$(cat "$review_file")
+
+## Existing global lessons for this stack (do NOT duplicate these):
+$(grep -A 30 "## $stack" "$global_lessons" 2>/dev/null | head -30 || echo "(none yet)")
+
+## Your task
+Extract 1-3 HIGHLY GENERAL lessons that apply broadly to any $stack project.
+- Must be universally applicable (not specific to this codebase)
+- Must not duplicate existing global lessons above
+- Each as a Markdown list item starting with '-'
+Output ONLY the list items. If no new general lessons can be extracted, output: (none)"
+
+  local glessons_file; glessons_file="$(mktemp /tmp/devloop-glessons.XXXXXX)"
+  info "Calling $(provider_label "$provider") to extract global lessons..."
+  run_provider_prompt "$provider" "$learn_prompt" "$glessons_file"
+  local new_lessons; new_lessons="$(cat "$glessons_file")"
+  rm -f "$glessons_file"
+
+  if [[ -z "$new_lessons" || "$new_lessons" == *"(none)"* ]]; then
+    info "No new global lessons to add for this review"
+    return
+  fi
+
+  echo ""
+  info "New global lessons:"
+  echo -e "${GRAY}$new_lessons${RESET}"
+  echo ""
+
+  # Append under the right stack section
+  if grep -q "^## $stack" "$global_lessons"; then
+    # Insert after the stack header
+    local tmp; tmp="$(mktemp)"
+    awk -v stack="## $stack" -v lessons="$new_lessons" '
+      /^## / && found { found=0 }
+      $0 == stack { print; print lessons; found=1; next }
+      { print }
+    ' "$global_lessons" > "$tmp" && mv "$tmp" "$global_lessons"
+  else
+    {
+      printf '\n## %s\n' "$stack"
+      printf '%s\n' "$new_lessons"
+    } >> "$global_lessons"
+  fi
+
+  success "Global lessons updated: ${CYAN}$global_lessons${RESET}"
+  info "These lessons will be injected into architect prompts for $stack projects"
   echo ""
 }
 
@@ -4814,10 +4900,28 @@ cmd_architect() {
   step "📐 $(provider_label "$provider") designing spec: ${BOLD}\"$feature\"${RESET}"
   divider
 
+  # Inject global lessons for this stack (from ~/.devloop/lessons.md) if available
+  local global_lessons_preamble=""
+  local global_lessons_file="$DEVLOOP_GLOBAL_DIR/lessons.md"
+  if [[ -f "$global_lessons_file" ]]; then
+    local stack_lessons
+    stack_lessons="$(awk -v stack="$PROJECT_STACK" -v allstack="All Stacks" '
+      /^## / { in_section = ($0 == "## " stack || $0 == "## " allstack); next }
+      in_section && /^- / { print }
+    ' "$global_lessons_file" 2>/dev/null || true)"
+    if [[ -n "$stack_lessons" ]]; then
+      global_lessons_preamble="
+## Global Lessons (${PROJECT_STACK})
+_Apply these lessons proactively when designing the spec:_
+$stack_lessons
+"
+    fi
+  fi
+
   local prompt
   prompt="$(cat <<PROMPT
 You are a senior software architect. Design a precise implementation spec for GitHub Copilot CLI.
-
+${global_lessons_preamble}
 ## Project
 - Name: $PROJECT_NAME
 - Stack: $PROJECT_STACK
@@ -7098,7 +7202,10 @@ cmd_help() {
   echo -e "    Remove finalized (approved/rejected) specs older than N days (default: 30)"
   echo -e "    Use ${CYAN}--dry-run${RESET} to preview what would be removed\n"
   echo -e "  ${CYAN}devloop learn [TASK-ID]${RESET}"
-  echo -e "    Extract lessons from the latest review and append to CLAUDE.md\n"
+  echo -e "    Extract lessons from the latest review and append to CLAUDE.md"
+  echo -e "  ${CYAN}devloop learn --global [TASK-ID]${RESET}"
+  echo -e "    Promote lessons to ${GRAY}~/.devloop/lessons.md${RESET} (shared across all projects)"
+  echo -e "    Global lessons are injected into architect prompts for matching stacks\n"
   echo -e "  ${CYAN}devloop agent-sync${RESET} ${GRAY}(aliases: sync-agents, agentsync)${RESET}"
   echo -e "    Check provider versions, refresh cached docs (24h TTL), and use main AI"
   echo -e "    to analyse what's new. Updates CLAUDE.md with latest provider insights."
