@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.10.0"
+VERSION="4.11.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -3568,6 +3568,9 @@ _session_init() {
   date '+%Y-%m-%dT%H:%M:%S'                       > "$dir/started_at"
   printf '[%s] DevLoop session started\nFeature: %s\n' \
     "$(date '+%H:%M:%S')" "$feature"               > "$dir/main.log"
+  # Write global hint so `devloop view/session` works from any terminal/cwd
+  mkdir -p "$HOME/.devloop"
+  echo "$dir" > "$HOME/.devloop/last-session"
   # Prune old sessions in background to avoid blocking the pipeline
   ( _session_prune 2>/dev/null ) &
 }
@@ -3661,17 +3664,35 @@ cmd_view() {
   local root; root="$(find_project_root 2>/dev/null || pwd)"
   local sessions_dir="$root/$DEVLOOP_DIR/sessions"
 
-  # Fallback: find most recently modified session
+  # Fallback 1: most recently modified session in project sessions dir
   if [[ -z "$id" ]]; then
     id="$(ls -dt "$sessions_dir"/TASK-* 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)"
   fi
 
+  # Fallback 2: global last-session hint (~/.devloop/last-session) — works cross-terminal
+  if [[ -z "$id" ]]; then
+    local last_hint="$HOME/.devloop/last-session"
+    if [[ -f "$last_hint" ]]; then
+      local last_dir; last_dir="$(cat "$last_hint" 2>/dev/null | tr -d '[:space:]')"
+      if [[ -d "$last_dir" ]]; then
+        id="$(basename "$last_dir")"
+        # Re-resolve sessions_dir to the correct project root for this session
+        sessions_dir="$(dirname "$last_dir")"
+      fi
+    fi
+  fi
+
   if [[ -z "$id" ]]; then
     error "No session found. Start one with: devloop run \"<feature>\""
+    echo -e "  ${GRAY}Tip: must be run from within the project directory, or after a devloop run${RESET}"
     exit 1
   fi
 
   local dir="$sessions_dir/$id"
+  # Also accept absolute dir from last-session hint
+  [[ ! -d "$dir" && -d "$HOME/.devloop/last-session" ]] && \
+    dir="$(cat "$HOME/.devloop/last-session" 2>/dev/null | tr -d '[:space:]')"
+
   if [[ ! -d "$dir" ]]; then
     error "Session directory not found: $id"
     echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
@@ -5806,6 +5827,7 @@ Start the spec with: # $id (Respecced)"
 # Usage: devloop run "description" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]
 
 cmd_run() {
+  local _run_orig_args=("$@")   # preserve before any shifting for auto-view re-exec
   local feature="${1:-}"
   local task_type="feature"
   local file_hints=""
@@ -5836,6 +5858,19 @@ cmd_run() {
   ensure_dirs
   check_deps
   _maybe_show_version_hint
+
+  # ── Auto-view: re-exec inside tmux immediately (before any pipeline steps) ──
+  # This opens the live view in the current terminal without needing a second window.
+  if [[ "${DEVLOOP_AUTO_VIEW:-false}" == "true" ]] && _tmux_available && [[ -z "${TMUX:-}" ]]; then
+    local _av_name="devloop-$(date +%s)"
+    echo -e "${BOLD}🖥  Opening devloop live view${RESET}  ${GRAY}(tmux session: $_av_name)${RESET}"
+    echo -e "  ${GRAY}Ctrl-b d to detach and leave running  |  Ctrl-b [ to scroll${RESET}"
+    echo ""
+    sleep 0.3
+    # Re-exec entire run inside new tmux session; DEVLOOP_AUTO_VIEW=false prevents recursion
+    exec tmux new-session -s "$_av_name" -n "pipeline" \
+      env DEVLOOP_AUTO_VIEW=false devloop run "${_run_orig_args[@]}"
+  fi
 
   # Determine fix strategy: escalate (default) or standard
   local fix_strategy="${DEVLOOP_FIX_STRATEGY:-escalate}"
@@ -5885,16 +5920,26 @@ cmd_run() {
   _session_init "$id" "$feature"
   _session_phase_end "architect" "done"
   if [[ "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
-    local _sdir; _sdir="$(_session_dir "$id")"
     echo -e "  ${GRAY}Session: ${CYAN}devloop session $id${RESET}"
   fi
 
-  # Auto-open tmux view if configured (v4.10)
-  if [[ "${DEVLOOP_AUTO_VIEW:-false}" == "true" ]] && _tmux_available; then
-    info "Auto-opening tmux view for session: ${CYAN}$id${RESET}"
-    # Launch view in background detached shell so it doesn't block the pipeline
-    ( cmd_view "$id" 2>/dev/null ) &
-    sleep 0.5
+  # If we're inside tmux (auto-view exec), add a live status pane on the right
+  if [[ -n "${TMUX:-}" && "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
+    local _sdir; _sdir="$(_session_dir "$id")"
+    # Create a 30%-wide status pane that shows phase state + permission queue
+    tmux split-window -h -p 30 -d \
+      "bash -c 'while true; do clear
+echo \"DevLoop: $id\"
+echo \"Feature: $(cat \"$_sdir/feature.txt\" 2>/dev/null | head -c 40)\"
+echo \"\"
+echo \"=== Phases ===\"
+for f in \"$_sdir/\"*.state; do [ -f \"\$f\" ] && printf \"  %-12s %s\n\" \"\$(basename \$f .state)\" \"\$(cat \$f)\"; done
+echo \"\"
+echo \"=== Status ===\"
+cat \"$_sdir/status\" 2>/dev/null | xargs printf \"  %s\n\" || echo \"  running\"
+echo \"\"
+echo \"[Ctrl-b o] main pane | [Ctrl-b d] detach\"
+sleep 2; done'" 2>/dev/null || true
   fi
 
   success "Spec: ${CYAN}$id${RESET}"

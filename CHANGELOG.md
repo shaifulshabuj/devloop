@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.11.0] — 2026-05-09
+
+### Fixed
+- **Session discovery cross-terminal**: `devloop view` now works even when run from a different
+  directory/terminal than where `devloop run` was started. `_session_init` writes the absolute
+  session path to `~/.devloop/last-session`; `cmd_view` uses this as a fallback when the
+  project-root-based lookup returns no results.
+
+### Improved
+- **Auto-view opens immediately**: When `DEVLOOP_AUTO_VIEW=true` and tmux is available, `devloop run`
+  now re-execs the entire pipeline inside a new tmux session **before** the architect phase starts,
+  so the user sees all output from the very beginning inside a tmux pane. A live status pane is
+  added on the right (30% width) after the session ID is known, showing phase states in real time.
+  No second terminal is required.
+- Removed the old post-architect background-subshell auto-view approach.
+
+---
+
 ## [4.10.0] — 2026-05-09
 
 ### Added
