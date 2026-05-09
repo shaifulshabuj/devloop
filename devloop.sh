@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.9.0"
+VERSION="4.10.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -185,7 +185,8 @@ load_config() {
   DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
   DEVLOOP_FIX_STRATEGY="escalate"  # escalate (deep fix + respec) | standard (hard cap, no escalation)
   DEVLOOP_SESSION_LOGGING="true"   # record per-run session logs under .devloop/sessions/
-  DEVLOOP_AUTO_VIEW="false"        # auto-open tmux view when devloop run starts (v4.10+)
+  DEVLOOP_AUTO_VIEW="false"        # auto-open tmux view when devloop run starts
+  DEVLOOP_SESSION_KEEP_DAYS="30"   # auto-prune sessions older than N days (0 = keep forever)
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -1945,12 +1946,22 @@ run_provider_prompt() {
         # Architect/reviewer: read-only tools sufficient (no bash execution needed)
         local _readonly_tools="Read,Write,Glob,LS,Bash(git*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(wc*)"
         local _main_model="${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
-        if ! echo "$prompt" | claude -p --model "$_main_model" --allowedTools "$_readonly_tools" > "$tmp_out" 2>&1; then
-          echo "$prompt" | claude -p --model "$_main_model" > "$tmp_out" 2>&1 || rc=$?
+        if [[ -n "${DEVLOOP_SESSION_PHASE_LOG:-}" ]]; then
+          if ! echo "$prompt" | claude -p --model "$_main_model" --allowedTools "$_readonly_tools" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" > "$tmp_out"; then
+            echo "$prompt" | claude -p --model "$_main_model" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" > "$tmp_out" || rc=$?
+          fi
+        else
+          if ! echo "$prompt" | claude -p --model "$_main_model" --allowedTools "$_readonly_tools" > "$tmp_out" 2>&1; then
+            echo "$prompt" | claude -p --model "$_main_model" > "$tmp_out" 2>&1 || rc=$?
+          fi
         fi
         ;;
       copilot)
-        copilot --allow-all-tools --allow-all-paths -p "$prompt" > "$tmp_out" 2>&1 || rc=$?
+        if [[ -n "${DEVLOOP_SESSION_PHASE_LOG:-}" ]]; then
+          copilot --allow-all-tools --allow-all-paths -p "$prompt" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" > "$tmp_out" || rc=$?
+        else
+          copilot --allow-all-tools --allow-all-paths -p "$prompt" > "$tmp_out" 2>&1 || rc=$?
+        fi
         ;;
       *)
         error "Unsupported provider in run_provider_prompt: $attempt_provider"
@@ -3557,6 +3568,8 @@ _session_init() {
   date '+%Y-%m-%dT%H:%M:%S'                       > "$dir/started_at"
   printf '[%s] DevLoop session started\nFeature: %s\n' \
     "$(date '+%H:%M:%S')" "$feature"               > "$dir/main.log"
+  # Prune old sessions in background to avoid blocking the pipeline
+  ( _session_prune 2>/dev/null ) &
 }
 
 _session_phase_start() {
@@ -3567,6 +3580,8 @@ _session_phase_start() {
   printf '[%s] === %s started ===\n' "$(date '+%H:%M:%S')" "$phase" > "$dir/$phase.log"
   echo "running:$(date '+%Y-%m-%dT%H:%M:%S')"     > "$dir/$phase.state"
   printf '[%s] Phase started: %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$dir/main.log"
+  # Export so run_provider_prompt and cmd_work can tee live output here
+  export DEVLOOP_SESSION_PHASE_LOG="$dir/$phase.log"
 }
 
 _session_phase_end() {
@@ -3596,6 +3611,38 @@ _session_finish() {
   echo "$status" > "$dir/status"
   date '+%Y-%m-%dT%H:%M:%S' > "$dir/finished_at"
   printf '[%s] Session finished: %s\n' "$(date '+%H:%M:%S')" "$status" >> "$dir/main.log"
+  unset DEVLOOP_SESSION_PHASE_LOG
+}
+
+_session_prune() {
+  # Delete session directories older than DEVLOOP_SESSION_KEEP_DAYS (0 = keep all)
+  local keep_days="${DEVLOOP_SESSION_KEEP_DAYS:-30}"
+  [[ "$keep_days" -eq 0 ]] && return 0
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_dir="$root/$DEVLOOP_DIR/sessions"
+  [[ -d "$sessions_dir" ]] || return 0
+  local now; now="$(date +%s)"
+  local cutoff=$(( now - keep_days * 86400 ))
+  local pruned=0
+  while IFS= read -r d; do
+    [[ -d "$d" ]] || continue
+    local ts_file="$d/started_at"
+    if [[ ! -f "$ts_file" ]]; then
+      # Use directory mtime as fallback
+      local mtime
+      # macOS stat
+      mtime="$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo "$now")"
+      [[ "$mtime" -lt "$cutoff" ]] && { rm -rf "$d"; (( pruned++ )); }
+    else
+      # Parse stored timestamp
+      local ts_val; ts_val="$(cat "$ts_file" 2>/dev/null | tr -d '[:space:]')"
+      local ts_epoch
+      ts_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "$ts_val" +%s 2>/dev/null || \
+                  date -d "$ts_val" +%s 2>/dev/null || echo "$now")"
+      [[ "$ts_epoch" -lt "$cutoff" ]] && { rm -rf "$d"; (( pruned++ )); }
+    fi
+  done < <(ls -d "$sessions_dir"/TASK-* 2>/dev/null || true)
+  [[ "$pruned" -gt 0 ]] && info "Pruned $pruned session(s) older than ${keep_days}d"
 }
 
 # ── cmd: view — live tmux dashboard (requires tmux) ──────────────────────────
@@ -3680,10 +3727,11 @@ cmd_view() {
     tmux send-keys -t "$tmux_name:agents.2" \
       "echo '=== 🔍 Reviewer ==='; tail -f $dir/reviewer.log 2>/dev/null || echo '(not started yet)'" C-m
 
-    # Pane 3: decisions / fix logs (split bottom-right)
+    # Pane 3: decisions / fix logs + interactive permit watcher (v4.11)
+    local pq_dir; pq_dir="$(find_project_root 2>/dev/null || pwd)/$DEVLOOP_DIR/permission-queue"
     tmux split-window -t "$tmux_name:agents.1" -v
     tmux send-keys -t "$tmux_name:agents.3" \
-      "echo '=== ⚡ Fix / Decisions ==='; echo 'Watching for fix rounds and decisions...'; tail -f $dir/fix-1.log $dir/respec.log $dir/main.log 2>/dev/null || echo '(not started yet)'" C-m
+      "echo '=== ⚡ Fix / Decisions / Permissions ==='; echo 'Watching fix rounds + permissions...'; (tail -f $dir/fix-*.log $dir/respec.log $dir/main.log 2>/dev/null & devloop permit watch 2>/dev/null) || tail -f $dir/main.log 2>/dev/null" C-m
 
     tmux select-pane -t "$tmux_name:agents.0"
     tmux select-window -t "$tmux_name:overview"
@@ -3875,6 +3923,95 @@ cmd_session() {
     echo ""
     echo -e "  ${BOLD}Recent activity (main.log):${RESET}"
     tail -20 "$dir/main.log" 2>/dev/null | sed 's/^/    /'
+    echo ""
+  fi
+}
+
+# ── cmd: replay — replay session logs with optional phase filter ──────────────
+
+cmd_replay() {
+  load_config
+  local id="${1:-}"
+  local phase_filter="${2:-}"
+
+  # Parse optional --phase flag
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --phase) phase_filter="${2:-}"; shift 2 ;;
+      *)       [[ -z "$id" ]] && id="$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$id" ]]; then
+    error "Usage: devloop replay <run-id> [--phase architect|worker|reviewer|fix-N|respec]"
+    echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
+    exit 1
+  fi
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local dir="$root/$DEVLOOP_DIR/sessions/$id"
+
+  if [[ ! -d "$dir" ]]; then
+    error "Session not found: $id"
+    echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
+    exit 1
+  fi
+
+  local feature=""; local status=""
+  [[ -f "$dir/feature.txt" ]] && feature="$(cat "$dir/feature.txt")"
+  [[ -f "$dir/status" ]]      && status="$(cat "$dir/status")"
+
+  echo ""
+  echo -e "${BOLD}🎬 Replaying session: ${CYAN}$id${RESET}"
+  echo -e "   Feature: $feature  |  Status: $status"
+  divider
+  echo ""
+
+  # Determine which logs to replay
+  local log_order=(architect worker reviewer fix-1 fix-2 fix-3 respec)
+  local phases_replayed=0
+
+  for phase in "${log_order[@]}"; do
+    local log_file="$dir/$phase.log"
+    [[ -f "$log_file" ]] || continue
+
+    # Filter by phase if requested
+    if [[ -n "$phase_filter" && "$phase" != "$phase_filter" ]]; then
+      continue
+    fi
+
+    local line_count; line_count="$(wc -l < "$log_file" 2>/dev/null || echo 0)"
+    echo -e "${BOLD}── Phase: ${CYAN}$phase${RESET} ${GRAY}($line_count lines)${RESET} ──"
+    echo ""
+
+    # Read and stream each line with a small delay for readability
+    local line_num=0
+    while IFS= read -r line; do
+      (( line_num++ ))
+      echo "$line"
+      # Throttle replay to make it readable (every 50 lines, pause briefly)
+      if (( line_num % 50 == 0 )); then
+        sleep 0.05
+      fi
+    done < "$log_file"
+
+    echo ""
+    echo -e "${GRAY}── end $phase ──${RESET}"
+    echo ""
+    (( phases_replayed++ ))
+  done
+
+  if [[ "$phases_replayed" -eq 0 ]]; then
+    if [[ -n "$phase_filter" ]]; then
+      warn "No log found for phase: $phase_filter"
+      echo -e "  ${GRAY}Available phases: architect, worker, reviewer, fix-1, fix-2, fix-3, respec${RESET}"
+    else
+      warn "No phase logs found for session: $id"
+      echo -e "  ${GRAY}The session may still be running. Try: ${CYAN}devloop session $id${RESET}"
+    fi
+  else
+    echo -e "${GRAY}Replayed $phases_replayed phase(s) for session: $id${RESET}"
+    echo -e "  ${GRAY}Replay a specific phase: ${CYAN}devloop replay $id --phase worker${RESET}"
     echo ""
   fi
 }
@@ -4133,8 +4270,14 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
         # --allowedTools scopes what the worker can call (no system ops outside project)
         local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
         local _worker_model="${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}}"
-        if ! cat "$tmp_spec" | claude -p --model "$_worker_model" --allowedTools "$_worker_tools" > "$tmp_out" 2>&1; then
-          cat "$tmp_spec" | claude -p --model "$_worker_model" > "$tmp_out" 2>&1 || rc=$?
+        if [[ -n "${DEVLOOP_SESSION_PHASE_LOG:-}" ]]; then
+          if ! cat "$tmp_spec" | claude -p --model "$_worker_model" --allowedTools "$_worker_tools" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" > "$tmp_out"; then
+            cat "$tmp_spec" | claude -p --model "$_worker_model" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" > "$tmp_out" || rc=$?
+          fi
+        else
+          if ! cat "$tmp_spec" | claude -p --model "$_worker_model" --allowedTools "$_worker_tools" > "$tmp_out" 2>&1; then
+            cat "$tmp_spec" | claude -p --model "$_worker_model" > "$tmp_out" 2>&1 || rc=$?
+          fi
         fi
         ;;
       opencode)
@@ -4144,7 +4287,11 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
         pi --mode json "$launch_prompt" 2>&1 | tee "$tmp_out" | cat || rc=$?
         ;;
       *)  # copilot
-        copilot --allow-all-tools --allow-all-paths -p "$(cat "$tmp_spec")" 2>&1 | tee "$tmp_out" || rc=$?
+        if [[ -n "${DEVLOOP_SESSION_PHASE_LOG:-}" ]]; then
+          copilot --allow-all-tools --allow-all-paths -p "$(cat "$tmp_spec")" 2>&1 | tee -a "$DEVLOOP_SESSION_PHASE_LOG" | tee "$tmp_out" || rc=$?
+        else
+          copilot --allow-all-tools --allow-all-paths -p "$(cat "$tmp_spec")" 2>&1 | tee "$tmp_out" || rc=$?
+        fi
         ;;
     esac
     cat "$tmp_out"
@@ -5742,6 +5889,14 @@ cmd_run() {
     echo -e "  ${GRAY}Session: ${CYAN}devloop session $id${RESET}"
   fi
 
+  # Auto-open tmux view if configured (v4.10)
+  if [[ "${DEVLOOP_AUTO_VIEW:-false}" == "true" ]] && _tmux_available; then
+    info "Auto-opening tmux view for session: ${CYAN}$id${RESET}"
+    # Launch view in background detached shell so it doesn't block the pipeline
+    ( cmd_view "$id" 2>/dev/null ) &
+    sleep 0.5
+  fi
+
   success "Spec: ${CYAN}$id${RESET}"
   echo ""
 
@@ -6091,8 +6246,10 @@ cmd_help() {
   echo -e "    List past pipeline runs with status, duration, and feature description\n"
   echo -e "  ${CYAN}devloop session <task-id>${RESET}"
   echo -e "    Show phase timeline and logs for a specific run\n"
+  echo -e "  ${CYAN}devloop replay <task-id> [--phase PHASE]${RESET}"
+  echo -e "    Replay recorded phase logs. PHASE: architect|worker|reviewer|fix-N|respec\n"
   echo -e "  ${CYAN}devloop view [task-id]${RESET}"
-  echo -e "    Open live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions panes"
+  echo -e "    Open live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions+Permissions"
   echo -e "    Falls back to inline log tail if tmux not installed\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
@@ -6244,17 +6401,20 @@ cmd_help() {
   echo -e "  Set ${CYAN}DEVLOOP_WORKER_MODE${RESET} in devloop.config.sh\n"
   echo -e "${BOLD}SESSION VIEWER${RESET}\n"
   echo -e "  Every ${CYAN}devloop run${RESET} creates a session in ${CYAN}.devloop/sessions/<task-id>/${RESET}"
-  echo -e "  Each phase writes a log file: architect.log | worker.log | reviewer.log | fix-N.log\n"
+  echo -e "  Each phase writes a live log: architect.log | worker.log | reviewer.log | fix-N.log\n"
   echo -e "  ${CYAN}devloop sessions [--last N] [--status approved|running|needs-work]${RESET}"
   echo -e "    List past pipeline runs with status, duration, and feature description\n"
   echo -e "  ${CYAN}devloop session <task-id>${RESET}"
   echo -e "    Show phase timeline, log file sizes, and tail the main log\n"
   echo -e "  ${CYAN}devloop view [task-id]${RESET}"
-  echo -e "    Open a live tmux dashboard with 4 panes: Architect | Worker | Reviewer | Fix/Decisions"
+  echo -e "    Open a live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions+Permissions"
   echo -e "    Requires tmux (${CYAN}brew install tmux${RESET}). Falls back to inline log tail if not installed."
-  echo -e "    If already inside tmux, opens in a new session and switches to it\n"
-  echo -e "  ${BOLD}Config:${RESET} ${CYAN}DEVLOOP_SESSION_LOGGING=true${RESET}   enable/disable session logging"
-  echo -e "           ${CYAN}DEVLOOP_AUTO_VIEW=false${RESET}       auto-open tmux view on devloop run (v4.10+)\n"
+  echo -e "    Decisions pane runs ${CYAN}devloop permit watch${RESET} to handle permission requests live\n"
+  echo -e "  ${CYAN}devloop replay <task-id> [--phase architect|worker|reviewer|fix-N|respec]${RESET}"
+  echo -e "    Replay recorded phase logs from a completed session. Supports phase filter.\n"
+  echo -e "  ${BOLD}Config:${RESET} ${CYAN}DEVLOOP_SESSION_LOGGING=true${RESET}    enable/disable session logging"
+  echo -e "           ${CYAN}DEVLOOP_AUTO_VIEW=false${RESET}        auto-open tmux view on devloop run"
+  echo -e "           ${CYAN}DEVLOOP_SESSION_KEEP_DAYS=30${RESET}   auto-prune sessions older than N days (0=keep all)\n"
 }
 
 # ── cmd: do — natural-language entry point ────────────────────────────────────
@@ -6318,6 +6478,7 @@ main() {
   case "$cmd" in
     sessions)         cmd_sessions "$@" ;;
     session)          cmd_session  "$@" ;;
+    replay)           cmd_replay   "$@" ;;
     view)             cmd_view     "$@" ;;
     do|ask|please|nl) cmd_do      "$@" ;;
     install)          cmd_install  "$@" ;;

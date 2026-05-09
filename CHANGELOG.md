@@ -5,6 +5,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.10.0] — 2026-05-09
+
+### Added
+- **Live session log streaming** — agent output is now tee'd to session phase log files in real-time
+  while the pipeline runs. `run_provider_prompt` and `cmd_work` both write to
+  `DEVLOOP_SESSION_PHASE_LOG` (set by `_session_phase_start`) when session logging is active.
+  This means `devloop view` / `tail -f` show output as it arrives, not just at phase end.
+- **`devloop replay <id> [--phase PHASE]`** — replay recorded phase logs from a completed session
+  with optional phase filter (architect | worker | reviewer | fix-N | respec)
+- **`DEVLOOP_AUTO_VIEW=true`** support — when set, `devloop run` automatically opens the tmux
+  dashboard after the architect phase completes (requires tmux)
+- **`DEVLOOP_SESSION_KEEP_DAYS=30`** config — sessions older than N days are auto-pruned at the
+  start of each new run (0 = keep forever). Pruning runs in background so it never blocks.
+- **Decision + Permission integration in tmux view** — the Fix/Decisions pane now also runs
+  `devloop permit watch` alongside fix log tailing, surfacing any agent permission requests
+  directly in the live dashboard so the user can approve/deny without leaving the view.
+- `_session_prune()` helper for background old-session cleanup
+- `unset DEVLOOP_SESSION_PHASE_LOG` in `_session_finish` to prevent log leakage between sessions
+
+### Changed
+- `_session_phase_start` now exports `DEVLOOP_SESSION_PHASE_LOG` env var pointing to the current
+  phase log file (used by run_provider_prompt and cmd_work for live tee)
+- tmux decisions pane command updated to combine fix-log tailing with permit watch
+
+---
+
 ## [4.9.0] — 2026-05-09
 
 ### Added
