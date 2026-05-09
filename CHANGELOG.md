@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.11.3] — 2026-05-09
+
+### Fixed (found during todo-app test run)
+- **`devloop failover/daemon/tools/hooks/start <subcommand>` was intercepted as NL**: removed
+  these commands from the NL pre-detection list — they accept subcommands and must not be treated
+  as prose starters. Only truly zero-arg utility commands remain in the list.
+- **`devloop view` overview pane used `watch -n 2`**: `watch` is not installed by default on
+  macOS. Replaced with a portable `while true; do ... sleep 2; done` bash loop.
+- **`DEVLOOP_AUTO_VIEW=true` env var was silently overwritten by `load_config`**: default
+  assignment used `VAR="false"` (always overwrite) instead of `: "${VAR:=false}"` (only set if
+  unset). `DEVLOOP_AUTO_VIEW=true devloop run "..."` now works correctly.
+
+---
+
 ## [4.11.0] — 2026-05-09
 
 ### Fixed

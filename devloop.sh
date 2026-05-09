@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.11.0"
+VERSION="4.11.3"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -185,8 +185,10 @@ load_config() {
   DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
   DEVLOOP_FIX_STRATEGY="escalate"  # escalate (deep fix + respec) | standard (hard cap, no escalation)
   DEVLOOP_SESSION_LOGGING="true"   # record per-run session logs under .devloop/sessions/
-  DEVLOOP_AUTO_VIEW="false"        # auto-open tmux view when devloop run starts
-  DEVLOOP_SESSION_KEEP_DAYS="30"   # auto-prune sessions older than N days (0 = keep forever)
+  # DEVLOOP_AUTO_VIEW and DEVLOOP_SESSION_KEEP_DAYS use :=default so env vars set before devloop
+  # (e.g. DEVLOOP_AUTO_VIEW=true devloop run ...) are not overwritten by load_config defaults.
+  : "${DEVLOOP_AUTO_VIEW:=false}"        # auto-open tmux view when devloop run starts
+  : "${DEVLOOP_SESSION_KEEP_DAYS:=30}"   # auto-prune sessions older than N days (0 = keep forever)
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -3727,8 +3729,9 @@ cmd_view() {
     tmux new-session -d -s "$tmux_name" -n "overview" -x 220 -y 50
 
     # Overview window: left=status/header, right=main.log tail
+    # Use a portable while-loop instead of `watch` (not available on macOS by default)
     tmux send-keys -t "$tmux_name:overview" \
-      "watch -n 2 'echo \"DevLoop Session: $id\"; echo \"Feature: $feature\"; echo \"\"; cat $dir/status 2>/dev/null | xargs printf \"Status: %s\\n\"; echo \"\"; for f in $dir/*.state; do [ -f \"\$f\" ] && echo \"\$(basename \$f .state): \$(cat \$f)\"; done'" \
+      "while true; do clear; echo \"DevLoop Session: $id\"; echo \"Feature: $feature\"; echo \"\"; printf 'Status: %s\n' \"\$(cat $dir/status 2>/dev/null)\"; echo \"\"; for f in $dir/*.state; do [ -f \"\$f\" ] && printf '  %-14s %s\n' \"\$(basename \$f .state)\" \"\$(cat \$f)\"; done; sleep 2; done" \
       C-m
 
     # Agents window: 4 panes
@@ -6503,7 +6506,9 @@ main() {
   # When a "utility" command (that takes no positional args) is followed by
   # plain-English words (not flags or task IDs), treat the whole thing as NL.
   # e.g. "devloop check the latest progress..." → cmd_do instead of cmd_check
-  local _zero_arg_cmds=" check update status doctor agent-sync sync-agents agentsync logs clean ci tools failover hooks start daemon tasks "
+  # IMPORTANT: commands that accept subcommands (failover, daemon, tools, hooks, permit)
+  # must NOT be in this list — their single-word args are subcommands, not NL prose.
+  local _zero_arg_cmds=" check update doctor agent-sync sync-agents agentsync logs clean ci tasks "
   if [[ " $_zero_arg_cmds " == *" $cmd "* ]] && [[ $# -gt 0 ]]; then
     local _has_flag=false _has_task_id=false _a
     for _a in "$@"; do
