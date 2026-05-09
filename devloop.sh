@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.4.0"
+VERSION="4.5.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -173,6 +173,8 @@ load_config() {
   PROJECT_CONVENTIONS="Use async/await, handle all errors explicitly"
   TEST_FRAMEWORK="default"
   CLAUDE_MODEL="sonnet"
+  CLAUDE_MAIN_MODEL=""   # if set, overrides CLAUDE_MODEL for main roles (architect/reviewer/orchestrator)
+  CLAUDE_WORKER_MODEL="" # if set, overrides CLAUDE_MODEL for worker/fix roles
   DEVLOOP_MAIN_PROVIDER="claude"
   DEVLOOP_WORKER_PROVIDER="copilot"
   DEVLOOP_WORKER_MODE="cli"
@@ -786,6 +788,9 @@ _agent_write_context() {
     echo "## Active Configuration"
     echo "- **Main provider** (orchestrator/architect/reviewer): $(provider_label "$main_p")"
     echo "- **Worker provider** (work/fix): $(provider_label "$worker_p")"
+    echo "- **Claude main model:** ${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}} (architect/reviewer/orchestrator)"
+    echo "- **Claude worker model:** ${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}} (work/fix)"
+    echo "- **Copilot model:** determined by GitHub subscription (no CLI flag available)"
     echo ""
     echo "## Provider CLI Quick Reference"
     echo ""
@@ -802,6 +807,7 @@ _agent_write_context() {
     echo "### Copilot"
     echo "- **Install:** \`npm install -g @github/copilot\`"
     echo "- **Non-interactive:** \`copilot --allow-all-tools --allow-all-paths -p \"<prompt>\"\`"
+    echo "- **Model:** set via GitHub settings (https://github.com/settings/copilot) — no --model CLI flag"
     echo "- **Remote control:** supported (Copilot coding agent)"
     echo "- **Instructions:** \`.github/copilot-instructions.md\`"
     echo "- **Skills:** \`.github/copilot/skills/\` and \`.copilot/\`"
@@ -825,7 +831,10 @@ _agent_write_context() {
     echo "| Provider | Role | Command | Prompt prefix |"
     echo "|----------|------|---------|--------------|"
     echo "| claude | main+worker | \`echo \"\$prompt\" | claude -p --model \$model\` | none |"
+    echo "| | main roles | CLAUDE_MAIN_MODEL=${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}} | |"
+    echo "| | worker/fix | CLAUDE_WORKER_MODEL=${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}} | |"
     echo "| copilot | main+worker | \`copilot --allow-all-tools --allow-all-paths -p \"\$prompt\"\` | /plan |"
+    echo "| | | model: set at github.com/settings/copilot | |"
     echo "| opencode | worker only | \`opencode run --file spec.md \"instruction\"\` | none |"
     echo "| pi | worker only | \`pi --mode json \"\$prompt\"\` | none |"
   } > "$context_file"
@@ -1894,8 +1903,9 @@ run_provider_prompt() {
       claude)
         # Architect/reviewer: read-only tools sufficient (no bash execution needed)
         local _readonly_tools="Read,Write,Glob,LS,Bash(git*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(wc*)"
-        if ! echo "$prompt" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_readonly_tools" > "$tmp_out" 2>&1; then
-          echo "$prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1 || rc=$?
+        local _main_model="${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+        if ! echo "$prompt" | claude -p --model "$_main_model" --allowedTools "$_readonly_tools" > "$tmp_out" 2>&1; then
+          echo "$prompt" | claude -p --model "$_main_model" > "$tmp_out" 2>&1 || rc=$?
         fi
         ;;
       copilot)
@@ -2186,9 +2196,17 @@ DEVLOOP_PERMISSION_TIMEOUT="60"  # seconds to wait for user response before auto
 # github-agent — create a GitHub Issue; Copilot coding agent works on it and opens a PR
 DEVLOOP_WORKER_MODE="cli"
 
-# Model for claude -p calls when a role uses Claude
-# "sonnet" = faster/cheaper   "opus" = more capable
+# Claude model settings
+# CLAUDE_MODEL is the base default used by all Claude roles.
+# Override per-role to use different models for main (architect/reviewer) vs worker.
+#   "sonnet" = faster/cheaper   "opus" = more capable   "haiku" = fastest
 CLAUDE_MODEL="sonnet"
+# CLAUDE_MAIN_MODEL="opus"     # architect, reviewer, orchestrator (uncomment to override)
+# CLAUDE_WORKER_MODEL="sonnet" # worker and fix passes (uncomment to override)
+
+# Copilot model: the Copilot CLI does not expose a --model flag for non-interactive use.
+# The model is determined by your GitHub Copilot subscription and plan settings.
+# To change the Copilot model, update it in: https://github.com/settings/copilot
 
 # Version checks and self-update use GitHub by default (no config needed).
 # DEVLOOP_GITHUB_REPO="shaifulshabuj/devloop"   # override to use a fork
@@ -2217,6 +2235,8 @@ _merge_devloop_config_defaults() {
     'DEVLOOP_PERMISSION_TIMEOUT="60"'
     'DEVLOOP_WORKER_MODE="cli"'
     'CLAUDE_MODEL="sonnet"'
+    'CLAUDE_MAIN_MODEL=""'
+    'CLAUDE_WORKER_MODEL=""'
   )
 
   for entry in "${entries[@]}"; do
@@ -2631,12 +2651,12 @@ cmd_init() {
   # Reload so generated files reflect the analyzed project configuration
   load_config
 
-  # 2. Write agent definitions — FIX #5: pass CLAUDE_MODEL so agents stay in sync with config
+  # 2. Write agent definitions — pass CLAUDE_MAIN_MODEL so agents stay in sync with config
   write_agent_orchestrator
   success "Agent: ${CYAN}$AGENTS_PATH/devloop-orchestrator.md${RESET}"
-  write_agent_architect "$CLAUDE_MODEL"
+  write_agent_architect "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
   success "Agent: ${CYAN}$AGENTS_PATH/devloop-architect.md${RESET}"
-  write_agent_reviewer "$CLAUDE_MODEL"
+  write_agent_reviewer "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
   success "Agent: ${CYAN}$AGENTS_PATH/devloop-reviewer.md${RESET}"
 
   # 3. CLAUDE.md
@@ -3395,8 +3415,9 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
       claude)
         # --allowedTools scopes what the worker can call (no system ops outside project)
         local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
-        if ! cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_worker_tools" > "$tmp_out" 2>&1; then
-          cat "$tmp_spec" | claude -p --model "$CLAUDE_MODEL" > "$tmp_out" 2>&1 || rc=$?
+        local _worker_model="${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+        if ! cat "$tmp_spec" | claude -p --model "$_worker_model" --allowedTools "$_worker_tools" > "$tmp_out" 2>&1; then
+          cat "$tmp_spec" | claude -p --model "$_worker_model" > "$tmp_out" 2>&1 || rc=$?
         fi
         ;;
       opencode)
@@ -3644,8 +3665,9 @@ Summarize the changes made."
     local rc=0
     if [[ "$attempt_fix_provider" == "claude" ]]; then
       local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
-      if ! echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" --allowedTools "$_worker_tools" > "$tmp_fix_out" 2>&1; then
-        echo "$fix_prompt" | claude -p --model "$CLAUDE_MODEL" > "$tmp_fix_out" 2>&1 || rc=$?
+      local _worker_model="${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+      if ! echo "$fix_prompt" | claude -p --model "$_worker_model" --allowedTools "$_worker_tools" > "$tmp_fix_out" 2>&1; then
+        echo "$fix_prompt" | claude -p --model "$_worker_model" > "$tmp_fix_out" 2>&1 || rc=$?
       fi
     elif [[ "$attempt_fix_provider" == "opencode" ]]; then
       local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
@@ -3746,6 +3768,22 @@ cmd_status() {
   local eff_main; eff_main="$(effective_main_provider)"
   local eff_worker; eff_worker="$(effective_worker_provider)"
   echo -e "  ${BOLD}Providers:${RESET}  main=$(provider_label "$eff_main") | worker=$(provider_label "$eff_worker")"
+  # Show Claude model config if Claude is in use
+  if [[ "$eff_main" == "claude" || "$eff_worker" == "claude" ]]; then
+    local _main_model="${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+    local _worker_model="${CLAUDE_WORKER_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+    if [[ "$eff_main" == "claude" && "$eff_worker" == "claude" ]]; then
+      if [[ "$_main_model" == "$_worker_model" ]]; then
+        echo -e "  ${BOLD}Claude model:${RESET} $_main_model (all roles)"
+      else
+        echo -e "  ${BOLD}Claude model:${RESET} main=$_main_model | worker=$_worker_model"
+      fi
+    elif [[ "$eff_main" == "claude" ]]; then
+      echo -e "  ${BOLD}Claude model:${RESET} main=$_main_model"
+    else
+      echo -e "  ${BOLD}Claude model:${RESET} worker=$_worker_model"
+    fi
+  fi
   if [[ -n "$HEALTH_MAIN_OVERRIDE" || -n "$HEALTH_WORKER_OVERRIDE" ]]; then
     warn "Failover active — run ${CYAN}devloop failover status${RESET} for details"
   fi
@@ -3960,16 +3998,16 @@ _refresh_project_for_version() {
   if ls "$root/$AGENTS_DIR/devloop-"*.md &>/dev/null 2>&1; then
     info "Refreshing devloop agent prompts..."
     local agents_updated=0
-    # Re-write each agent file by re-running init agent section
-    # We call init with --agents-only flag awareness, or do it manually
+    load_config 2>/dev/null || true
+    local _main_m="${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
     for agent_src in orchestrator architect reviewer; do
       local agent_file="$root/$AGENTS_DIR/devloop-${agent_src}.md"
       if [[ -f "$agent_file" ]]; then
-        # Extract the prompt generation function name
-        local gen_fn="_write_agent_${agent_src}_prompt"
-        if declare -f "$gen_fn" &>/dev/null; then
-          "$gen_fn" "$root" 2>/dev/null && agents_updated=$(( agents_updated + 1 )) || true
-        fi
+        case "$agent_src" in
+          orchestrator) write_agent_orchestrator 2>/dev/null && agents_updated=$(( agents_updated + 1 )) || true ;;
+          architect)    write_agent_architect "$_main_m" 2>/dev/null && agents_updated=$(( agents_updated + 1 )) || true ;;
+          reviewer)     write_agent_reviewer "$_main_m" 2>/dev/null && agents_updated=$(( agents_updated + 1 )) || true ;;
+        esac
       fi
     done
     if (( agents_updated > 0 )); then
@@ -5182,6 +5220,13 @@ cmd_help() {
   echo -e "  Original provider is probed every ${CYAN}DEVLOOP_PROBE_INTERVAL${RESET} minutes (default 5)"
   echo -e "  and restored immediately when available again — no fixed wait time"
   echo -e "  Run ${CYAN}devloop failover status${RESET} to check current state\n"
+  echo -e "${BOLD}MODEL CONFIGURATION${RESET}\n"
+  echo -e "  ${BOLD}CLAUDE_MODEL${RESET}        Base model for all Claude roles (default: sonnet)"
+  echo -e "  ${BOLD}CLAUDE_MAIN_MODEL${RESET}   Model for architect/reviewer/orchestrator (overrides CLAUDE_MODEL)"
+  echo -e "  ${BOLD}CLAUDE_WORKER_MODEL${RESET} Model for worker/fix passes (overrides CLAUDE_MODEL)"
+  echo -e "  Available: ${CYAN}sonnet${RESET} (balanced), ${CYAN}opus${RESET} (most capable), ${CYAN}haiku${RESET} (fast/cheap)"
+  echo -e "  Example: CLAUDE_MAIN_MODEL=opus CLAUDE_WORKER_MODEL=sonnet"
+  echo -e "  ${BOLD}Copilot model${RESET}: set at ${CYAN}github.com/settings/copilot${RESET} — no CLI flag available\n"
   echo -e "${BOLD}SMART PERMISSIONS${RESET}\n"
   echo -e "  DevLoop intercepts every Bash tool call via Claude's PreToolUse hook."
   echo -e "  Commands are classified and handled without blocking the pipeline:\n"

@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.5.0] — 2026-05-09
+
+### Added
+- **`CLAUDE_MAIN_MODEL`** — separate model setting for architect/reviewer/orchestrator (main) roles. Overrides `CLAUDE_MODEL` when set.
+- **`CLAUDE_WORKER_MODEL`** — separate model setting for worker/fix roles. Overrides `CLAUDE_MODEL` when set.
+- Backward-compatible: `CLAUDE_MODEL` still works as a shared default for both roles.
+- Example config: `CLAUDE_MAIN_MODEL="opus"` (quality reviews) + `CLAUDE_WORKER_MODEL="sonnet"` (fast implementation)
+- **`devloop status`** now shows which Claude model each role uses.
+- **`devloop help`** has a new **MODEL CONFIGURATION** section explaining model settings and the Copilot model limitation.
+- **`devloop agent-sync`** context file now documents active models per role and Copilot model note.
+- **`_refresh_project_for_version()`** now uses the correct per-role models when refreshing agent prompts.
+- **Copilot model documentation** throughout: Copilot CLI has no `--model` flag; model is set at `github.com/settings/copilot`.
+
+### Changed
+- `devloop.config.sh` template now has `CLAUDE_MAIN_MODEL` and `CLAUDE_WORKER_MODEL` as documented (commented-out) overrides.
+
+---
+
 ## [4.4.0] — 2026-05-10
 
 ### Added
