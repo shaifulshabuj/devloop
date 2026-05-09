@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.12.0] — 2026-05-10
+
+### Added
+- **Global config layer (`~/.devloop/config.sh`)**: DevLoop now bootstraps a global user config
+  directory (`~/.devloop/`) on first run. Users can set provider, model, permission mode, and
+  other defaults once globally, and all projects inherit them automatically.
+- **Load order**: hardcoded defaults → global `~/.devloop/config.sh` → project `devloop.config.sh`.
+  Project config always wins.
+- **`_ensure_global_dirs()`**: silently creates `~/.devloop/` structure (config.sh template,
+  projects.json registry, lessons.md, logs/) on every run if not already present.
+- **`load_global_config()`**: sources `~/.devloop/config.sh` before project config; safe no-op
+  if file absent.
+- **`devloop configure --global`**: opens `~/.devloop/config.sh` in `$EDITOR` (or falls back to
+  nano/vi). Shows current active (non-commented) values before opening.
+- **`devloop doctor` global config section**: checks `~/.devloop/` exists, reports how many keys
+  are customized, and shows registered project count.
+- **Help text updated**: `devloop configure --global` documented in `devloop help`.
+- **New global config keys**: `DEVLOOP_NOTIFY_WEBHOOK` (Slack/Discord webhook on pipeline events),
+  `DEVLOOP_NOTIFY_SOUND` (macOS notification sound), `DEVLOOP_FAILOVER_ENABLED`,
+  `DEVLOOP_PROBE_INTERVAL` — all documented and commented-out in the global config template.
+
+---
+
 ## [4.11.4] — 2026-05-10
 
 ### Fixed

@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.11.4"
+VERSION="4.12.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -35,6 +35,7 @@ CONFIG_FILE="devloop.config.sh"
 # GitHub source — used by default for version checks and self-update (no config needed)
 DEVLOOP_GITHUB_REPO="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
 DEVLOOP_SOURCE_URL="${DEVLOOP_SOURCE_URL:-}"   # override to use a custom script URL
+DEVLOOP_GLOBAL_DIR="${HOME}/.devloop"          # user-level global state directory
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 CYAN='\033[0;36m'
@@ -159,6 +160,75 @@ find_project_root() {
   echo "$PWD"
 }
 
+# ── Global directory bootstrap ────────────────────────────────────────────────
+# Called once at start of main(). Creates ~/.devloop/ and seeds default files
+# the first time devloop runs. Completely silent — no output.
+_ensure_global_dirs() {
+  mkdir -p "$DEVLOOP_GLOBAL_DIR"
+
+  # Seed global config template on first run (never overwrite existing)
+  if [[ ! -f "$DEVLOOP_GLOBAL_DIR/config.sh" ]]; then
+    cat > "$DEVLOOP_GLOBAL_DIR/config.sh" <<'GLOBAL_CONFIG_TEMPLATE'
+# ~/.devloop/config.sh — DevLoop global user defaults
+# These apply to ALL projects. Values in a project's devloop.config.sh always override these.
+# Edit with:  devloop configure --global
+
+# Provider routing (valid: claude, copilot)
+#DEVLOOP_MAIN_PROVIDER="claude"
+#DEVLOOP_WORKER_PROVIDER="copilot"
+
+# Claude model for all roles (sonnet | opus | haiku)
+#CLAUDE_MODEL="sonnet"
+#CLAUDE_MAIN_MODEL=""    # override main roles only (architect/reviewer)
+#CLAUDE_WORKER_MODEL=""  # override worker/fix roles only
+
+# Auto-open tmux view pane when devloop run starts (true | false)
+#DEVLOOP_AUTO_VIEW="false"
+
+# Fix strategy (escalate | standard)
+#DEVLOOP_FIX_STRATEGY="escalate"
+
+# Permission mode (off | auto | smart | strict)
+#DEVLOOP_PERMISSION_MODE="smart"
+
+# Keep session logs for N days (0 = keep forever)
+#DEVLOOP_SESSION_KEEP_DAYS="30"
+
+# Webhook URL for pipeline event notifications (Slack/Discord/generic)
+# Posts JSON on: pipeline complete, inbox item added, NEEDS_WORK, REJECTED
+#DEVLOOP_NOTIFY_WEBHOOK=""
+
+# Play a sound on inbox notifications (true | false)
+#DEVLOOP_NOTIFY_SOUND="true"
+GLOBAL_CONFIG_TEMPLATE
+  fi
+
+  # Seed empty project registry
+  [[ -f "$DEVLOOP_GLOBAL_DIR/projects.json" ]] || echo "[]" > "$DEVLOOP_GLOBAL_DIR/projects.json"
+
+  # Seed global lessons store
+  if [[ ! -f "$DEVLOOP_GLOBAL_DIR/lessons.md" ]]; then
+    cat > "$DEVLOOP_GLOBAL_DIR/lessons.md" <<'LESSONS_TEMPLATE'
+# DevLoop Global Lessons
+<!-- Auto-maintained by `devloop learn --global`. Injected into architect prompts. -->
+<!-- Tag sections by stack: ## Node.js, ## Python, ## Go, ## All Stacks, etc. -->
+
+## All Stacks
+
+LESSONS_TEMPLATE
+  fi
+
+  mkdir -p "$DEVLOOP_GLOBAL_DIR/logs"
+}
+
+# Sources ~/.devloop/config.sh (global defaults) — called at the top of load_config()
+# so project devloop.config.sh always wins. Safe no-op if file absent.
+load_global_config() {
+  local gconf="$DEVLOOP_GLOBAL_DIR/config.sh"
+  # shellcheck disable=SC1090
+  [[ -f "$gconf" ]] && source "$gconf" || true
+}
+
 load_config() {
   local root
   root="$(find_project_root)"
@@ -185,11 +255,16 @@ load_config() {
   DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
   DEVLOOP_FIX_STRATEGY="escalate"  # escalate (deep fix + respec) | standard (hard cap, no escalation)
   DEVLOOP_SESSION_LOGGING="true"   # record per-run session logs under .devloop/sessions/
+  DEVLOOP_NOTIFY_WEBHOOK=""         # webhook URL for pipeline event notifications
+  DEVLOOP_NOTIFY_SOUND="true"       # play sound on macOS inbox notifications
   # DEVLOOP_AUTO_VIEW and DEVLOOP_SESSION_KEEP_DAYS use :=default so env vars set before devloop
   # (e.g. DEVLOOP_AUTO_VIEW=true devloop run ...) are not overwritten by load_config defaults.
   : "${DEVLOOP_AUTO_VIEW:=false}"        # auto-open tmux view when devloop run starts
   : "${DEVLOOP_SESSION_KEEP_DAYS:=30}"   # auto-prune sessions older than N days (0 = keep forever)
 
+  # Load order: (1) hardcoded defaults above → (2) global user config → (3) project config
+  # Each layer overrides the previous; project config always wins.
+  load_global_config
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
 
@@ -1580,6 +1655,31 @@ cmd_configure() {
   load_config
   ensure_dirs
 
+  # --global: edit ~/.devloop/config.sh
+  if [[ "${1:-}" == "--global" ]]; then
+    _ensure_global_dirs
+    local gconf="$DEVLOOP_GLOBAL_DIR/config.sh"
+    step "DevLoop Global Configure — ${CYAN}$gconf${RESET}"
+    divider
+    info "Global defaults apply to all projects. Project devloop.config.sh always overrides."
+    echo ""
+    echo -e "${BOLD}Current global settings (uncommented lines):${RESET}"
+    grep -v '^#' "$gconf" | grep -v '^[[:space:]]*$' || echo -e "  ${GRAY}(all defaults — nothing customized yet)${RESET}"
+    echo ""
+    local editor="${EDITOR:-}"
+    [[ -z "$editor" ]] && command -v nano &>/dev/null && editor="nano"
+    [[ -z "$editor" ]] && command -v vi   &>/dev/null && editor="vi"
+    if [[ -n "$editor" ]]; then
+      "$editor" "$gconf"
+      success "Global config saved: $gconf"
+    else
+      warn "No editor found. Set \$EDITOR or edit manually: $gconf"
+    fi
+    echo ""
+    echo -e "  Run ${CYAN}devloop init${RESET} in each project to inherit new global defaults."
+    return
+  fi
+
   step "DevLoop Configure — interactive setup"
   divider
 
@@ -1747,6 +1847,23 @@ cmd_doctor() {
       echo -e "  ${GRAY}—  version check skipped (no network or GitHub unreachable)${RESET}"
     fi
   }
+
+  # Global config
+  echo -e "\n  ${BOLD}Global Config (${DEVLOOP_GLOBAL_DIR})${RESET}"
+  ok="false"; [[ -d "$DEVLOOP_GLOBAL_DIR" ]] && ok="true"
+  _chk "~/.devloop/ directory exists" "$ok" "devloop configure --global"
+  if [[ -f "$DEVLOOP_GLOBAL_DIR/config.sh" ]]; then
+    local custom_count
+    custom_count="$(grep -v '^#' "$DEVLOOP_GLOBAL_DIR/config.sh" | grep -v '^[[:space:]]*$' | wc -l | tr -d ' ')"
+    echo -e "  ${GRAY}—${RESET}  Global config keys set: ${CYAN}${custom_count}${RESET}  (edit: ${CYAN}devloop configure --global${RESET})"
+  else
+    echo -e "  ${GRAY}—  No global config yet. Create with: devloop configure --global${RESET}"
+  fi
+  if [[ -f "$DEVLOOP_GLOBAL_DIR/projects.json" ]]; then
+    local proj_count
+    proj_count="$(python3 -c "import json; d=json.load(open('$DEVLOOP_GLOBAL_DIR/projects.json')); print(len(d))" 2>/dev/null || echo "?")"
+    echo -e "  ${GRAY}—${RESET}  Registered projects: ${CYAN}${proj_count}${RESET}"
+  fi
 
   divider
   echo ""
@@ -6281,7 +6398,10 @@ cmd_help() {
   echo -e "    Use ${GRAY}--configure${RESET} to re-run the wizard on an existing project.\n"
   echo -e "  ${CYAN}devloop configure${RESET}  ${GRAY}aliases: setup, wizard${RESET}"
   echo -e "    Re-run the interactive setup wizard to change providers, models, and permissions"
-  echo -e "    Updates devloop.config.sh and regenerates agent prompt files.\n"
+  echo -e "    Updates devloop.config.sh and regenerates agent prompt files."
+  echo -e "  ${CYAN}devloop configure --global${RESET}"
+  echo -e "    Edit global defaults in ${GRAY}~/.devloop/config.sh${RESET} (applies to all projects)"
+  echo -e "    Project devloop.config.sh always overrides global values.\n"
   echo -e "  ${CYAN}devloop run \"feature\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]${RESET}  ${GRAY}alias: go${RESET}"
   echo -e "    Full automated pipeline: architect → work → review → fix loop → learn"
   echo -e "    Fix escalation (DEVLOOP_FIX_STRATEGY=escalate, default):"
@@ -6503,6 +6623,9 @@ main() {
     -v|-V|--version|version) echo -e "${CYAN}${BOLD}devloop${RESET} v${VERSION}"; exit 0 ;;
     --help|-h) header; cmd_help; exit 0 ;;
   esac
+
+  # Bootstrap global ~/.devloop/ structure silently on every run
+  _ensure_global_dirs
 
   header
 
