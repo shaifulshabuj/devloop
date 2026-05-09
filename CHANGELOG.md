@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.1] — 2026-05-09
+
+### Fixed
+- `devloop init`: fixed `_args[@]: unbound variable` crash on Bash 3.2 (macOS default)
+  when no extra arguments are passed — empty array expansion under `set -u` now
+  uses `[[ ${#_args[@]} -gt 0 ]]` guard instead of bare `"${_args[@]}"`
+
+---
+
 ## [4.6.0] — 2026-05-09
 
 ### Added

@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.6.0"
+VERSION="4.6.1"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -2892,7 +2892,7 @@ cmd_init() {
       *)               _args+=("$_a") ;;
     esac
   done
-  set -- "${_args[@]}"
+  [[ ${#_args[@]} -gt 0 ]] && set -- "${_args[@]}" || set --
 
   load_config
   ensure_dirs
