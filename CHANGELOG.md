@@ -5,7 +5,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [4.8.0] — 2026-05-09
+## [4.9.0] — 2026-05-09
+
+### Added
+- **Session logging infrastructure** — every `devloop run` now creates a structured
+  session directory under `.devloop/sessions/<task-id>/` containing:
+  - `feature.txt` — feature description
+  - `status` — running | approved | needs-work | rejected
+  - `started_at` / `finished_at` — ISO timestamps
+  - `<phase>.log` — live-appended agent output per phase (architect/worker/reviewer/fix-N/respec)
+  - `<phase>.state` — current phase status + timestamp (used by tmux view)
+  - `decisions/pending/` + `decisions/approved/` — reserved for Phase 3 decision propagation
+- **`devloop sessions`** — list all past pipeline runs with status, duration, feature description
+  - Flags: `--last N` (limit), `--status approved|running|needs-work|rejected`
+- **`devloop session <id>`** — detail view: phase timeline, log file sizes, live-tail or recent log lines
+- **`devloop view [id]`** — tmux-based live dashboard with 4 panes:
+  - 🏗 Architect | 🔨 Worker | 🔍 Reviewer | ⚡ Fix/Decisions
+  - Auto-selects most recent session if no id given
+  - Falls back to inline `tail -f` with install hint if tmux is not available
+  - If already inside tmux: `switch-client` instead of `attach-session`
+- Session logging hooks in `cmd_run`: phase start/end timestamps tracked automatically
+- `DEVLOOP_SESSION_LOGGING=true` config variable (enable/disable)
+- `DEVLOOP_AUTO_VIEW=false` config variable (reserved for v4.10 auto-open)
+- Help text: new **SESSION VIEWER** section; `sessions`, `session`, `view` listed in commands
+
+### Changed
+- `cmd_run` pipeline completion message now includes `devloop session <id>` hint
+
+---
+
+
 
 ### Added
 - **3-phase fix escalation** in `devloop run` — replaces the hard "max retries" exit

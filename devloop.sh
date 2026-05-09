@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.8.0"
+VERSION="4.9.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -184,6 +184,8 @@ load_config() {
   DEVLOOP_PERMISSION_MODE="smart"   # off | auto | smart | strict
   DEVLOOP_PERMISSION_TIMEOUT="60"   # seconds to wait for user response on escalated permissions
   DEVLOOP_FIX_STRATEGY="escalate"  # escalate (deep fix + respec) | standard (hard cap, no escalation)
+  DEVLOOP_SESSION_LOGGING="true"   # record per-run session logs under .devloop/sessions/
+  DEVLOOP_AUTO_VIEW="false"        # auto-open tmux view when devloop run starts (v4.10+)
 
   if [[ -f "$CONFIG_PATH" ]]; then source "$CONFIG_PATH"; fi
 }
@@ -3535,6 +3537,348 @@ _remove_systemd() {
   fi
 }
 
+# ── Session logging helpers ───────────────────────────────────────────────────
+# Provides structured per-run session directories under .devloop/sessions/<id>/
+# Each run gets: main.log, <phase>.log, <phase>.state, feature.txt, status
+# Set DEVLOOP_CURRENT_SESSION_ID in cmd_run for automatic phase logging.
+
+_session_dir() {
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  echo "$root/$DEVLOOP_DIR/sessions/${1:-}"
+}
+
+_session_init() {
+  local run_id="$1"; local feature="$2"
+  [[ "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
+  local dir; dir="$(_session_dir "$run_id")"
+  mkdir -p "$dir/decisions/pending" "$dir/decisions/approved"
+  echo "$feature"                                  > "$dir/feature.txt"
+  echo "running"                                   > "$dir/status"
+  date '+%Y-%m-%dT%H:%M:%S'                       > "$dir/started_at"
+  printf '[%s] DevLoop session started\nFeature: %s\n' \
+    "$(date '+%H:%M:%S')" "$feature"               > "$dir/main.log"
+}
+
+_session_phase_start() {
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"; local phase="$1"
+  [[ -z "$run_id" || "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
+  local dir; dir="$(_session_dir "$run_id")"
+  [[ -d "$dir" ]] || return 0
+  printf '[%s] === %s started ===\n' "$(date '+%H:%M:%S')" "$phase" > "$dir/$phase.log"
+  echo "running:$(date '+%Y-%m-%dT%H:%M:%S')"     > "$dir/$phase.state"
+  printf '[%s] Phase started: %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$dir/main.log"
+}
+
+_session_phase_end() {
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"; local phase="$1"; local status="${2:-done}"
+  [[ -z "$run_id" || "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
+  local dir; dir="$(_session_dir "$run_id")"
+  [[ -d "$dir" ]] || return 0
+  printf '[%s] === %s ended: %s ===\n' "$(date '+%H:%M:%S')" "$phase" "$status" >> "$dir/$phase.log"
+  echo "$status:$(date '+%Y-%m-%dT%H:%M:%S')"     > "$dir/$phase.state"
+  printf '[%s] Phase ended: %s (%s)\n' "$(date '+%H:%M:%S')" "$phase" "$status" >> "$dir/main.log"
+}
+
+_session_append_log() {
+  # _session_append_log <phase> <content>
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"; local phase="$1"; local content="$2"
+  [[ -z "$run_id" || "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
+  local dir; dir="$(_session_dir "$run_id")"
+  [[ -d "$dir" ]] || return 0
+  echo "$content" >> "$dir/$phase.log"
+}
+
+_session_finish() {
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"; local status="${1:-approved}"
+  [[ -z "$run_id" || "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
+  local dir; dir="$(_session_dir "$run_id")"
+  [[ -d "$dir" ]] || return 0
+  echo "$status" > "$dir/status"
+  date '+%Y-%m-%dT%H:%M:%S' > "$dir/finished_at"
+  printf '[%s] Session finished: %s\n' "$(date '+%H:%M:%S')" "$status" >> "$dir/main.log"
+}
+
+# ── cmd: view — live tmux dashboard (requires tmux) ──────────────────────────
+
+_tmux_available() { command -v tmux &>/dev/null; }
+
+cmd_view() {
+  load_config
+  local id="${1:-}"
+
+  # Resolve session ID: explicit > active run env > latest session
+  if [[ -z "$id" ]]; then
+    id="${DEVLOOP_CURRENT_SESSION_ID:-}"
+  fi
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_dir="$root/$DEVLOOP_DIR/sessions"
+
+  # Fallback: find most recently modified session
+  if [[ -z "$id" ]]; then
+    id="$(ls -dt "$sessions_dir"/TASK-* 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$id" ]]; then
+    error "No session found. Start one with: devloop run \"<feature>\""
+    exit 1
+  fi
+
+  local dir="$sessions_dir/$id"
+  if [[ ! -d "$dir" ]]; then
+    error "Session directory not found: $id"
+    echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
+    exit 1
+  fi
+
+  if ! _tmux_available; then
+    warn "tmux is not installed — live multi-pane view requires tmux"
+    echo ""
+    echo -e "  Install on macOS:  ${CYAN}brew install tmux${RESET}"
+    echo -e "  Install on Linux:  ${CYAN}apt install tmux${RESET}  or  ${CYAN}yum install tmux${RESET}"
+    echo ""
+    info "Falling back to inline log tail for session: ${CYAN}$id${RESET}"
+    echo -e "  ${GRAY}Watching main.log (Ctrl-C to stop)${RESET}"
+    echo ""
+    tail -f "$dir/main.log" 2>/dev/null || cat "$dir/main.log" 2>/dev/null || echo "(no logs yet)"
+    return
+  fi
+
+  # ── tmux session setup ────────────────────────────────────────────────────
+  local tmux_name="devloop-$id"
+  local feature="$(cat "$dir/feature.txt" 2>/dev/null || echo "$id")"
+
+  # Kill stale completed session with same name if any
+  tmux has-session -t "$tmux_name" 2>/dev/null && {
+    local stt; stt="$(cat "$dir/status" 2>/dev/null || echo "")"
+    [[ "$stt" != "running" ]] && tmux kill-session -t "$tmux_name" 2>/dev/null || true
+  }
+
+  if ! tmux has-session -t "$tmux_name" 2>/dev/null; then
+    # Create session with header window
+    tmux new-session -d -s "$tmux_name" -n "overview" -x 220 -y 50
+
+    # Overview window: left=status/header, right=main.log tail
+    tmux send-keys -t "$tmux_name:overview" \
+      "watch -n 2 'echo \"DevLoop Session: $id\"; echo \"Feature: $feature\"; echo \"\"; cat $dir/status 2>/dev/null | xargs printf \"Status: %s\\n\"; echo \"\"; for f in $dir/*.state; do [ -f \"\$f\" ] && echo \"\$(basename \$f .state): \$(cat \$f)\"; done'" \
+      C-m
+
+    # Agents window: 4 panes
+    tmux new-window -t "$tmux_name" -n "agents"
+
+    # Pane 0: architect log
+    tmux send-keys -t "$tmux_name:agents" \
+      "echo '=== 🏗  Architect ==='; tail -f $dir/architect.log 2>/dev/null || echo '(not started yet)'" C-m
+
+    # Pane 1: worker log (split right)
+    tmux split-window -t "$tmux_name:agents" -h
+    tmux send-keys -t "$tmux_name:agents" \
+      "echo '=== 🔨 Worker ==='; tail -f $dir/worker.log 2>/dev/null || echo '(not started yet)'" C-m
+
+    # Pane 2: reviewer log (split bottom-left)
+    tmux split-window -t "$tmux_name:agents.0" -v
+    tmux send-keys -t "$tmux_name:agents.2" \
+      "echo '=== 🔍 Reviewer ==='; tail -f $dir/reviewer.log 2>/dev/null || echo '(not started yet)'" C-m
+
+    # Pane 3: decisions / fix logs (split bottom-right)
+    tmux split-window -t "$tmux_name:agents.1" -v
+    tmux send-keys -t "$tmux_name:agents.3" \
+      "echo '=== ⚡ Fix / Decisions ==='; echo 'Watching for fix rounds and decisions...'; tail -f $dir/fix-1.log $dir/respec.log $dir/main.log 2>/dev/null || echo '(not started yet)'" C-m
+
+    tmux select-pane -t "$tmux_name:agents.0"
+    tmux select-window -t "$tmux_name:overview"
+
+    success "tmux session created: ${CYAN}$tmux_name${RESET}"
+    echo -e "  ${GRAY}Windows: ${CYAN}overview${RESET} | ${CYAN}agents${RESET} (Ctrl-b n/p to switch)"
+    echo ""
+  else
+    info "Attaching to existing view: ${CYAN}$tmux_name${RESET}"
+  fi
+
+  # Attach (or switch if already inside tmux)
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$tmux_name"
+  else
+    tmux attach-session -t "$tmux_name"
+  fi
+}
+
+# ── cmd: sessions — list past pipeline runs ───────────────────────────────────
+
+cmd_sessions() {
+  load_config
+  local subcmd="${1:-list}"; shift 2>/dev/null || true
+  local filter_status="" limit=20
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status|-s) filter_status="${2:-}"; shift 2 ;;
+      --last|-n)   limit="${2:-20}";       shift 2 ;;
+      *)           shift ;;
+    esac
+  done
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_dir="$root/$DEVLOOP_DIR/sessions"
+
+  if [[ ! -d "$sessions_dir" ]]; then
+    info "No sessions recorded yet."
+    echo -e "  ${GRAY}Sessions are created automatically when you run ${CYAN}devloop run${RESET}"
+    return 0
+  fi
+
+  # Collect session dirs sorted by started_at (newest first)
+  local dirs=()
+  while IFS= read -r d; do
+    [[ -d "$d" ]] && dirs+=("$d")
+  done < <(ls -dt "$sessions_dir"/TASK-* 2>/dev/null | head -"$limit" || true)
+
+  if [[ ${#dirs[@]} -eq 0 ]]; then
+    info "No sessions found in: $sessions_dir"
+    return 0
+  fi
+
+  echo ""
+  echo -e "${BOLD}DevLoop Session History${RESET}"
+  divider
+  printf '  %-24s %-10s %-12s %-50s\n' "ID" "Status" "Duration" "Feature"
+  echo -e "  ${GRAY}────────────────────────── ────────── ──────────── ──────────────────────────────────────────────────${RESET}"
+
+  local shown=0
+  for d in "${dirs[@]}"; do
+    local run_id; run_id="$(basename "$d")"
+    local feature=""; local status=""; local started=""; local finished=""
+
+    [[ -f "$d/feature.txt" ]]    && feature="$(cat "$d/feature.txt")"
+    [[ -f "$d/status" ]]         && status="$(cat "$d/status")"
+    [[ -f "$d/started_at" ]]     && started="$(cat "$d/started_at")"
+    [[ -f "$d/finished_at" ]]    && finished="$(cat "$d/finished_at")"
+
+    # Apply status filter
+    if [[ -n "$filter_status" && "$status" != "$filter_status" ]]; then
+      continue
+    fi
+
+    # Compute duration
+    local duration="running"
+    if [[ -n "$started" && -n "$finished" ]]; then
+      local s_epoch; s_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "$started" '+%s' 2>/dev/null || date -d "$started" '+%s' 2>/dev/null || echo 0)"
+      local f_epoch; f_epoch="$(date -j -f '%Y-%m-%dT%H:%M:%S' "$finished" '+%s' 2>/dev/null || date -d "$finished" '+%s' 2>/dev/null || echo 0)"
+      if (( s_epoch > 0 && f_epoch > 0 )); then
+        local secs=$(( f_epoch - s_epoch ))
+        if (( secs < 60 )); then
+          duration="${secs}s"
+        elif (( secs < 3600 )); then
+          duration="$(( secs/60 ))m$(( secs%60 ))s"
+        else
+          duration="$(( secs/3600 ))h$(( (secs%3600)/60 ))m"
+        fi
+      fi
+    fi
+
+    # Colour status
+    local status_coloured="$status"
+    case "$status" in
+      approved) status_coloured="${GREEN}approved${RESET}" ;;
+      running)  status_coloured="${CYAN}running${RESET}" ;;
+      needs-work|needs_work) status_coloured="${YELLOW}needs-work${RESET}" ;;
+      rejected) status_coloured="${RED}rejected${RESET}" ;;
+    esac
+
+    local feature_short="${feature:0:50}"
+    printf '  %-24s ' "$run_id"
+    printf "%-10b " "$status_coloured"
+    printf '%-12s ' "$duration"
+    printf '%s\n' "$feature_short"
+
+    (( shown++ )) || true
+    (( shown >= limit )) && break
+  done
+
+  echo ""
+  echo -e "  ${GRAY}devloop session <id>     — view detail + live logs${RESET}"
+  echo -e "  ${GRAY}devloop sessions --status approved|running|needs-work${RESET}"
+  echo ""
+}
+
+cmd_session() {
+  load_config
+  local id="${1:-}"
+
+  if [[ -z "$id" ]]; then
+    error "Usage: devloop session <run-id>"
+    echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
+    exit 1
+  fi
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local dir="$root/$DEVLOOP_DIR/sessions/$id"
+
+  if [[ ! -d "$dir" ]]; then
+    error "Session not found: $id"
+    echo -e "  ${GRAY}List sessions: ${CYAN}devloop sessions${RESET}"
+    exit 1
+  fi
+
+  local feature=""; local status=""; local started=""; local finished=""
+  [[ -f "$dir/feature.txt" ]]  && feature="$(cat "$dir/feature.txt")"
+  [[ -f "$dir/status" ]]       && status="$(cat "$dir/status")"
+  [[ -f "$dir/started_at" ]]   && started="$(cat "$dir/started_at")"
+  [[ -f "$dir/finished_at" ]]  && finished="$(cat "$dir/finished_at")"
+
+  echo ""
+  echo -e "${BOLD}Session: ${CYAN}$id${RESET}"
+  divider
+  echo -e "  ${BOLD}Feature:${RESET}  $feature"
+  echo -e "  ${BOLD}Status:${RESET}   $status"
+  echo -e "  ${BOLD}Started:${RESET}  $started"
+  [[ -n "$finished" ]] && echo -e "  ${BOLD}Ended:${RESET}    $finished"
+  echo ""
+
+  # Show phase summary
+  echo -e "  ${BOLD}Phases:${RESET}"
+  for phase in architect worker reviewer fix-1 fix-2 fix-3 respec; do
+    if [[ -f "$dir/$phase.state" ]]; then
+      local state_line; state_line="$(cat "$dir/$phase.state")"
+      local p_status="${state_line%%:*}"
+      local p_time="${state_line#*:}"
+      local p_icon="⏺"
+      case "$p_status" in
+        done|approved) p_icon="✅" ;;
+        running)       p_icon="🔄" ;;
+        needs-work)    p_icon="⚠️ " ;;
+        rejected)      p_icon="❌" ;;
+      esac
+      echo -e "    $p_icon ${CYAN}$phase${RESET}  ($p_status  $p_time)"
+    fi
+  done
+  echo ""
+
+  # Show available logs
+  echo -e "  ${BOLD}Log files:${RESET}"
+  for log in "$dir"/*.log; do
+    [[ -f "$log" ]] || continue
+    local logname; logname="$(basename "$log")"
+    local logsize; logsize="$(wc -l < "$log" 2>/dev/null || echo 0)"
+    echo -e "    ${GRAY}$logname${RESET}  ($logsize lines)"
+  done
+  echo ""
+
+  # If status=running, offer live tail; otherwise offer log review
+  if [[ "$status" == "running" ]]; then
+    echo -e "  ${CYAN}Session is active${RESET} — tailing main log (Ctrl-C to stop):"
+    echo ""
+    tail -f "$dir/main.log"
+  else
+    echo -e "  ${GRAY}View a log:  ${CYAN}tail -f $dir/<phase>.log${RESET}"
+    echo -e "  ${GRAY}Or open:     ${CYAN}devloop view $id${RESET}  (requires tmux)"
+    echo ""
+    echo -e "  ${BOLD}Recent activity (main.log):${RESET}"
+    tail -20 "$dir/main.log" 2>/dev/null | sed 's/^/    /'
+    echo ""
+  fi
+}
+
 # ── cmd: architect ────────────────────────────────────────────────────────────
 
 cmd_architect() {
@@ -5389,12 +5733,23 @@ cmd_run() {
     exit 1
   fi
 
+  # ── Session init (now that we have the real task ID) ─────────────────────────
+  export DEVLOOP_CURRENT_SESSION_ID="$id"
+  _session_init "$id" "$feature"
+  _session_phase_end "architect" "done"
+  if [[ "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
+    local _sdir; _sdir="$(_session_dir "$id")"
+    echo -e "  ${GRAY}Session: ${CYAN}devloop session $id${RESET}"
+  fi
+
   success "Spec: ${CYAN}$id${RESET}"
   echo ""
 
   # ── Stage 2: Work ────────────────────────────────────────────────────────────
   step "🔨 [2] Implementing..."
+  _session_phase_start "worker"
   cmd_work "$id"
+  _session_phase_end "worker" "done"
   echo ""
 
   # ── Stage 3: Review + fix loop (3-phase escalation) ─────────────────────────
@@ -5409,10 +5764,12 @@ cmd_run() {
   while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
     if (( fix_round == 0 )); then
       step "🔍 [3] Reviewing..."
+      _session_phase_start "reviewer"
     else
       local phase_label="standard"
       (( fix_round > deep_threshold )) && phase_label="deep"
       step "🔍 Re-reviewing (fix $fix_round/$max_retries — $phase_label)..."
+      _session_phase_start "reviewer"
     fi
 
     cmd_review "$id"
@@ -5422,15 +5779,19 @@ cmd_run() {
 
     case "$verdict" in
       APPROVED)
+        _session_phase_end "reviewer" "approved"
         break
         ;;
       REJECTED)
+        _session_phase_end "reviewer" "rejected"
+        _session_finish "rejected"
         error "❌ REJECTED — pipeline stopped"
         echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}"
         echo -e "  ${GRAY}Review: ${CYAN}devloop status $id${RESET}"
         exit 1
         ;;
       NEEDS_WORK)
+        _session_phase_end "reviewer" "needs-work"
         unknown_round=0
         # Snapshot this review into history
         if [[ -f "$review_file" ]]; then
@@ -5445,6 +5806,7 @@ $(cat "$review_file")
           # ── Phase 3: Re-architect (escalate strategy only) ──────────────
           if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
             warn "⚠  Max fix retries ($max_retries) reached — escalating to re-architect phase"
+            _session_phase_start "respec"
             echo ""
             local combined_history=""
             local h
@@ -5452,8 +5814,11 @@ $(cat "$review_file")
               combined_history+="$h"$'\n'
             done
             if _run_respec_phase "$id" "$combined_history"; then
+              _session_phase_end "respec" "approved"
               verdict="APPROVED"
             else
+              _session_phase_end "respec" "needs-work"
+              _session_finish "needs-work"
               warn "Re-architect phase also could not get APPROVED"
               echo -e "  ${GRAY}Task needs manual review: ${CYAN}devloop status $id${RESET}"
               echo -e "  ${GRAY}Options:"
@@ -5463,6 +5828,7 @@ $(cat "$review_file")
             fi
             break
           else
+            _session_finish "needs-work"
             warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
             echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
             echo -e "  ${GRAY}Tip: ${CYAN}devloop run ... --no-respec${GRAY} disabled re-architect; remove it to enable${RESET}"
@@ -5471,6 +5837,8 @@ $(cat "$review_file")
         fi
 
         # ── Phase 1 or 2: standard vs deep fix ──────────────────────────
+        local fix_phase_name="fix-$fix_round"
+        _session_phase_start "$fix_phase_name"
         if (( fix_round <= deep_threshold )); then
           step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
           cmd_fix "$id"
@@ -5483,13 +5851,16 @@ $(cat "$review_file")
           done
           cmd_fix --history "$combined_history" "$id"
         fi
+        _session_phase_end "$fix_phase_name" "done"
         echo ""
         ;;
       *)
+        _session_phase_end "reviewer" "unknown"
         unknown_round=$(( unknown_round + 1 ))
         warn "Could not determine verdict from review output: $review_file"
         echo -e "  ${GRAY}Expected first non-empty line:${RESET} ${CYAN}Verdict: APPROVED|NEEDS_WORK|REJECTED${RESET}"
         if (( unknown_round >= max_unknown_retries )); then
+          _session_finish "error"
           error "Unknown verdict repeated ($unknown_round/$max_unknown_retries). Stopping to avoid infinite retry loop."
           echo -e "  ${GRAY}Fix:${RESET} Re-run reviewer with canonical verdict line, then run ${CYAN}devloop review $id${RESET}"
           exit 2
@@ -5506,10 +5877,14 @@ $(cat "$review_file")
     echo ""
   fi
 
+  _session_finish "approved"
   divider
   success "✅ Pipeline complete: ${CYAN}$id${RESET}"
   if (( fix_round > 0 )); then
     echo -e "  ${GRAY}Approved after $fix_round fix round(s)${RESET}"
+  fi
+  if [[ "${DEVLOOP_SESSION_LOGGING:-true}" == "true" ]]; then
+    echo -e "  ${GRAY}Session history: ${CYAN}devloop session $id${RESET}"
   fi
   echo ""
 }
@@ -5712,6 +6087,13 @@ cmd_help() {
   echo -e "    ${GRAY}list${RESET}                     — show pending tasks"
   echo -e "    ${GRAY}run [--stop-on-fail]${RESET}     — process all queued tasks"
   echo -e "    ${GRAY}clear${RESET}                    — empty the queue\n"
+  echo -e "  ${CYAN}devloop sessions [--last N] [--status STATUS]${RESET}"
+  echo -e "    List past pipeline runs with status, duration, and feature description\n"
+  echo -e "  ${CYAN}devloop session <task-id>${RESET}"
+  echo -e "    Show phase timeline and logs for a specific run\n"
+  echo -e "  ${CYAN}devloop view [task-id]${RESET}"
+  echo -e "    Open live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions panes"
+  echo -e "    Falls back to inline log tail if tmux not installed\n"
   echo -e "  ${CYAN}devloop start [project-name]${RESET}  ${GRAY}alias: s${RESET}"
   echo -e "    Launch provider session + orchestrator agent"
   echo -e "    Claude: remote-control (access from mobile/browser); Copilot: local interactive"
@@ -5860,6 +6242,19 @@ cmd_help() {
   echo -e "  ${CYAN}cli${RESET}            Use copilot or claude CLI locally (default)"
   echo -e "  ${CYAN}github-agent${RESET}   Create GitHub Issue; Copilot coding agent opens a PR"
   echo -e "  Set ${CYAN}DEVLOOP_WORKER_MODE${RESET} in devloop.config.sh\n"
+  echo -e "${BOLD}SESSION VIEWER${RESET}\n"
+  echo -e "  Every ${CYAN}devloop run${RESET} creates a session in ${CYAN}.devloop/sessions/<task-id>/${RESET}"
+  echo -e "  Each phase writes a log file: architect.log | worker.log | reviewer.log | fix-N.log\n"
+  echo -e "  ${CYAN}devloop sessions [--last N] [--status approved|running|needs-work]${RESET}"
+  echo -e "    List past pipeline runs with status, duration, and feature description\n"
+  echo -e "  ${CYAN}devloop session <task-id>${RESET}"
+  echo -e "    Show phase timeline, log file sizes, and tail the main log\n"
+  echo -e "  ${CYAN}devloop view [task-id]${RESET}"
+  echo -e "    Open a live tmux dashboard with 4 panes: Architect | Worker | Reviewer | Fix/Decisions"
+  echo -e "    Requires tmux (${CYAN}brew install tmux${RESET}). Falls back to inline log tail if not installed."
+  echo -e "    If already inside tmux, opens in a new session and switches to it\n"
+  echo -e "  ${BOLD}Config:${RESET} ${CYAN}DEVLOOP_SESSION_LOGGING=true${RESET}   enable/disable session logging"
+  echo -e "           ${CYAN}DEVLOOP_AUTO_VIEW=false${RESET}       auto-open tmux view on devloop run (v4.10+)\n"
 }
 
 # ── cmd: do — natural-language entry point ────────────────────────────────────
@@ -5921,6 +6316,9 @@ main() {
   fi
 
   case "$cmd" in
+    sessions)         cmd_sessions "$@" ;;
+    session)          cmd_session  "$@" ;;
+    view)             cmd_view     "$@" ;;
     do|ask|please|nl) cmd_do      "$@" ;;
     install)          cmd_install  "$@" ;;
     init)             cmd_init     "$@" ;;
