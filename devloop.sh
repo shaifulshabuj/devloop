@@ -218,6 +218,10 @@ GLOBAL_CONFIG_TEMPLATE
 LESSONS_TEMPLATE
   fi
 
+  # Clean up any stale devloop temp files left by crashed runs (e.g. literal XXXXXX files)
+  rm -f /tmp/devloop_task_*XXXXXX*.md /tmp/devloop_fix_*XXXXXX*.md \
+        /tmp/devloop_work_out_*XXXXXX /tmp/devloop_fix_out_*XXXXXX 2>/dev/null || true
+
   mkdir -p "$DEVLOOP_GLOBAL_DIR/logs"
 }
 
@@ -5142,12 +5146,16 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
   esac
 
   local tmp_spec
-  tmp_spec="$(mktemp /tmp/devloop_task_XXXXXX.md)"
+  # Use PID+RANDOM for guaranteed uniqueness; fall back to mktemp if needed
+  tmp_spec="/tmp/devloop_task_$$_${RANDOM}.md"
+  rm -f "$tmp_spec"   # remove any stale file at this path
+  : > "$tmp_spec"     # create atomically
   echo "$launch_prompt" > "$tmp_spec"
 
   local attempt_provider="$provider"
   while true; do
-    local tmp_out; tmp_out="$(mktemp /tmp/devloop_work_out_XXXXXX)"
+    local tmp_out; tmp_out="/tmp/devloop_work_out_$$_${RANDOM}"
+    rm -f "$tmp_out"; : > "$tmp_out"
     local rc=0
     case "$attempt_provider" in
       claude)
@@ -5434,7 +5442,8 @@ Summarize the changes made."
 
   local attempt_fix_provider="$provider"
   while true; do
-    local tmp_fix_out; tmp_fix_out="$(mktemp /tmp/devloop_fix_out_XXXXXX)"
+    local tmp_fix_out; tmp_fix_out="/tmp/devloop_fix_out_$$_${RANDOM}"
+    rm -f "$tmp_fix_out"; : > "$tmp_fix_out"
     local rc=0
     if [[ "$attempt_fix_provider" == "claude" ]]; then
       local _worker_tools="Read,Write,Edit,MultiEdit,Bash(git*),Bash(pytest*),Bash(npm*),Bash(yarn*),Bash(pnpm*),Bash(cargo*),Bash(go*),Bash(python*),Bash(make*),Bash(cat*),Bash(grep*),Bash(find*),Bash(ls*),Bash(mkdir*),Bash(mv*),Bash(cp*),Bash(rm -f*),Glob,LS"
@@ -5443,7 +5452,8 @@ Summarize the changes made."
         echo "$fix_prompt" | claude -p --model "$_worker_model" > "$tmp_fix_out" 2>&1 || rc=$?
       fi
     elif [[ "$attempt_fix_provider" == "opencode" ]]; then
-      local tmp_fix; tmp_fix="$(mktemp /tmp/devloop_fix_XXXXXX.md)"
+      local tmp_fix; tmp_fix="/tmp/devloop_fix_$$_${RANDOM}.md"
+      rm -f "$tmp_fix"
       echo "$fix_prompt" > "$tmp_fix"
       opencode run --file "$tmp_fix" "Fix the issues described in the attached file exactly. Stage all changed files and commit." 2>&1 | tee "$tmp_fix_out" || rc=$?
       rm -f "$tmp_fix"
