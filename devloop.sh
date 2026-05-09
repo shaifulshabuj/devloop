@@ -26,13 +26,15 @@
 
 set -euo pipefail
 
-VERSION="4.3.0"
+VERSION="4.4.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
 AGENTS_DIR=".claude/agents"
 CONFIG_FILE="devloop.config.sh"
-DEVLOOP_SOURCE_URL="${DEVLOOP_SOURCE_URL:-}"   # set to enable 'devloop update'
+# GitHub source — used by default for version checks and self-update (no config needed)
+DEVLOOP_GITHUB_REPO="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+DEVLOOP_SOURCE_URL="${DEVLOOP_SOURCE_URL:-}"   # override to use a custom script URL
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 CYAN='\033[0;36m'
@@ -470,23 +472,83 @@ effective_worker_provider() {
 
 # ── Version checking ──────────────────────────────────────────────────────────
 
-_check_version_bg() {
-  local url="${DEVLOOP_VERSION_URL:-}"
-  [[ -z "$url" ]] && return
-  local root; root="$(find_project_root)"
+# Fetch latest release version from GitHub API (no config required).
+# Prints the version string (e.g. "4.3.0") or empty string on failure.
+_gh_latest_version() {
+  local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+  local api_url="https://api.github.com/repos/$repo/releases/latest"
+  local tmp; tmp="$(mktemp /tmp/devloop-ghapi.XXXXXX)"
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$api_url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; echo ""; return; }
+  elif command -v wget &>/dev/null; then
+    wget -qO "$tmp" "$api_url" 2>/dev/null || { rm -f "$tmp"; echo ""; return; }
+  else
+    rm -f "$tmp"; echo ""; return
+  fi
+  local ver=""
+  if command -v python3 &>/dev/null; then
+    ver="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$tmp'))
+    print(d.get('tag_name','').lstrip('v'))
+except Exception:
+    pass
+" 2>/dev/null)"
+  else
+    ver="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$tmp" 2>/dev/null \
+      | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/' | head -1)"
+  fi
+  rm -f "$tmp"
+  echo "$ver"
+}
+
+# Returns the URL to download the latest devloop.sh from GitHub.
+_gh_script_url() {
+  local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+  echo "https://raw.githubusercontent.com/$repo/main/devloop.sh"
+}
+
+# Show the version hint banner if one is pending (non-blocking, safe to call anywhere).
+_maybe_show_version_hint() {
+  local root; root="$(find_project_root 2>/dev/null || echo ".")"
   local hint_file="$root/$DEVLOOP_DIR/.version-hint"
-  (
-    local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
-    elif command -v wget &>/dev/null; then
-      wget -qO "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; exit 0; }
-    else
-      rm -f "$tmp"; exit 0
-    fi
-    local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
-    rm -f "$tmp"
+  if [[ -f "$hint_file" ]]; then
+    local remote_ver; remote_ver="$(cat "$hint_file" 2>/dev/null | tr -d '[:space:]')"
+    rm -f "$hint_file"
     if [[ -n "$remote_ver" && "$remote_ver" != "$VERSION" ]]; then
+      warn "DevLoop ${GREEN}v${remote_ver}${RESET} available (you have v${VERSION}) — run ${CYAN}devloop update${RESET}"
+      echo ""
+    fi
+  fi
+  # Also fire off a fresh background probe so the hint is ready next time
+  _check_version_bg
+}
+
+_check_version_bg() {
+  local root; root="$(find_project_root 2>/dev/null || echo ".")"
+  local hint_file="$root/$DEVLOOP_DIR/.version-hint"
+  local url="${DEVLOOP_VERSION_URL:-}"
+  (
+    local remote_ver=""
+    if [[ -n "$url" ]]; then
+      # Custom VERSION file (plain semver text)
+      local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+      if command -v curl &>/dev/null; then
+        curl -fsSL "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+      elif command -v wget &>/dev/null; then
+        wget -qO "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+      else
+        rm -f "$tmp"; exit 0
+      fi
+      remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+      rm -f "$tmp"
+    else
+      # Default: GitHub releases API
+      remote_ver="$(_gh_latest_version 2>/dev/null)"
+    fi
+    if [[ -n "$remote_ver" && "$remote_ver" != "$VERSION" ]]; then
+      mkdir -p "$(dirname "$hint_file")"
       echo "$remote_ver" > "$hint_file"
     fi
   ) >/dev/null 2>&1 &
@@ -494,33 +556,39 @@ _check_version_bg() {
 
 cmd_check() {
   load_config
-  local url="${DEVLOOP_VERSION_URL:-}"
-  if [[ -z "$url" ]]; then
-    warn "DEVLOOP_VERSION_URL not configured"
-    echo ""
-    echo -e "${BOLD}To enable version checks, add to devloop.config.sh:${RESET}"
-    echo -e "  ${CYAN}DEVLOOP_VERSION_URL=\"https://raw.githubusercontent.com/you/devloop/main/VERSION\"${RESET}"
-    echo ""
-    echo -e "The VERSION file should contain a single semver line, e.g.: ${GRAY}3.0.0${RESET}"
-    return
-  fi
   step "🔍 Checking for DevLoop updates..."
-  local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
-  if command -v curl &>/dev/null; then
-    curl -fsSL "$url" -o "$tmp" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
-  elif command -v wget &>/dev/null; then
-    wget -qO "$tmp" "$url" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
+  info "Local:  ${BOLD}v$VERSION${RESET}"
+  echo ""
+
+  local remote_ver=""
+  local url="${DEVLOOP_VERSION_URL:-}"
+
+  if [[ -n "$url" ]]; then
+    info "Source: custom URL (${GRAY}$url${RESET})"
+    local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$url" -o "$tmp" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
+    elif command -v wget &>/dev/null; then
+      wget -qO "$tmp" "$url" 2>/dev/null || { warn "Could not reach $url"; rm -f "$tmp"; return; }
+    else
+      error "Neither curl nor wget found"; rm -f "$tmp"; return
+    fi
+    remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+    rm -f "$tmp"
   else
-    error "Neither curl nor wget found"; rm -f "$tmp"; return
+    local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+    info "Source: GitHub releases (${GRAY}$repo${RESET})"
+    remote_ver="$(_gh_latest_version)"
   fi
-  local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
-  rm -f "$tmp"
+
+  echo ""
   if [[ -z "$remote_ver" ]]; then
-    warn "Could not read version from manifest at: $url"
+    warn "Could not determine remote version — check your internet connection"
     return
   fi
+
   if [[ "$remote_ver" == "$VERSION" ]]; then
-    success "Up to date — ${BOLD}v$VERSION${RESET}"
+    success "Up to date — ${BOLD}v$VERSION${RESET} ✅"
   else
     warn "Update available: ${BOLD}v$VERSION${RESET} → ${GREEN}v$remote_ver${RESET}"
     echo -e "  Run: ${CYAN}devloop update${RESET}"
@@ -1598,28 +1666,34 @@ cmd_doctor() {
   done
   [[ "$any_stale" == "true" ]] && echo -e "     ${GRAY}→ devloop agent-sync${RESET}"
 
-  # Version check
-  if [[ -n "${DEVLOOP_VERSION_URL:-}" ]]; then
-    local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
-    ok="false"
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$DEVLOOP_VERSION_URL" -o "$tmp" 2>/dev/null && ok="true"
+  # Version check — uses GitHub by default, no config required
+  {
+    local remote_ver
+    if [[ -n "${DEVLOOP_VERSION_URL:-}" ]]; then
+      # Custom VERSION URL
+      local tmp; tmp="$(mktemp /tmp/devloop-ver.XXXXXX)"
+      if command -v curl &>/dev/null && curl -fsSL "$DEVLOOP_VERSION_URL" -o "$tmp" 2>/dev/null; then
+        remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
+        rm -f "$tmp"
+      else
+        rm -f "$tmp"
+        _chk "version check (custom URL unreachable)" "false" "Check DEVLOOP_VERSION_URL"
+        remote_ver=""
+      fi
+    else
+      # Default: GitHub releases API (non-blocking — skip if slow)
+      remote_ver="$( timeout 8 bash -c '_gh_latest_version 2>/dev/null' 2>/dev/null || echo "" )"
     fi
-    if [[ "$ok" == "true" ]]; then
-      local remote_ver; remote_ver="$(head -1 "$tmp" | tr -d '[:space:]')"
-      rm -f "$tmp"
+    if [[ -n "$remote_ver" ]]; then
       if [[ "$remote_ver" == "$VERSION" ]]; then
         _chk "version up to date (v$VERSION)" "true"
       else
         _chk "version up to date (local: v$VERSION, remote: v$remote_ver)" "false" "devloop update"
       fi
     else
-      rm -f "$tmp"
-      _chk "version check (URL unreachable)" "false" "Check DEVLOOP_VERSION_URL in config"
+      echo -e "  ${GRAY}—  version check skipped (no network or GitHub unreachable)${RESET}"
     fi
-  else
-    echo -e "  ${GRAY}—  version check skipped (DEVLOOP_VERSION_URL not set)${RESET}"
-  fi
+  }
 
   divider
   echo ""
@@ -2116,10 +2190,11 @@ DEVLOOP_WORKER_MODE="cli"
 # "sonnet" = faster/cheaper   "opus" = more capable
 CLAUDE_MODEL="sonnet"
 
-# Optional: URL to a VERSION file (single semver line) for update checks
+# Version checks and self-update use GitHub by default (no config needed).
+# DEVLOOP_GITHUB_REPO="shaifulshabuj/devloop"   # override to use a fork
+# Override with a custom VERSION file URL (plain semver text):
 # DEVLOOP_VERSION_URL="https://raw.githubusercontent.com/you/devloop/main/VERSION"
-
-# Optional: set to enable 'devloop update'
+# Override with a custom script URL for 'devloop update':
 # DEVLOOP_SOURCE_URL="https://raw.githubusercontent.com/you/devloop/main/devloop.sh"
 CONFIG
 }
@@ -2480,11 +2555,19 @@ devloop start
 ```
 Then connect from claude.ai/code or the Claude mobile app.
 
-## DevLoop commands
+## DevLoop commands — Quick (full pipeline in one shot)
+- `devloop run "feature"`       — **full pipeline**: architect → work → review → fix loop → learn
+- `devloop go  "feature"`       — alias for run
+- `devloop queue add "task"`    — add to batch queue
+- `devloop queue run`           — process all queued tasks sequentially
+
+## DevLoop commands — Step-by-step
 - `devloop architect "feature"` — design a spec
 - `devloop work [TASK-ID]`      — launch worker to implement
 - `devloop review [TASK-ID]`    — review implementation
 - `devloop fix [TASK-ID]`       — launch worker with fix instructions
+
+## DevLoop commands — Management
 - `devloop tasks`               — list all specs
 - `devloop status [TASK-ID]`    — show spec + review
 - `devloop open [TASK-ID]`      — open spec in $EDITOR
@@ -2496,8 +2579,8 @@ Then connect from claude.ai/code or the Claude mobile app.
 - `devloop logs [TYPE]`         — show pipeline/notification/session logs
 - `devloop doctor`              — validate dependencies and configuration
 - `devloop ci`                  — generate GitHub Actions review workflow
-- `devloop check`               — check for DevLoop updates
-- `devloop update`              — self-upgrade devloop
+- `devloop check`               — check for DevLoop updates (works out-of-the-box)
+- `devloop update`              — self-upgrade devloop (pulls from GitHub, refreshes project configs)
 
 ## Agent Provider Context
 _See `.devloop/agent-docs/provider-context.md` for the full provider reference._
@@ -2726,16 +2809,8 @@ cmd_start() {
   divider
   echo ""
 
-  # Non-blocking version check — result shown on next start if update exists
-  _check_version_bg
-  local root; root="$(find_project_root)"
-  local hint_file="$root/$DEVLOOP_DIR/.version-hint"
-  if [[ -f "$hint_file" ]]; then
-    local remote_ver; remote_ver="$(cat "$hint_file")"
-    rm -f "$hint_file"
-    warn "DevLoop ${GREEN}v${remote_ver}${RESET} available — run ${CYAN}devloop update${RESET}"
-    echo ""
-  fi
+  # Show any pending update hint + fire background probe for next time
+  _maybe_show_version_hint
 
   echo -e "${BOLD}Launching:${RESET}"
   echo -e "  ${CYAN}--remote-control${RESET}      accessible from mobile + browser"
@@ -3797,22 +3872,19 @@ cmd_update() {
 
   local url="${DEVLOOP_SOURCE_URL:-}"
 
+  # Default: use the GitHub repo (no config needed)
   if [[ -z "$url" ]]; then
-    error "DEVLOOP_SOURCE_URL is not configured."
-    echo ""
-    echo -e "${BOLD}To enable self-updates, add to devloop.config.sh:${RESET}"
-    echo -e "  ${CYAN}DEVLOOP_SOURCE_URL=\"https://raw.githubusercontent.com/you/devloop/main/devloop.sh\"${RESET}"
-    echo ""
-    echo -e "Or pass it inline:"
-    echo -e "  ${CYAN}DEVLOOP_SOURCE_URL=\"...\" devloop update${RESET}"
-    exit 1
+    url="$(_gh_script_url)"
+    local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+    info "Source: GitHub (${GRAY}$repo${RESET})"
+  else
+    info "Source: custom URL (${GRAY}$url${RESET})"
   fi
 
   local current_version="$VERSION"
   local tmp_file; tmp_file="$(mktemp /tmp/devloop-update.XXXXXX)"
 
   step "🔄 Updating devloop..."
-  info "Source: ${GRAY}$url${RESET}"
   echo ""
 
   if command -v curl &>/dev/null; then
@@ -3836,7 +3908,7 @@ cmd_update() {
   if [[ -z "$new_version" ]]; then
     warn "Could not determine new version number — proceeding anyway"
   elif [[ "$new_version" == "$current_version" ]]; then
-    success "Already up to date (v$current_version)"
+    success "Already up to date (v$current_version) ✅"
     rm -f "$tmp_file"
     return
   else
@@ -3853,7 +3925,89 @@ cmd_update() {
   fi
 
   rm -f "$tmp_file"
-  success "Updated to ${GREEN}v${new_version:-unknown}${RESET} at ${CYAN}$install_target${RESET}"
+  success "Installed devloop ${GREEN}v${new_version:-unknown}${RESET} → ${CYAN}$install_target${RESET}"
+  echo ""
+
+  # ── Refresh project configs for the new version ────────────────────────────
+  _refresh_project_for_version "${new_version:-$current_version}"
+}
+
+# Refresh project-level devloop config files after a version upgrade.
+# Safe to re-run: hooks are idempotent, CLAUDE.md managed block is updated
+# in place (user content outside the managed block is preserved).
+_refresh_project_for_version() {
+  local new_ver="${1:-}"
+  local root; root="$(find_project_root 2>/dev/null || echo "")"
+
+  # Only refresh if we are inside an initialized devloop project
+  if [[ -z "$root" ]] || [[ ! -f "$root/$CONFIG_FILE" ]]; then
+    info "Not inside a devloop project — skipping project config refresh"
+    info "Run ${CYAN}devloop init${RESET} in a project directory to set up."
+    return
+  fi
+
+  step "🔧 Refreshing project configs for v${new_ver}..."
+  echo ""
+
+  # 1. Refresh Claude hook scripts (devloop-permission.sh, devloop-audit.sh)
+  if [[ -f "$root/.claude/settings.json" ]]; then
+    info "Refreshing Claude hooks..."
+    cmd_hooks 2>/dev/null && success "  ✓ Hooks updated (.claude/hooks/)" || warn "  Hook refresh failed (run: devloop hooks)"
+    echo ""
+  fi
+
+  # 2. Refresh devloop agent markdown files
+  if ls "$root/$AGENTS_DIR/devloop-"*.md &>/dev/null 2>&1; then
+    info "Refreshing devloop agent prompts..."
+    local agents_updated=0
+    # Re-write each agent file by re-running init agent section
+    # We call init with --agents-only flag awareness, or do it manually
+    for agent_src in orchestrator architect reviewer; do
+      local agent_file="$root/$AGENTS_DIR/devloop-${agent_src}.md"
+      if [[ -f "$agent_file" ]]; then
+        # Extract the prompt generation function name
+        local gen_fn="_write_agent_${agent_src}_prompt"
+        if declare -f "$gen_fn" &>/dev/null; then
+          "$gen_fn" "$root" 2>/dev/null && agents_updated=$(( agents_updated + 1 )) || true
+        fi
+      fi
+    done
+    if (( agents_updated > 0 )); then
+      success "  ✓ Agent prompts refreshed ($agents_updated files)"
+    else
+      info "  Agent prompt functions not found — run ${CYAN}devloop init${RESET} to refresh"
+    fi
+    echo ""
+  fi
+
+  # 3. Update the DevLoop-managed block in CLAUDE.md (commands list may have changed)
+  if [[ -f "$root/CLAUDE.md" ]]; then
+    info "Refreshing CLAUDE.md managed block..."
+    local managed_block; managed_block="$(_render_claude_managed_block)"
+    _upsert_managed_block "$root/CLAUDE.md" \
+      "<!-- DEVLOOP:CLAUDE:START -->" \
+      "<!-- DEVLOOP:CLAUDE:END -->" \
+      "$managed_block" 2>/dev/null \
+      && success "  ✓ CLAUDE.md updated" \
+      || warn "  CLAUDE.md update failed (run: devloop init)"
+    echo ""
+  fi
+
+  # 4. Merge any new config keys into devloop.config.sh
+  if [[ -f "$root/$CONFIG_FILE" ]]; then
+    info "Checking devloop.config.sh for new keys..."
+    local added_keys; added_keys="$(_merge_devloop_config_defaults "$root/$CONFIG_FILE" 2>/dev/null || echo 0)"
+    if (( added_keys > 0 )); then
+      success "  ✓ Added $added_keys new config key(s) to devloop.config.sh"
+    else
+      success "  ✓ devloop.config.sh is up to date"
+    fi
+    echo ""
+  fi
+
+  divider
+  success "Project configs refreshed for devloop v${new_ver} ✅"
+  echo -e "  ${GRAY}Run ${CYAN}devloop doctor${RESET}${GRAY} to validate everything is working${RESET}"
   echo ""
 }
 
@@ -4626,6 +4780,7 @@ cmd_run() {
   load_config
   ensure_dirs
   check_deps
+  _maybe_show_version_hint
 
   step "🚀 Full pipeline: ${BOLD}\"$feature\"${RESET}"
   echo -e "  ${GRAY}Stages: arch → work → review → [fix loop ×$max_retries max]${RESET}"
@@ -4967,7 +5122,7 @@ cmd_help() {
   echo -e "    ${GRAY}main/worker <provider>${RESET}   — force a manual override"
   echo -e "    Auto-chain: main claude→copilot, worker copilot→opencode→pi\n"
   echo -e "  ${CYAN}devloop check${RESET}"
-  echo -e "    Check for available DevLoop updates (requires DEVLOOP_VERSION_URL)\n"
+  echo -e "    Check for the latest DevLoop version on GitHub (no config needed)\n"
   echo -e "  ${CYAN}devloop hooks${RESET}"
   echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)"
   echo -e "    Includes: PreToolUse permission hook + PostToolUse audit hook\n"
@@ -4993,7 +5148,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop --version${RESET} ${GRAY}or${RESET} ${CYAN}devloop -v${RESET}"
   echo -e "    Print installed DevLoop version\n"
   echo -e "  ${CYAN}devloop update${RESET}"
-  echo -e "    Self-upgrade devloop (requires DEVLOOP_SOURCE_URL in devloop.config.sh)\n"
+  echo -e "    Self-upgrade devloop from GitHub (no config needed) + refresh project configs\n"
   echo -e "${BOLD}SETUP (one-time)${RESET}\n"
   echo -e "  ${GRAY}# Install devloop globally${RESET}"
   echo -e "  ${CYAN}curl -fsSL https://your-host/devloop -o /tmp/devloop${RESET}"

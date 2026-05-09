@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.4.0] — 2026-05-10
+
+### Added
+- **GitHub-native version checking** — `devloop check` and `devloop update` now work out-of-the-box with no configuration. Uses the GitHub Releases API (`/releases/latest`) automatically; `DEVLOOP_VERSION_URL` / `DEVLOOP_SOURCE_URL` are still honoured as overrides.
+- **`DEVLOOP_GITHUB_REPO`** built-in default (`shaifulshabuj/devloop`) — forks can override this single variable to point all version/update machinery at their own repo.
+- **`_gh_latest_version()`** — queries GitHub releases API and extracts semver; uses `python3` JSON parsing with a `grep` fallback.
+- **Version hint banner** — `devloop start` and `devloop run` now show a non-blocking update notice the next time they run after a new release is detected in the background.
+- **`_refresh_project_for_version()`** — after `devloop update`, automatically refreshes Claude hooks, agent prompt files, the `CLAUDE.md` managed block, and merges any new default config keys into `devloop.config.sh`. Safe to re-run (idempotent).
+- **Updated `devloop doctor` version check** — uses GitHub API by default; no longer skips with "DEVLOOP_VERSION_URL not set" message.
+- **`cmd_help` improvements** — `check` and `update` descriptions now accurately state no config is required.
+
+### Fixed
+- Stray extra `}` in `cmd_check()` body (syntax error from prior refactor).
+- `cmd_update` config template comments updated to reflect that URL overrides are optional, not required.
+
+---
+
 ## [4.3.0] — 2026-05-09
 
 ### Added
