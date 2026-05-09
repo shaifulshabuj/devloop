@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.6.1"
+VERSION="4.6.2"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -475,9 +475,18 @@ effective_worker_provider() {
 # ── Version checking ──────────────────────────────────────────────────────────
 
 # Fetch latest release version from GitHub API (no config required).
+# Prefers gh CLI (authenticated, works for private repos); falls back to curl.
 # Prints the version string (e.g. "4.3.0") or empty string on failure.
 _gh_latest_version() {
   local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+  local ver=""
+  # Prefer gh CLI — authenticated, works for both public and private repos
+  if command -v gh &>/dev/null; then
+    ver="$(gh api "repos/$repo/releases/latest" --jq '.tag_name' 2>/dev/null \
+      | tr -d '[:space:]' | sed 's/^v//')"
+    [[ -n "$ver" ]] && { echo "$ver"; return; }
+  fi
+  # Fallback: unauthenticated curl/wget (public repos only)
   local api_url="https://api.github.com/repos/$repo/releases/latest"
   local tmp; tmp="$(mktemp /tmp/devloop-ghapi.XXXXXX)"
   if command -v curl &>/dev/null; then
@@ -487,7 +496,6 @@ _gh_latest_version() {
   else
     rm -f "$tmp"; echo ""; return
   fi
-  local ver=""
   if command -v python3 &>/dev/null; then
     ver="$(python3 -c "
 import json, sys
@@ -4192,11 +4200,10 @@ cmd_update() {
   load_config
 
   local url="${DEVLOOP_SOURCE_URL:-}"
+  local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
 
   # Default: use the GitHub repo (no config needed)
   if [[ -z "$url" ]]; then
-    url="$(_gh_script_url)"
-    local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
     info "Source: GitHub (${GRAY}$repo${RESET})"
   else
     info "Source: custom URL (${GRAY}$url${RESET})"
@@ -4208,13 +4215,37 @@ cmd_update() {
   step "🔄 Updating devloop..."
   echo ""
 
-  if command -v curl &>/dev/null; then
-    curl -fsSL "$url" -o "$tmp_file" || { error "Download failed from: $url"; rm -f "$tmp_file"; exit 1; }
-  elif command -v wget &>/dev/null; then
-    wget -qO "$tmp_file" "$url"      || { error "Download failed from: $url"; rm -f "$tmp_file"; exit 1; }
-  else
-    error "Neither curl nor wget found — cannot download update"
-    rm -f "$tmp_file"; exit 1
+  local _downloaded="false"
+
+  # If no custom URL, try gh release download first (works for private repos)
+  if [[ -z "$url" ]] && command -v gh &>/dev/null; then
+    local latest_tag
+    latest_tag="$(gh api "repos/$repo/releases/latest" --jq '.tag_name' 2>/dev/null)"
+    if [[ -n "$latest_tag" ]]; then
+      local dl_dir; dl_dir="$(mktemp -d /tmp/devloop-dl.XXXXXX)"
+      if gh release download "$latest_tag" --repo "$repo" \
+          --pattern "devloop.sh" --dir "$dl_dir" 2>/dev/null \
+          && [[ -f "$dl_dir/devloop.sh" ]]; then
+        cp "$dl_dir/devloop.sh" "$tmp_file"
+        rm -rf "$dl_dir"
+        _downloaded="true"
+      else
+        rm -rf "$dl_dir"
+      fi
+    fi
+  fi
+
+  # Fall back to curl/wget (works for public repos or custom URLs)
+  if [[ "$_downloaded" != "true" ]]; then
+    [[ -z "$url" ]] && url="$(_gh_script_url)"
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$url" -o "$tmp_file" || { error "Download failed from: $url"; rm -f "$tmp_file"; exit 1; }
+    elif command -v wget &>/dev/null; then
+      wget -qO "$tmp_file" "$url"      || { error "Download failed from: $url"; rm -f "$tmp_file"; exit 1; }
+    else
+      error "Neither gh, curl, nor wget found — cannot download update"
+      rm -f "$tmp_file"; exit 1
+    fi
   fi
 
   # Basic sanity check — must look like a devloop script

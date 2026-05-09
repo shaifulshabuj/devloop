@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.2] — 2026-05-09
+
+### Fixed
+- `devloop check` / `devloop update`: version check and script download now use
+  `gh api` / `gh release download` (authenticated) when `gh` CLI is available —
+  fixes "Could not determine remote version" on **private repos** where unauthenticated
+  `curl` gets a 404 from GitHub API. Falls back to curl for public repos.
+
+---
+
 ## [4.6.1] — 2026-05-09
 
 ### Fixed
