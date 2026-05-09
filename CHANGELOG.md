@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.17.0] — 2026-05-10
+
+### Added
+- **`devloop init --merge`**: safe re-init that only adds missing config keys from the latest
+  devloop version — does not overwrite existing values or re-run the wizard.
+- **Update propagation**: after `devloop update` installs a new binary, automatically iterates
+  all registered projects in `~/.devloop/projects.json` and merges new config keys into each
+  project's `devloop.config.sh` (respects `DEVLOOP_AUTO_MERGE=false` to skip per-project).
+- **Help text**: `devloop init --merge` documented.
+
+---
+
 ## [4.16.0] — 2026-05-10
 
 ### Added

@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.16.0"
+VERSION="4.17.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -3110,13 +3110,16 @@ CLAUDEMD
 
 cmd_init() {
   # Parse flags: --yes/-y skips wizard; --configure/-c forces wizard even if config exists
+  # --merge: only add missing config keys (non-destructive re-init)
   local skip_wizard="false"
   local force_wizard="false"
+  local merge_only="false"
   local _args=()
   for _a in "$@"; do
     case "$_a" in
       --yes|-y)        skip_wizard="true" ;;
       --configure|-c)  force_wizard="true" ;;
+      --merge)         merge_only="true"; skip_wizard="true" ;;
       *)               _args+=("$_a") ;;
     esac
   done
@@ -3124,6 +3127,11 @@ cmd_init() {
 
   load_config
   ensure_dirs
+
+  if [[ "$merge_only" == "true" ]]; then
+    _cmd_init_merge
+    return
+  fi
 
   step "Initializing DevLoop in: ${CYAN}$(basename "$(find_project_root)")${RESET}"
   divider
@@ -5756,6 +5764,9 @@ cmd_update() {
 
   # ── Refresh project configs for the new version ────────────────────────────
   _refresh_project_for_version "${new_version:-$current_version}"
+
+  # ── Propagate new config keys to all registered projects ───────────────────
+  _propagate_update_to_registered_projects "${new_version:-$current_version}"
 }
 
 # Refresh project-level devloop config files after a version upgrade.
@@ -5834,6 +5845,113 @@ _refresh_project_for_version() {
   divider
   success "Project configs refreshed for devloop v${new_ver} ✅"
   echo -e "  ${GRAY}Run ${CYAN}devloop doctor${RESET}${GRAY} to validate everything is working${RESET}"
+  echo ""
+}
+
+# Merge-only init: add missing config keys to devloop.config.sh without touching other files
+_cmd_init_merge() {
+  local root; root="$(find_project_root 2>/dev/null || echo "")"
+  if [[ -z "$root" ]] || [[ ! -f "$root/$CONFIG_FILE" ]]; then
+    error "No devloop.config.sh found. Run ${CYAN}devloop init${RESET} first."
+    exit 1
+  fi
+
+  step "🔀 Merging new config keys into: ${CYAN}$(basename "$root")${RESET}"
+  divider
+
+  local added_keys; added_keys="$(_merge_devloop_config_defaults "$root/$CONFIG_FILE" 2>/dev/null || echo 0)"
+  if (( added_keys > 0 )); then
+    success "Added ${BOLD}$added_keys${RESET} new config key(s) to ${CYAN}devloop.config.sh${RESET}"
+    echo -e "  ${GRAY}Review and configure them: ${CYAN}devloop configure${RESET}"
+  else
+    success "devloop.config.sh is already up to date ✅"
+  fi
+  echo ""
+}
+
+# After a binary update: offer to propagate new config keys to all registered projects
+_propagate_update_to_registered_projects() {
+  local new_ver="${1:-}"
+  local registry="$DEVLOOP_GLOBAL_DIR/projects.json"
+  [[ -f "$registry" ]] || return 0
+
+  local project_count
+  project_count="$(python3 -c "
+import json
+try:
+    d = json.load(open('$registry'))
+    print(len(d))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)"
+
+  (( project_count == 0 )) && return 0
+
+  # Skip propagation if auto-merge disabled globally
+  if [[ "${DEVLOOP_AUTO_MERGE:-true}" == "false" ]]; then
+    info "Skipping project propagation (DEVLOOP_AUTO_MERGE=false)"
+    return 0
+  fi
+
+  echo ""
+  step "📡 Propagating config keys to ${BOLD}$project_count${RESET} registered project(s)..."
+  echo ""
+
+  local current_dir="$PWD"
+
+  python3 - <<PYEOF
+import json, os, subprocess, sys
+try:
+    projects = json.load(open('$registry'))
+except Exception:
+    sys.exit(0)
+for p in projects:
+    path = p.get('path', '')
+    name = p.get('name', os.path.basename(path))
+    config = os.path.join(path, 'devloop.config.sh')
+    if not path or not os.path.isfile(config):
+        continue
+    print(f"  {path}")
+PYEOF
+
+  while IFS= read -r proj_path; do
+    proj_path="${proj_path#  }"  # strip leading spaces
+    [[ -z "$proj_path" ]] && continue
+    local proj_name; proj_name="$(basename "$proj_path")"
+    local proj_config="$proj_path/$CONFIG_FILE"
+
+    if [[ "$proj_path" == "$current_dir" ]] || [[ "$proj_path" == "$(find_project_root 2>/dev/null)" ]]; then
+      # Already handled by _refresh_project_for_version
+      echo -e "  ${GRAY}↳ $proj_name — skipped (current project)${RESET}"
+      continue
+    fi
+
+    if [[ "${DEVLOOP_AUTO_MERGE:-true}" == "false" ]]; then
+      echo -e "  ${YELLOW}↳ $proj_name — skipped (DEVLOOP_AUTO_MERGE=false)${RESET}"
+      continue
+    fi
+
+    local added; added="$(cd "$proj_path" && _merge_devloop_config_defaults "$proj_config" 2>/dev/null || echo 0)"
+    if (( added > 0 )); then
+      echo -e "  ${GREEN}✓${RESET} $proj_name — merged $added new key(s)"
+    else
+      echo -e "  ${GRAY}✓ $proj_name — already up to date${RESET}"
+    fi
+  done < <(python3 - <<PYEOF
+import json, os
+try:
+    projects = json.load(open('$registry'))
+except Exception:
+    import sys; sys.exit(0)
+for p in projects:
+    path = p.get('path', '')
+    config = os.path.join(path, 'devloop.config.sh')
+    if path and os.path.isfile(config):
+        print(f"  {path}")
+PYEOF
+)
+  echo ""
+  success "Update propagation complete ✅"
   echo ""
 }
 
@@ -7131,7 +7249,10 @@ cmd_help() {
   echo -e "  ${CYAN}devloop init [--yes|-y] [--configure|-c]${RESET}"
   echo -e "    Set up DevLoop in current project (auto-analyzes stack/config from project files)"
   echo -e "    Runs interactive setup wizard on first init. Use ${GRAY}--yes${RESET} to skip wizard."
-  echo -e "    Use ${GRAY}--configure${RESET} to re-run the wizard on an existing project.\n"
+  echo -e "    Use ${GRAY}--configure${RESET} to re-run the wizard on an existing project."
+  echo -e "  ${CYAN}devloop init --merge${RESET}"
+  echo -e "    Safe re-init: only add missing config keys from the latest devloop version"
+  echo -e "    Does NOT overwrite existing values or re-run the wizard.\n"
   echo -e "  ${CYAN}devloop configure${RESET}  ${GRAY}aliases: setup, wizard${RESET}"
   echo -e "    Re-run the interactive setup wizard to change providers, models, and permissions"
   echo -e "    Updates devloop.config.sh and regenerates agent prompt files."
