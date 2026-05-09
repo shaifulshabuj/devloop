@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="4.6.2"
+VERSION="4.6.3"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -5420,6 +5420,10 @@ cmd_queue() {
 
 cmd_help() {
   echo -e "${BOLD}COMMANDS${RESET}\n"
+  echo -e "  ${CYAN}devloop do \"<natural language task>\"${RESET}  ${GRAY}aliases: ask, please, nl${RESET}"
+  echo -e "    Run any task described in plain English — no quoting needed for unambiguous phrases"
+  echo -e "    ${GRAY}Equivalent to: devloop run \"...\", but handles short sentences and avoids command conflicts${RESET}"
+  echo -e "    ${GRAY}Example: devloop do check the latest progress and work on remaining tasks${RESET}\n"
   echo -e "  ${CYAN}devloop install${RESET}"
   echo -e "    Install devloop to /usr/local/bin (run once)\n"
   echo -e "  ${CYAN}devloop init [--yes|-y] [--configure|-c]${RESET}"
@@ -5571,6 +5575,30 @@ cmd_help() {
   echo -e "  Set ${CYAN}DEVLOOP_WORKER_MODE${RESET} in devloop.config.sh\n"
 }
 
+# ── cmd: do — natural-language entry point ────────────────────────────────────
+# Accepts free-text without quoting conflicts (e.g. devloop do check the status)
+# Joins all args into one sentence and passes to cmd_run.
+
+cmd_do() {
+  if [[ $# -eq 0 ]]; then
+    error "Usage: devloop do \"<natural language task>\""
+    echo -e "  ${GRAY}Example: ${CYAN}devloop do check the latest progress and work on remaining tasks${RESET}"
+    echo -e "  ${GRAY}Example: ${CYAN}devloop do review the codebase and fix any bugs you find${RESET}"
+    exit 1
+  fi
+  load_config
+  ensure_dirs
+  check_deps
+  _maybe_show_version_hint
+
+  # Join all args into a single task description
+  local _task="$*"
+  step "🗣  Natural language task: ${BOLD}\"$_task\"${RESET}"
+  divider
+  echo ""
+  cmd_run "$_task"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
@@ -5584,48 +5612,70 @@ main() {
 
   header
 
+  # ── Natural-language pre-detection ─────────────────────────────────────────
+  # When a "utility" command (that takes no positional args) is followed by
+  # plain-English words (not flags or task IDs), treat the whole thing as NL.
+  # e.g. "devloop check the latest progress..." → cmd_do instead of cmd_check
+  local _zero_arg_cmds=" check update status doctor agent-sync sync-agents agentsync logs clean ci tools failover hooks start daemon tasks "
+  if [[ " $_zero_arg_cmds " == *" $cmd "* ]] && [[ $# -gt 0 ]]; then
+    local _has_flag=false _has_task_id=false _a
+    for _a in "$@"; do
+      [[ "$_a" == -* ]]        && { _has_flag=true;    break; }
+      [[ "$_a" == TASK-* ]]    && { _has_task_id=true; break; }
+    done
+    if [[ "$_has_flag" == "false" ]] && [[ "$_has_task_id" == "false" ]]; then
+      local _nl_input="$cmd $*"
+      info "Interpreted as natural language — routing to pipeline"
+      echo -e "  ${GRAY}Tip: ${CYAN}devloop do $cmd $*${GRAY} to be explicit next time${RESET}"
+      echo ""
+      cmd_do "$cmd" "$@"
+      return
+    fi
+  fi
+
   case "$cmd" in
-    install)      cmd_install   "$@" ;;
-    init)         cmd_init      "$@" ;;
+    do|ask|please|nl) cmd_do      "$@" ;;
+    install)          cmd_install  "$@" ;;
+    init)             cmd_init     "$@" ;;
     configure|setup|wizard) cmd_configure "$@" ;;
-    start|s)      cmd_start     "$@" ;;
-    daemon|d)     cmd_daemon    "$@" ;;
-    run|go)       cmd_run       "$@" ;;
-    queue|q)      cmd_queue     "$@" ;;
-    architect|a)  cmd_architect "$@" ;;
-    work|w)       cmd_work      "$@" ;;
-    review|r)     cmd_review    "$@" ;;
-    fix|f)        cmd_fix       "$@" ;;
-    tasks|t)      cmd_tasks     "$@" ;;
-    status)       cmd_status    "$@" ;;
-    open|o)       cmd_open      "$@" ;;
-    block|b)      cmd_block     "$@" ;;
-    clean)        cmd_clean     "$@" ;;
-    learn)        cmd_learn     "$@" ;;
-    check)        cmd_check     "$@" ;;
+    start|s)          cmd_start    "$@" ;;
+    daemon|d)         cmd_daemon   "$@" ;;
+    run|go)           cmd_run      "$@" ;;
+    queue|q)          cmd_queue    "$@" ;;
+    architect|a)      cmd_architect "$@" ;;
+    work|w)           cmd_work     "$@" ;;
+    review|r)         cmd_review   "$@" ;;
+    fix|f)            cmd_fix      "$@" ;;
+    tasks|t)          cmd_tasks    "$@" ;;
+    status)           cmd_status   "$@" ;;
+    open|o)           cmd_open     "$@" ;;
+    block|b)          cmd_block    "$@" ;;
+    clean)            cmd_clean    "$@" ;;
+    learn)            cmd_learn    "$@" ;;
+    check)            cmd_check    "$@" ;;
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
-    failover)     cmd_failover  "$@" ;;
-    permit)       cmd_permit    "$@" ;;
-    hooks)        cmd_hooks     "$@" ;;
-    logs)         cmd_logs      "$@" ;;
-    doctor)       cmd_doctor    "$@" ;;
-    ci)           cmd_ci        "$@" ;;
-    tools)        cmd_tools     "$@" ;;
-    update)       cmd_update    "$@" ;;
-    help)         cmd_help ;;
+    failover)         cmd_failover "$@" ;;
+    permit)           cmd_permit   "$@" ;;
+    hooks)            cmd_hooks    "$@" ;;
+    logs)             cmd_logs     "$@" ;;
+    doctor)           cmd_doctor   "$@" ;;
+    ci)               cmd_ci       "$@" ;;
+    tools)            cmd_tools    "$@" ;;
+    update)           cmd_update   "$@" ;;
+    help)             cmd_help ;;
     *)
-      # If the "command" looks like natural language (multiple words after reassembly),
-      # route to the run pipeline automatically.
+      # Unknown command: if it looks like natural language, route to NL pipeline
       local _nl_candidate="$cmd${*:+ $*}"
       if [[ "$cmd" != -* ]] && [[ "$_nl_candidate" == *" "* ]]; then
-        warn "Unknown command — routing to full pipeline"
-        echo -e "  ${GRAY}Tip: use ${CYAN}devloop run \"$_nl_candidate\"${GRAY} to be explicit next time${RESET}"
+        info "Unknown command — interpreting as natural language task"
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop do $_nl_candidate${GRAY} to be explicit next time${RESET}"
         echo ""
-        cmd_run "$_nl_candidate"
+        cmd_do "$cmd" "$@"
       else
         error "Unknown command: $cmd"
         echo ""
-        echo -e "  ${GRAY}Tip: ${CYAN}devloop run \"<description>\"${GRAY} — full arch→work→review pipeline${RESET}"
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop do \"<description>\"${GRAY} — natural language pipeline${RESET}"
+        echo -e "  ${GRAY}     ${CYAN}devloop run \"<description>\"${GRAY} — explicit full pipeline${RESET}"
         echo -e "  ${GRAY}     ${CYAN}devloop help${GRAY}              — all commands${RESET}"
         exit 1
       fi

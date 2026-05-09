@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.6.3] — 2026-05-09
+
+### Added
+- **Natural language mode** — `devloop` now understands plain English commands:
+  - `devloop do <task>` — new first-class command (aliases: `ask`, `please`, `nl`).
+    Joins all args as-is into a task description, no quoting required.
+    Example: `devloop do check the latest progress and work on remaining tasks`
+  - **Auto-detection** — when a "utility" command (`check`, `update`, `status`,
+    `start`, `doctor`, etc.) is followed by plain-English words (not `--flags` or
+    `TASK-` IDs), DevLoop automatically routes to the NL pipeline instead of the
+    literal command. Fixes: `devloop check the latest progress...` no longer
+    triggered the version checker.
+  - Unknown multi-word commands also route to NL pipeline with a helpful tip.
+
+---
+
 ## [4.6.2] — 2026-05-09
 
 ### Fixed
