@@ -57,6 +57,97 @@ divider() { echo -e "${GRAY}$(printf '─%.0s' {1..60})${RESET}"; }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+normalize_verdict_token() {
+  local raw="${1:-}"
+  local cleaned=""
+
+  cleaned="$(printf '%s' "$raw" \
+    | tr '[:lower:]' '[:upper:]' \
+    | sed -E 's/[#*_`>|:]+/ /g; s/[^A-Z_[:space:]-]+/ /g; s/-/ /g; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//')"
+
+  if [[ "$cleaned" =~ (^|[[:space:]])NEEDS([[:space:]_])*WORK($|[[:space:]]) ]]; then
+    echo "NEEDS_WORK"
+  elif [[ "$cleaned" =~ (^|[[:space:]])APPROVED($|[[:space:]]) ]]; then
+    echo "APPROVED"
+  elif [[ "$cleaned" =~ (^|[[:space:]])REJECTED($|[[:space:]]) ]]; then
+    echo "REJECTED"
+  else
+    echo "UNKNOWN"
+  fi
+}
+
+parse_review_verdict() {
+  local review_file="$1"
+  local candidate
+  local verdict
+
+  [[ -f "$review_file" ]] || { echo "UNKNOWN"; return; }
+
+  # Canonical line always wins, even if malformed.
+  candidate="$(
+    awk '
+      /^[[:space:]]*Verdict:[[:space:]]*/ {
+        line=$0
+        sub(/^[[:space:]]*Verdict:[[:space:]]*/, "", line)
+        print "__FOUND__" line
+        exit
+      }
+    ' "$review_file" 2>/dev/null \
+      || true
+  )"
+  if [[ "$candidate" == __FOUND__* ]]; then
+    verdict="$(normalize_verdict_token "${candidate#__FOUND__}")"
+    echo "$verdict"
+    return
+  fi
+
+  # Fallback: markdown heading style.
+  candidate="$(
+    awk '
+      /^[[:space:]]*#{1,6}[[:space:]]*Verdict:[[:space:]]*/ {
+        line=$0
+        sub(/^[[:space:]]*#{1,6}[[:space:]]*Verdict:[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+    ' "$review_file" 2>/dev/null \
+      || true
+  )"
+  if [[ -n "$candidate" ]]; then
+    verdict="$(normalize_verdict_token "$candidate")"
+    [[ "$verdict" != "UNKNOWN" ]] && { echo "$verdict"; return; }
+  fi
+
+  # Fallback: markdown bold label style.
+  candidate="$(
+    awk '
+      /^[[:space:]]*\*\*[[:space:]]*Verdict:[[:space:]]*\*\*[[:space:]]*/ {
+        line=$0
+        sub(/^[[:space:]]*\*\*[[:space:]]*Verdict:[[:space:]]*\*\*[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+    ' "$review_file" 2>/dev/null \
+      || true
+  )"
+  if [[ -n "$candidate" ]]; then
+    verdict="$(normalize_verdict_token "$candidate")"
+    [[ "$verdict" != "UNKNOWN" ]] && { echo "$verdict"; return; }
+  fi
+
+  # Fallback: standalone verdict token anywhere in output.
+  candidate="$(
+    grep -Eio '(APPROVED|REJECTED|NEEDS[[:space:]_-]*WORK)' "$review_file" 2>/dev/null \
+      | head -1 || true
+  )"
+  if [[ -n "$candidate" ]]; then
+    verdict="$(normalize_verdict_token "$candidate")"
+    [[ "$verdict" != "UNKNOWN" ]] && { echo "$verdict"; return; }
+  fi
+
+  echo "UNKNOWN"
+}
+
 find_project_root() {
   local dir="$PWD"
   while [[ "$dir" != "/" ]]; do
@@ -3366,7 +3457,9 @@ cmd_review() {
       "3. Error handling" "4. Code quality (SOLID)" \
       "5. Security" "6. Test coverage"
     printf '\n## Required output format\n'
-    printf '\n### Verdict: APPROVED | NEEDS_WORK | REJECTED\n'
+    printf '%s\n' "First non-empty line must be EXACTLY one of:"
+    printf '%s\n' "Verdict: APPROVED" "Verdict: NEEDS_WORK" "Verdict: REJECTED"
+    printf '%s\n' "Do not use emoji, markdown heading prefixes, or bold styling on the primary verdict line."
     printf '\n**Score**: X/10\n**Summary**: [one sentence]\n'
     printf '\n### What'"'"'s Good\n- [specific positive]\n'
     printf '\n### Issues Found\n'
@@ -3397,7 +3490,7 @@ cmd_review() {
   divider
 
   local verdict
-  verdict="$(grep -o 'Verdict: \(APPROVED\|NEEDS_WORK\|REJECTED\)' "$review_file" 2>/dev/null | head -1 | awk '{print $2}' || echo "UNKNOWN")"
+  verdict="$(parse_review_verdict "$review_file")"
 
   case "$verdict" in
     APPROVED)
@@ -3414,7 +3507,9 @@ cmd_review() {
       sed -i.bak 's/\*\*Status\*\*: .*/\*\*Status\*\*: ❌ rejected/' "$spec_file" && rm -f "$spec_file.bak"
       ;;
     *)
-      warn "Could not determine verdict from review output"
+      warn "Could not determine verdict from review output: $review_file"
+      echo -e "  ${GRAY}Expected first non-empty line:${RESET} ${CYAN}Verdict: APPROVED|NEEDS_WORK|REJECTED${RESET}"
+      echo -e "  ${GRAY}Fix:${RESET} Re-run reviewer with canonical verdict line."
       ;;
   esac
 
@@ -4578,6 +4673,8 @@ cmd_run() {
   # ── Stage 3: Review + fix loop ───────────────────────────────────────────────
   local verdict="NEEDS_WORK"
   local fix_round=0
+  local unknown_round=0
+  local max_unknown_retries=2
   local review_file="$SPECS_PATH/$id-review.md"
 
   while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
@@ -4590,8 +4687,7 @@ cmd_run() {
     cmd_review "$id"
     echo ""
 
-    verdict="$(grep -o 'Verdict: \(APPROVED\|NEEDS_WORK\|REJECTED\)' "$review_file" 2>/dev/null \
-      | head -1 | awk '{print $2}' || echo "UNKNOWN")"
+    verdict="$(parse_review_verdict "$review_file")"
 
     case "$verdict" in
       APPROVED)
@@ -4603,7 +4699,8 @@ cmd_run() {
         echo -e "  ${GRAY}Review: ${CYAN}devloop status $id${RESET}"
         exit 1
         ;;
-      *)
+      NEEDS_WORK)
+        unknown_round=0
         fix_round=$(( fix_round + 1 ))
         if (( fix_round > max_retries )); then
           warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
@@ -4613,6 +4710,17 @@ cmd_run() {
         step "🔧 Fixing (attempt $fix_round/$max_retries)..."
         cmd_fix "$id"
         echo ""
+        ;;
+      *)
+        unknown_round=$(( unknown_round + 1 ))
+        warn "Could not determine verdict from review output: $review_file"
+        echo -e "  ${GRAY}Expected first non-empty line:${RESET} ${CYAN}Verdict: APPROVED|NEEDS_WORK|REJECTED${RESET}"
+        if (( unknown_round >= max_unknown_retries )); then
+          error "Unknown verdict repeated ($unknown_round/$max_unknown_retries). Stopping to avoid infinite retry loop."
+          echo -e "  ${GRAY}Fix:${RESET} Re-run reviewer with canonical verdict line, then run ${CYAN}devloop review $id${RESET}"
+          exit 2
+        fi
+        warn "Retrying review once more before stopping..."
         ;;
     esac
   done

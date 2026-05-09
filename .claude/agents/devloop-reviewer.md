@@ -21,7 +21,11 @@ devloop review TASK-ID
 ```
 
 ### 3. Return to orchestrator
-- Verdict: APPROVED / NEEDS_WORK / REJECTED
+- First non-empty line must be exactly one of:
+  - `Verdict: APPROVED`
+  - `Verdict: NEEDS_WORK`
+  - `Verdict: REJECTED`
+- Do not use emoji or markdown styling on that primary verdict line (`###`, `**`, etc. are not allowed there)
 - Score: X/10
 - What passed
 - Issues (file, area, severity, description)

@@ -237,6 +237,16 @@ devloop review TASK-20260509-143022
 | `⚠️ NEEDS_WORK` | Fixable issues — fix instructions provided |
 | `❌ REJECTED` | Wrong approach — consider redesigning spec |
 
+### Review Verdict Parsing
+- Canonical machine-readable line (preferred, deterministic): `Verdict: APPROVED|NEEDS_WORK|REJECTED`
+- Reviewer output should put that canonical line as the **first non-empty line**.
+- Parser tolerates fallback variants when canonical line is absent (examples: `### Verdict: NEEDS_WORK`, `**Verdict:** REJECTED`, lowercase/emoji variants like `Verdict: approved ✅`).
+- If canonical `Verdict:` exists but value is invalid (example: `Verdict: HOLD`), result is `UNKNOWN` (no coercion).
+- If parsing returns `UNKNOWN`, re-run review with a canonical first line:
+  - `Verdict: APPROVED`
+  - `Verdict: NEEDS_WORK`
+  - `Verdict: REJECTED`
+
 Review is saved to `.devloop/specs/TASK-ID-review.md`.
 
 ---
