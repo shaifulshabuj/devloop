@@ -5,6 +5,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.0.0] — 2026-05-10
+
+### Major Release — Global Management Layer
+
+DevLoop v5.0 adds a global management layer (`~/.devloop/`) that spans all projects.
+All features are backwards-compatible: project-local devloop still works without any global config.
+
+#### Phase 1 — Global Config Layer
+- `~/.devloop/config.sh` bootstrapped on first run (global defaults, project always overrides)
+- `devloop configure --global` — edit global defaults in `$EDITOR`
+
+#### Phase 2 — Project Registry
+- `~/.devloop/projects.json` — registry updated on `devloop init` and `devloop run`
+- `devloop projects` — list all registered projects with status
+- `devloop projects switch <name>` — print `cd` command to jump to a project
+
+#### Phase 3 — Human Inbox
+- `devloop inbox` — view/resolve all pending NEEDS_WORK and REJECTED events
+- `--all` — cross-project inbox view
+- macOS `osascript` notifications on pipeline events
+- `DEVLOOP_NOTIFY_WEBHOOK` for Slack/Discord webhook integration
+
+#### Phase 4 — Pipeline Stats
+- `devloop stats` — aggregated metrics: approval rate, fix rounds, phase durations, top fix reasons
+
+#### Phase 5 — Lesson Federation
+- `devloop learn --global` — promote extracted lessons to `~/.devloop/lessons.md`
+- Architect prompts automatically inject relevant global lessons filtered by `PROJECT_STACK`
+
+#### Phase 6 — Smart Update Propagation
+- `devloop init --merge` — safe re-init that only adds missing config keys
+- After `devloop update`, automatically merges new config keys to all registered projects
+- `DEVLOOP_AUTO_MERGE=false` to opt out per-project
+
+---
+
 ## [4.17.0] — 2026-05-10
 
 ### Added
