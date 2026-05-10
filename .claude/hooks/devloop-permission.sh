@@ -63,9 +63,7 @@ fi
 _is_always_block() {
   local c="$1"
   # rm -rf on critical paths
-  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+/' && return 0
-  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+~' && return 0
-  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+\$HOME' && return 0
+  echo "$c" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f\s+(\/|~|\$HOME)' && return 0
   echo "$c" | grep -qE 'sudo\s+rm\s+-' && return 0
   # Download + execute (code injection)
   echo "$c" | grep -qE '(curl|wget)\s+[^|]+\|\s*(bash|sh|python[23]?|ruby|perl|node)\b' && return 0
@@ -75,40 +73,60 @@ _is_always_block() {
   # Fork bomb
   echo "$c" | grep -qE ':\s*\(\s*\)\s*\{.*\|.*:' && return 0
   # chmod 777 on system paths
-  echo "$c" | grep -qE 'chmod\s+[0-9]*7[0-9]*7\s*/' && return 0
+  echo "$c" | grep -qE 'chmod\s+[0-9]*7[0-9]*7\s*\/' && return 0
   return 1
 }
 
-# ── Tier 2: ALWAYS ALLOW — provably safe read/test/build operations ──────────
+# ── Tier 2: ALWAYS ALLOW — safe read/info/build/devloop-pipeline operations ─
 _is_always_safe() {
   local c="$1"
-  # Grab just the first logical command (before pipes/semicolons)
-  local first
-  first="$(printf '%s' "$c" | sed 's/^[[:space:]]*//' | head -1 | sed 's/[;|&].*//')"
+
+  # devloop's own pipeline commands (status, logs, help, view, check, etc.)
+  echo "$c" | grep -qE '(^|;\s*|&&\s*|\|\s*)\bdevloop\b\s+(status|logs|log|view|help|--help|-h|check|version|--version|-v|sessions|recent|summary|tasks|tasks\s+list|permit\s+list)\b' && return 0
+  echo "$c" | grep -qE '^\s*devloop\s+(status|logs|log|view|help|--help|-h|check|version|--version|-v|sessions|recent|summary|permit\s+list)' && return 0
 
   # Read-only shell builtins and utilities
-  echo "$first" | grep -qE '^(cat|head|tail|grep|rg|ag|find|ls|ll|la|wc|stat|file|which|type|echo|printf|pwd|whoami|date|env|printenv|uname|id|tree|diff|sort|uniq|awk|sed|jq|yq|less|more)\b' && return 0
+  echo "$c" | grep -qE '^\s*(cat|head|tail|grep|rg|ag|find|ls|ll|la|wc|stat|file|which|type|echo|printf|pwd|whoami|date|env|printenv|uname|id|tree|diff|sort|uniq|awk|sed|jq|yq|less|more|basename|dirname|realpath)\b' && return 0
 
-  # Git read ops (status, log, diff, show, etc.)
-  echo "$first" | grep -qE '^git\s+(status|log|diff|branch|show|remote|tag|describe|shortlog|reflog|ls-files|ls-tree|stash\s+list|rev-parse|symbolic-ref|config\s+--get)\b' && return 0
+  # Piped safe commands (head -N file | ...) — strip pipes, check each segment
+  # If every non-empty segment starts with a safe command, approve
+  local _all_safe=true
+  local _seg
+  while IFS= read -r _seg; do
+    _seg="${_seg#"${_seg%%[![:space:]]*}"}"  # trim leading space
+    [[ -z "$_seg" ]] && continue
+    echo "$_seg" | grep -qE '^(cat|head|tail|grep|rg|find|ls|wc|echo|printf|awk|sed|jq|sort|uniq|tee|tput|tr|cut|paste|column|printf|read|true|false|test|\[)\b' && continue
+    echo "$_seg" | grep -qE '^devloop\s+(status|logs|log|help|--help|check|version|sessions|recent)' && continue
+    echo "$_seg" | grep -qE '^git\s+(status|log|diff|branch|show|remote|tag|describe|ls-files|rev-parse|symbolic-ref|config\s+--get)\b' && continue
+    _all_safe=false
+    break
+  done < <(printf '%s' "$c" | tr '|;&' '\n')
+  [[ "$_all_safe" == "true" ]] && return 0
 
-  # Git safe write ops (add, commit, checkout, stash save)
-  echo "$first" | grep -qE '^git\s+(add|commit|checkout|switch|restore|stash\s+(push|pop|drop|apply)|reset\s+--(soft|mixed)|clean\s+-fd|cherry-pick|merge|rebase)\b' && return 0
+  # for-loop over files that only reads (head/cat/echo/grep) — common Claude pattern
+  echo "$c" | grep -qE '^for\s+\w+\s+in\s+.*;\s*do\s+(echo|cat|head|tail|grep|printf|ls|stat)\b' && return 0
+  echo "$c" | grep -qE '^for\s+\w+\s+in.*\.(md|sh|json|txt|yaml|yml|toml|cfg|conf).*;\s*do\s+(echo|cat|head|printf)\b' && return 0
+
+  # Git read ops
+  echo "$c" | grep -qE '^\s*git\s+(status|log|diff|branch|show|remote|tag|describe|shortlog|reflog|ls-files|ls-tree|stash\s+list|rev-parse|symbolic-ref|config\s+--get)\b' && return 0
+
+  # Git safe write ops
+  echo "$c" | grep -qE '^\s*git\s+(add|commit|checkout|switch|restore|stash\s+(push|pop|drop|apply)|reset\s+--(soft|mixed)|clean\s+-fd|cherry-pick|merge|rebase)\b' && return 0
 
   # Test runners
-  echo "$first" | grep -qE '^(pytest|python3?\s+-m\s+pytest|npm\s+(test|run\s+test)|yarn\s+test|pnpm\s+test|go\s+test|cargo\s+test|jest|mocha|vitest|rspec|phpunit|mvn\s+test|gradle\s+test|dotnet\s+test)\b' && return 0
+  echo "$c" | grep -qE '^\s*(pytest|python3?\s+-m\s+pytest|npm\s+(test|run\s+test)|yarn\s+test|pnpm\s+test|go\s+test|cargo\s+test|jest|mocha|vitest|rspec|phpunit|mvn\s+test|gradle\s+test|dotnet\s+test)\b' && return 0
 
   # Build tools
-  echo "$first" | grep -qE '^(make|cmake|cargo\s+(build|check|clippy|fmt)|go\s+build|npm\s+run\s+build|yarn\s+build|pnpm\s+build|tsc|vite\s+build|webpack|rollup|dotnet\s+build|mvn\s+package|gradle\s+build|swift\s+build)\b' && return 0
+  echo "$c" | grep -qE '^\s*(make|cmake|cargo\s+(build|check|clippy|fmt)|go\s+build|npm\s+run\s+build|yarn\s+build|pnpm\s+build|tsc|vite\s+build|webpack|rollup|dotnet\s+build|mvn\s+package|gradle\s+build|swift\s+build)\b' && return 0
 
   # Package install from lockfile / project-scoped
-  echo "$first" | grep -qE '^(npm\s+(install|ci)|yarn\s+install|pnpm\s+install|pip\s+install\s+-r\s+requirements|pip\s+install\s+-e\s+\.|poetry\s+install|pipenv\s+install|bundle\s+install|go\s+mod\s+(download|tidy)|cargo\s+fetch)\b' && return 0
+  echo "$c" | grep -qE '^\s*(npm\s+(install|ci)|yarn\s+install|pnpm\s+install|pip\s+install\s+-r\s+requirements|pip\s+install\s+-e\s+\.|poetry\s+install|pipenv\s+install|bundle\s+install|go\s+mod\s+(download|tidy)|cargo\s+fetch)\b' && return 0
 
   # Linting / formatting
-  echo "$first" | grep -qE '^(eslint|prettier|black|ruff|flake8|pylint|mypy|rubocop|golangci-lint|clippy|shellcheck|hadolint)\b' && return 0
+  echo "$c" | grep -qE '^\s*(eslint|prettier|black|ruff|flake8|pylint|mypy|rubocop|golangci-lint|shellcheck|hadolint|bash\s+-n)\b' && return 0
 
-  # Safe file ops within typical dev dirs (mkdir, cp, mv — narrow patterns)
-  echo "$first" | grep -qE '^mkdir\s+(-p\s+)?\.' && return 0
+  # Safe mkdir within project
+  echo "$c" | grep -qE '^\s*mkdir\s+(-p\s+)?\.' && return 0
 
   return 1
 }
@@ -141,6 +159,8 @@ print(json.dumps({'id': sys.argv[1], 'tool': sys.argv[2], 'command': sys.argv[3]
 _log "PENDING: [$TOOL_NAME] $_CMD_DISPLAY → $_REQ_ID"
 
 # ── Path A: interactive terminal (/dev/tty available) ───────────────────────
+# Try terminal first. If it succeeds, skip macOS dialog entirely.
+_terminal_answered=false
 if [ -e /dev/tty ] && { printf '' > /dev/tty; } 2>/dev/null; then
   {
     printf '\n'
@@ -150,6 +170,7 @@ if [ -e /dev/tty ] && { printf '' > /dev/tty; } 2>/dev/null; then
     printf '   Allow? [y/N]: '
   } > /dev/tty
   if read -t "$PERMISSION_TIMEOUT" -r _resp < /dev/tty 2>/dev/null; then
+    _terminal_answered=true
     rm -f "$_REQ_FILE"
     case "${_resp,,}" in
       y|yes|allow) _approve "user granted via terminal" ;;
@@ -158,8 +179,8 @@ if [ -e /dev/tty ] && { printf '' > /dev/tty; } 2>/dev/null; then
   fi
 fi
 
-# ── Path B: macOS dialog (daemon / no tty) ───────────────────────────────────
-if command -v osascript &>/dev/null; then
+# ── Path B: macOS dialog — ONLY if terminal was not available/answered ───────
+if [[ "$_terminal_answered" == "false" ]] && command -v osascript &>/dev/null; then
   _SHORT="$(printf '%s' "$_CMD_DISPLAY" | head -c 200 | sed "s/\"/'/g; s/\\\\/\\\\\\\\/g")"
   _mac_btn="$(osascript -e "
     set d to \"DevLoop Permission Request\n\nTool: $TOOL_NAME\nCommand: $_SHORT\n\nAllow this command?\"
@@ -172,7 +193,7 @@ if command -v osascript &>/dev/null; then
   esac
 fi
 
-# ── Path C: Linux notify-send + queue poll (devloop permit watch) ────────────
+# ── Path C: Linux notify-send + queue poll ───────────────────────────────────
 if command -v notify-send &>/dev/null; then
   notify-send "DevLoop Permission Request" \
     "Command: $(printf '%s' "$_CMD_DISPLAY" | head -c 100)" \
