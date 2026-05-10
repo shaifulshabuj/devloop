@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.0.2"
+VERSION="5.0.3"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -6848,12 +6848,24 @@ cmd_run() {
   if [[ "${DEVLOOP_AUTO_VIEW:-false}" == "true" ]] && _tmux_available && [[ -z "${TMUX:-}" ]]; then
     local _av_name="devloop-$(date +%s)"
     echo -e "${BOLD}🖥  Opening devloop live view${RESET}  ${GRAY}(tmux session: $_av_name)${RESET}"
-    echo -e "  ${GRAY}Ctrl-b d to detach and leave running  |  Ctrl-b [ to scroll${RESET}"
+    echo -e "  ${GRAY}Ctrl-b d  detach  |  click pane or Ctrl-b ←/→  switch  |  Ctrl-b [  scroll${RESET}"
+    echo -e "  ${GRAY}In nested tmux: Ctrl-b Ctrl-b ← to switch panes${RESET}"
     echo ""
     sleep 0.3
-    # Re-exec entire run inside new tmux session; DEVLOOP_AUTO_VIEW=false prevents recursion
-    exec tmux new-session -s "$_av_name" -n "pipeline" \
-      env DEVLOOP_AUTO_VIEW=false devloop run "${_run_orig_args[@]}"
+    # Build the command string for devloop run inside tmux
+    local _inner_cmd="env DEVLOOP_AUTO_VIEW=false devloop run"
+    for _a in "${_run_orig_args[@]:-}"; do
+      _inner_cmd="$_inner_cmd $(printf '%q' "$_a")"
+    done
+    # Create session detached, enable mouse, then attach
+    tmux new-session -d -s "$_av_name" -n "pipeline" bash 2>/dev/null || true
+    tmux set-option -t "$_av_name" -g mouse on 2>/dev/null || true
+    tmux send-keys -t "$_av_name" "$_inner_cmd" Enter 2>/dev/null || true
+    exec tmux attach-session -t "$_av_name"
+  fi
+  # If already inside tmux, enable mouse for this session (allows pane click-to-focus)
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux set-option -g mouse on 2>/dev/null || true
   fi
 
   # Determine fix strategy: escalate (default) or standard
@@ -6936,7 +6948,8 @@ while true; do
     tail -6 \"\$LOGF\" 2>/dev/null | sed \"s/^/  /\" | cat
   fi
   echo \"\"
-  echo \"\${GRAY}[Ctrl-b o] focus main  [Ctrl-b d] detach\${RESET}\"
+  echo \"\${GRAY}[click] or [Ctrl-b ←] focus main  [Ctrl-b d] detach\${RESET}\"
+  echo \"\${GRAY}nested tmux? use Ctrl-b Ctrl-b ←\${RESET}\"
   sleep 1
 done'" 2>/dev/null || true
   fi

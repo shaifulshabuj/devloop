@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.0.3] — 2026-05-11
+
+### Fixed — tmux pane navigation (mouse + nested tmux)
+
+- **Mouse enabled by default**: tmux sessions created by `devloop run` now run with `mouse on`,
+  so you can click any pane to focus it without knowing tmux keybindings
+- **Better navigation hints**: Status pane now shows `[click]` and `Ctrl-b ←` as alternatives
+  to `Ctrl-b o`, plus a nested-tmux hint (`Ctrl-b Ctrl-b ←`)
+- **Cleaner session startup**: Auto-view now creates the tmux session detached, enables mouse,
+  sends the devloop command, then attaches — previously mouse could not be enabled before `exec`
+- **If already in tmux**: `devloop run` now sets `mouse on` in the current tmux session so the
+  status pane split is also clickable
+
+---
+
 ## [5.0.0] — 2026-05-10
 
 ### Major Release — Global Management Layer
