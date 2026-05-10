@@ -1,0 +1,30 @@
+{
+  "version": "2",
+  "platforms": [
+    "claude",
+    "copilot-cli"
+  ],
+  "policies": {
+    "allowedPaths": [
+      "./src/**",
+      "./data/**",
+      "./README.md",
+      "./CLAUDE.md",
+      "./COPILOT.md",
+      "./**"
+    ],
+    "blockedPaths": [
+      "/etc/**",
+      "/usr/**"
+    ],
+    "blockedCommands": [
+      "rm -rf",
+      "DROP TABLE",
+      "DROP DATABASE",
+      "chmod 777"
+    ],
+    "requireApproval": [
+    ],
+    "maxBashOutputBytes": 10000
+  }
+}

@@ -2,3 +2,5 @@
 # Docuflow
 .docuflow/
 .playwright-mcp/
+# Waymark
+.waymark/
