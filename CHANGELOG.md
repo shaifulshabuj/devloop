@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.0.4] — 2026-05-11
+
+### Fixed — permission hook noise + double macOS dialog
+
+- **Auto-approve `devloop` pipeline commands**: `devloop status`, `devloop logs`, `devloop --help`,
+  `devloop view`, `devloop check`, `devloop version`, `devloop sessions`, `devloop recent`
+  no longer trigger the permission prompt — these are safe read-only devloop operations
+- **Auto-approve for-loop file reads**: `for f in *.md; do head -5 "$f"; done` style loops
+  (read-only over project files) are now approved without prompting
+- **Auto-approve all-safe pipelines**: When every pipe segment is a known-safe command
+  (cat, head, tail, grep, echo, sed, awk, jq, git status/log/diff, devloop status/logs/help),
+  the whole pipeline is auto-approved
+- **Fixed double-dialog bug**: macOS dialog (Path B) now only fires when the terminal
+  interactive prompt (Path A) was NOT available or did not get a response — previously
+  both could fire simultaneously for the same request
+
+---
+
 ## [5.0.3] — 2026-05-11
 
 ### Fixed — tmux pane navigation (mouse + nested tmux)
