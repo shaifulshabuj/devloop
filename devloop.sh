@@ -2216,7 +2216,7 @@ write_agent_orchestrator() {
 ---
 name: devloop-orchestrator
 description: Main DevLoop orchestrator. Receives feature requests remotely and coordinates the architect and reviewer agents through the full build loop until approved. Provider routing can swap architect/reviewer/worker backends while Claude remains the remote-control launcher in v1.
-tools: Agent(devloop-architect, devloop-reviewer), Bash, Read, Write, TodoWrite
+tools: Agent(devloop-architect, devloop-reviewer), Bash, Read, Write, TodoWrite, mcp__waymark-devloop__write_file, mcp__waymark-devloop__read_file, mcp__waymark-devloop__bash
 model: sonnet
 color: cyan
 ---
@@ -2269,7 +2269,10 @@ Mark "Review" completed.
 
 **Step 5 — Handle verdict**
 - **APPROVED** → Mark "Done" completed. Summarize what was built. ✅
-- **NEEDS_WORK** → Run `devloop fix TASK-ID`, re-delegate to reviewer. Repeat up to 3 times.
+- **NEEDS_WORK** → Escalate through fix phases:
+  - **Round 1 (standard fix)**: Run `devloop fix TASK-ID`, re-delegate to `@devloop-reviewer`.
+  - **Round 2 (deep fix)**: Run `devloop fix TASK-ID` again. Instruct the reviewer to focus ONLY on issues NOT resolved in round 1.
+  - **Round 3 (escalate)**: Notify the user: "⚠️ Still NEEDS_WORK after 2 fix attempts. Options: (1) I can try re-architecting the spec with `devloop run --max-retries 5 TASK-ID`, (2) you can edit the spec manually with `devloop open TASK-ID`, or (3) we accept as-is." Wait for user instruction before proceeding.
 - **REJECTED** → Report with reasons. Ask if user wants to restart.
 
 ## Phase indicators
@@ -2288,6 +2291,10 @@ Mark "Review" completed.
 ## Mobile push notifications
 When starting a long task, include in your first message: "I'll notify you when this task completes."
 Claude Code will push a notification to your phone when the task finishes.
+
+## MCP Tools Available
+- **Waymark** (`mcp__waymark-devloop__*`): `write_file`, `read_file`, `bash` — use for audited file writes when modifying project files
+- **DocuFlow** (`mcp__docuflow__*`): `query_wiki`, `read_module`, `list_modules` — available to architect/reviewer subagents for codebase context
 AGENT
 }
 
@@ -2299,7 +2306,7 @@ write_agent_architect() {
 ---
 name: devloop-architect
 description: DevLoop architect. Designs precise implementation specs for Copilot. Called by orchestrator with a feature description. Returns Task ID and spec summary.
-tools: Bash, Read, Glob, Grep
+tools: Bash, Read, Glob, Grep, mcp__docuflow__read_module, mcp__docuflow__list_modules, mcp__docuflow__query_wiki, mcp__docuflow__wiki_search
 model: ${model}
 color: blue
 ---
@@ -2317,8 +2324,15 @@ cat devloop.config.sh 2>/dev/null
 cat CLAUDE.md 2>/dev/null
 ```
 
-### 2. Explore relevant files
+### 2. Explore codebase context
 Read files mentioned in the task. Check existing patterns.
+
+If DocuFlow MCP tools are available, query the wiki for related patterns before writing the spec:
+```
+mcp__docuflow__query_wiki({ project_path: ".", question: "How is [feature area] implemented?" })
+mcp__docuflow__read_module({ path: "src/relevant-file" })
+```
+Flag any implementation that contradicts documented patterns in the spec as a constraint.
 
 ### 3. Generate the spec
 ```bash
@@ -2346,7 +2360,7 @@ write_agent_reviewer() {
 ---
 name: devloop-reviewer
 description: DevLoop reviewer. Reviews Copilot's implementation against the task spec via git diff. Returns APPROVED, NEEDS_WORK, or REJECTED with specific issues and fix instructions.
-tools: Bash, Read, Glob, Grep
+tools: Bash, Read, Glob, Grep, mcp__docuflow__query_wiki, mcp__docuflow__wiki_search
 model: ${model}
 color: yellow
 ---
@@ -2357,10 +2371,16 @@ You are the DevLoop Reviewer. Rigorously check Copilot's implementation against 
 
 ## On invocation
 
-### 1. Load spec
+### 1. Load spec and context
 ```bash
 devloop status TASK-ID
 ```
+
+If DocuFlow MCP tools are available, optionally query the wiki for patterns relevant to this feature area:
+```
+mcp__docuflow__query_wiki({ project_path: ".", question: "patterns for [feature area]" })
+```
+Flag any implementation that contradicts documented patterns as a HIGH severity issue.
 
 ### 2. Run review
 ```bash
@@ -6703,6 +6723,33 @@ cmd_failover() {
   esac
 }
 
+# ── _parse_issues_table: extract issue rows from a review file ────────────────
+# Parses "| # | Severity | File/Area | Issue |" markdown table.
+# Outputs one "SEVERITY|AREA|ISSUE" line per data row (skips header/separator).
+# Used by cmd_run to compute issue deltas between fix rounds.
+
+_parse_issues_table() {
+  local review_file="$1"
+  [[ -f "$review_file" ]] || return 0
+  awk '
+    /\| *#.*Severity.*Issue/ { in_table=1; next }
+    /^\|[-: |]+\|/           { next }
+    in_table && /^\| *[0-9]/ {
+      line = $0
+      gsub(/^\| *[0-9]+ *\| */, "", line)   # strip "| N |"
+      n = split(line, parts, "|")
+      if (n >= 3) {
+        sev  = parts[1]; sub(/^ +/, "", sev); sub(/ +$/, "", sev)
+        area = parts[2]; sub(/^ +/, "", area); sub(/ +$/, "", area)
+        issue= parts[3]; sub(/^ +/, "", issue); sub(/ +$/, "", issue)
+        printf "%s|%s|%s
+", sev, area, issue
+      }
+    }
+    in_table && !/^\|/ { in_table=0 }
+  ' "$review_file" 2>/dev/null
+}
+
 # ── _run_respec_phase: re-architect and retry after max fix rounds exhausted ──
 # Called from cmd_run when DEVLOOP_FIX_STRATEGY=escalate and all fix rounds fail.
 # Redesigns the spec using accumulated failure context, then runs work + review.
@@ -6722,10 +6769,36 @@ _run_respec_phase() {
   local orig_spec=""
   [[ -f "$spec_file" ]] && orig_spec="$(cat "$spec_file")"
 
+  # ── Step 0: diagnose root cause before redesigning ──────────────────────────
+  local main_p; main_p="$(effective_main_provider)"
+  local diagnosis=""
+  local diag_tmp; diag_tmp="$(mktemp /tmp/devloop-diag-XXXXXX)"
+  local diag_prompt
+  printf '%s' "Given this task spec and its full fix history, write ONE sentence identifying the root cause of repeated failures. Root causes are typically: ambiguous requirements, wrong approach chosen, missing edge case enumeration, or implementation complexity mismatched to spec.
+
+## Spec
+$orig_spec
+
+## Fix History
+$fix_history_text
+
+Respond with only a single sentence starting with: Root cause:" > "$diag_tmp.prompt"
+  diag_prompt="$(cat "$diag_tmp.prompt")"
+  rm -f "$diag_tmp.prompt"
+  run_provider_prompt "$main_p" "$diag_prompt" "$diag_tmp"
+  diagnosis="$(head -3 "$diag_tmp" 2>/dev/null)"
+  rm -f "$diag_tmp"
+  if [[ -n "$diagnosis" ]]; then
+    info "Diagnosis: $diagnosis"
+    echo ""
+  fi
+
   local respec_prompt
   respec_prompt="You are redesigning a task spec that has repeatedly failed code review.
 The original implementation kept getting NEEDS_WORK despite multiple fix attempts.
 Your job: rewrite the spec to be clearer, more precise, and avoid the recurring pitfalls.
+
+Diagnosed root cause: $diagnosis
 
 ## Original Spec
 $orig_spec
@@ -6734,7 +6807,7 @@ $orig_spec
 $fix_history_text
 
 ## Your Task
-1. Identify the ROOT CAUSE of repeated failures (ambiguous requirements? missing edge cases? wrong approach?)
+1. Address the diagnosed root cause above first
 2. Redesign the spec to eliminate those root causes
 3. Add explicit acceptance criteria for every issue that kept recurring
 4. Be more prescriptive about implementation details where workers went wrong
@@ -6743,7 +6816,6 @@ Output a complete revised spec in the SAME format as the original.
 Keep the same task ID ($id) and title, but mark Status as: ♻️ respecced
 Start the spec with: # $id (Respecced)"
 
-  local main_p; main_p="$(effective_main_provider)"
   info "Calling $(provider_label "$main_p") to redesign spec..."
   echo ""
 
@@ -7056,6 +7128,12 @@ $(cat "$review_file")
 
         fix_round=$(( fix_round + 1 ))
 
+        # ── Human checkpoint on last fix round before escalation ──────────────
+        if (( fix_round == max_retries )); then
+          warn "⚠  Fix round $fix_round/$max_retries — last attempt before re-architect"
+          _inbox_write "$(find_project_root)" "needs-work"             "Task $id: fix round $fix_round of $max_retries. If this fails, re-architect phase will start. Check: devloop status $id"             "$id" || true
+        fi
+
         if (( fix_round > max_retries )); then
           # ── Phase 3: Re-architect (escalate strategy only) ──────────────
           if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
@@ -7104,6 +7182,17 @@ $(cat "$review_file")
           for h in "${fix_history_parts[@]}"; do
             combined_history+="$h"$'\n'
           done
+          # ── Issue-delta: flag issues persisting from previous round ──────────
+          if [[ ${#fix_history_parts[@]} -ge 2 ]]; then
+            local prev_tmp; prev_tmp="$(mktemp /tmp/devloop-prev-XXXXXX)"
+            local prev_idx=$(( ${#fix_history_parts[@]} - 2 ))
+            printf '%s' "${fix_history_parts[$prev_idx]}" > "$prev_tmp"
+            local prev_count; prev_count="$(_parse_issues_table "$prev_tmp" | grep -c '[^[:space:]]' 2>/dev/null || echo 0)"
+            rm -f "$prev_tmp"
+            local curr_count; curr_count="$(_parse_issues_table "$review_file" | grep -c '[^[:space:]]' 2>/dev/null || echo 0)"
+            combined_history+="
+PERSISTING CONTEXT: Previous fix round had $prev_count tracked issues; this round has $curr_count. Focus specifically on the issues that were NOT resolved from the previous attempt."
+          fi
           cmd_fix --history "$combined_history" "$id"
         fi
         _session_phase_end "$fix_phase_name" "done"

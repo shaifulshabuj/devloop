@@ -16,3 +16,12 @@ DEVLOOP_WORKER_PROVIDER="copilot"
 # Model for claude -p calls when a role uses Claude
 # "sonnet" = faster/cheaper, "opus" = more capable
 CLAUDE_MODEL="sonnet"
+
+# Added by devloop init (missing defaults)
+DEVLOOP_FAILOVER_ENABLED="true"
+DEVLOOP_PROBE_INTERVAL="5"
+DEVLOOP_PERMISSION_MODE="smart"
+DEVLOOP_PERMISSION_TIMEOUT="60"
+DEVLOOP_WORKER_MODE="cli"
+CLAUDE_MAIN_MODEL=""
+CLAUDE_WORKER_MODEL=""

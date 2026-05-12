@@ -11,6 +11,14 @@
         "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop/.waymark/waymark.db"
       ],
       "cwd": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop"
+    },
+    "docuflow": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Volumes/SATECHI_WD_BLACK_2/dev/20260409_building_documentation_maintainer_to_forget_boringness_of_manual_writting/docuflow-mcp/packages/server/dist/index.js"
+      ],
+      "cwd": "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop"
     }
   }
 }

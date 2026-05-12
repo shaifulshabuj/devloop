@@ -133,3 +133,59 @@ Approve pending actions there. Roll back any write there.
 Do not delete or modify this file.
 It controls how Claude Code behaves in this project.
 ---
+
+<!-- DEVLOOP:CLAUDE:START -->
+# Claude Code — DevLoop Project
+
+## System
+This project uses the DevLoop multi-agent pipeline:
+- `devloop-orchestrator` — main thread, receives remote instructions
+- `devloop-architect`    — subagent, designs implementation specs
+- `devloop-reviewer`     — subagent, reviews the worker's implementation
+- Worker — implements specs (CLI or cloud Copilot coding agent)
+- Provider routing and worker mode are controlled in `devloop.config.sh`
+
+## Start the system
+```bash
+devloop start
+```
+Then connect from claude.ai/code or the Claude mobile app (when main provider is claude).
+If main provider is copilot, the session runs locally in the terminal.
+
+## DevLoop commands — Quick (full pipeline in one shot)
+- `devloop run "feature"`       — **full pipeline**: architect → work → review → fix loop → learn
+- `devloop go  "feature"`       — alias for run
+- `devloop queue add "task"`    — add to batch queue
+- `devloop queue run`           — process all queued tasks sequentially
+
+## DevLoop commands — Step-by-step
+- `devloop architect "feature"` — design a spec
+- `devloop work [TASK-ID]`      — launch worker to implement
+- `devloop review [TASK-ID]`    — review implementation
+- `devloop fix [TASK-ID]`       — launch worker with fix instructions
+
+## DevLoop commands — Management
+- `devloop tasks`               — list all specs
+- `devloop status [TASK-ID]`    — show spec + review
+- `devloop open [TASK-ID]`      — open spec in $EDITOR
+- `devloop block [TASK-ID]`     — print Copilot Instructions Block
+- `devloop clean [--days N]`    — remove old specs
+- `devloop learn [TASK-ID]`     — extract lessons from review and save to CLAUDE.md
+- `devloop agent-sync`          — refresh provider docs cache + analyse with AI (24h TTL)
+- `devloop hooks`               — install Claude pipeline hooks
+- `devloop logs [TYPE]`         — show pipeline/notification/session logs
+- `devloop doctor`              — validate dependencies and configuration
+- `devloop ci`                  — generate GitHub Actions review workflow
+- `devloop check`               — check for DevLoop updates (works out-of-the-box)
+- `devloop update`              — self-upgrade devloop (pulls from GitHub, refreshes project configs)
+
+## Agent Provider Context
+_See `.devloop/agent-docs/provider-context.md` for the full provider reference._
+_Run `devloop agent-sync` to refresh docs and check for provider updates._
+
+## Stack
+See devloop.config.sh for project-specific stack details.
+
+## Learned Patterns
+<!-- devloop learn appends dated lessons here -->
+<!-- DEVLOOP:CLAUDE:END -->
