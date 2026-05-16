@@ -4367,12 +4367,9 @@ _approval_gate() {
         *)               _approval_resolve "$gate" "reject"  "tty-bad" "$decision_file"; return 1 ;;
       esac
     else
-      warn "Approval timed out after ${timeout}s — rejecting."
-      _approval_resolve "$gate" "reject" "timeout" "$decision_file"
-      local _sid="${DEVLOOP_CURRENT_SESSION_ID:-<TASK-ID>}"
-      local _next_cmd="work"; [[ "$gate" == "diff" ]] && _next_cmd="review"
-      echo -e "  ${GRAY}Tip: ${CYAN}devloop $_next_cmd $_sid${GRAY}  to skip gate and continue${RESET}"
-      return 1
+      warn "Approval timed out after ${timeout}s — gate stalled (not rejected)."
+      emit_event "approval.decision" gate="$gate" decision="timeout" source="timeout"
+      return 3
     fi
   fi
 
@@ -7756,6 +7753,12 @@ done'" 2>/dev/null || true
         "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
         info "Spec edited — continuing pipeline."
         ;;
+      3)
+        _session_finish "timed-out-at-plan"
+        warn "⏱  Plan gate timed out — pipeline paused (not rejected)"
+        echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Resume: ${CYAN}devloop resume $id${RESET}"
+        exit 1
+        ;;
       *)
         _inbox_write "$(find_project_root)" "blocked" \
           "Pipeline halted at plan-approval gate for task $id." "$id" 2>/dev/null || true
@@ -7835,6 +7838,13 @@ done'" 2>/dev/null || true
               break
             fi
             # Loop back to approve_diff
+            ;;
+          3)
+            _session_finish "timed-out-at-diff"
+            warn "⏱  Diff gate timed out — pipeline paused (not rejected)"
+            echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Resume: ${CYAN}devloop resume $id${RESET}"
+            echo -e "  ${GRAY}          or force-approve: ${CYAN}devloop resume $id --approve-diff${RESET}"
+            exit 1
             ;;
           *)
             _inbox_write "$(find_project_root)" "blocked" \
@@ -8261,25 +8271,28 @@ cmd_resume() {
   local dry_run=false
   local do_list=false
   local target_id=""
+  local do_approve_diff=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list]"
+        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list] [--approve-diff]"
         echo ""
-        echo -e "  ${CYAN}devloop resume${RESET}              Resume the newest unfinished session"
-        echo -e "  ${CYAN}devloop resume TASK-ID${RESET}      Resume the specified session"
-        echo -e "  ${CYAN}devloop resume --dry-run${RESET}    Print would-resume info without executing"
-        echo -e "  ${CYAN}devloop resume --list${RESET}       List resumable sessions and exit"
+        echo -e "  ${CYAN}devloop resume${RESET}                          Resume the newest unfinished session"
+        echo -e "  ${CYAN}devloop resume TASK-ID${RESET}                  Resume the specified session"
+        echo -e "  ${CYAN}devloop resume --dry-run${RESET}                Print would-resume info without executing"
+        echo -e "  ${CYAN}devloop resume --list${RESET}                   List resumable sessions and exit"
+        echo -e "  ${CYAN}devloop resume [TASK-ID] --approve-diff${RESET}  Force-approve the diff gate and continue to review"
         echo ""
-        echo -e "  Resumable statuses: ${GRAY}running, needs-work, (absent)${RESET}"
+        echo -e "  Resumable statuses: ${GRAY}running, needs-work, timed-out-at-plan, timed-out-at-diff, (absent)${RESET}"
         echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET}."
         exit 0
         ;;
-      --dry-run) dry_run=true;  shift ;;
-      --list)    do_list=true;  shift ;;
-      TASK-*)    target_id="$1"; shift ;;
-      *)         shift ;;
+      --dry-run)      dry_run=true;          shift ;;
+      --list)         do_list=true;          shift ;;
+      --approve-diff) do_approve_diff=true;  shift ;;
+      TASK-*)         target_id="$1";        shift ;;
+      *)              shift ;;
     esac
   done
 
@@ -8363,6 +8376,12 @@ cmd_resume() {
   local next_phase
   next_phase="$(_compute_resume_from "$session_dir")"
 
+  # If the session timed out at the diff gate, the worker already completed.
+  # Override next_phase so we re-present only the diff gate, not re-run the worker.
+  if [[ "$cur_status" == "timed-out-at-diff" && "$next_phase" == "reviewer" ]]; then
+    next_phase="diff-gate"
+  fi
+
   if [[ -z "$next_phase" || "$next_phase" == "complete" ]]; then
     # Events say approved/complete — close out cleanly
     export DEVLOOP_CURRENT_SESSION_ID="$id"
@@ -8445,6 +8464,12 @@ cmd_resume() {
           "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
           info "Spec edited — continuing."
           ;;
+        3)
+          _session_finish "timed-out-at-plan"
+          warn "⏱  Plan gate timed out — pipeline paused (not rejected)"
+          echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Resume: ${CYAN}devloop resume $id${RESET}"
+          exit 1
+          ;;
         *)
           _session_finish "rejected-at-plan"
           error "Plan rejected — pipeline stopped"
@@ -8497,6 +8522,12 @@ cmd_resume() {
               _diff_full="$(_capture_worker_diff "$id")"
               [[ -z "$_diff_summary" ]] && { info "No further changes — accepting."; break; }
               ;;
+            3)
+              _session_finish "timed-out-at-diff"
+              warn "⏱  Diff gate timed out — pipeline paused (not rejected)"
+              echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Resume: ${CYAN}devloop resume $id${RESET}"
+              echo -e "  ${GRAY}          or force-approve: ${CYAN}devloop resume $id --approve-diff${RESET}"
+              exit 1 ;;
             *)
               _session_finish "rejected-at-diff"
               error "Diff rejected — pipeline stopped"
@@ -8507,6 +8538,59 @@ cmd_resume() {
         echo ""
       fi
     fi
+  fi
+
+  # Diff-gate stage only (timed-out-at-diff: worker already ran, re-present gate)
+  if [[ "$next_phase" == "diff-gate" ]]; then
+    if [[ "$do_approve_diff" == "true" ]]; then
+      success "Diff auto-approved via --approve-diff"
+    elif [[ "${DEVLOOP_DIFF_GATE:-on}" != "off" ]]; then
+      local _diff_summary _diff_full
+      _diff_summary="$(_extract_diff_summary "$id")"
+      _diff_full="$(_capture_worker_diff "$id")"
+      if [[ -n "$_diff_summary" ]]; then
+        local diff_edit_round=0
+        local diff_max_edits="${DEVLOOP_DIFF_MAX_EDITS:-2}"
+        while :; do
+          set +e; approve_diff "$_diff_summary" "$_diff_full"; local _diff_rc=$?; set -e
+          case "$_diff_rc" in
+            0) success "Diff approved"; break ;;
+            2)
+              if (( diff_edit_round >= diff_max_edits )); then
+                warn "Diff edit limit reached — proceeding."
+                break
+              fi
+              diff_edit_round=$(( diff_edit_round + 1 ))
+              local _feedback_file="$session_dir/diff-feedback-$diff_edit_round.md"
+              _build_diff_feedback_template "$id" "$_diff_full" > "$_feedback_file"
+              "${EDITOR:-vi}" "$_feedback_file" </dev/tty >/dev/tty 2>/dev/tty || true
+              if ! _diff_feedback_has_content "$_feedback_file"; then
+                warn "No feedback content — skipping fix round."; break
+              fi
+              _session_phase_start "fix-edit-$diff_edit_round"
+              DEVLOOP_FIX_EXTRA_INSTRUCTIONS="$_feedback_file" cmd_fix "$id"
+              _session_phase_end "fix-edit-$diff_edit_round" "done"
+              _diff_summary="$(_extract_diff_summary "$id")"
+              _diff_full="$(_capture_worker_diff "$id")"
+              [[ -z "$_diff_summary" ]] && { info "No further changes — accepting."; break; }
+              ;;
+            3)
+              _session_finish "timed-out-at-diff"
+              warn "⏱  Diff gate timed out — pipeline paused (not rejected)"
+              echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Resume: ${CYAN}devloop resume $id${RESET}"
+              echo -e "  ${GRAY}          or force-approve: ${CYAN}devloop resume $id --approve-diff${RESET}"
+              exit 1 ;;
+            *)
+              _session_finish "rejected-at-diff"
+              error "Diff rejected — pipeline stopped"; exit 1 ;;
+          esac
+        done
+        echo ""
+      else
+        info "No changes detected — diff gate skipped."
+      fi
+    fi
+    next_phase="reviewer"
   fi
 
   # Reviewer + fix loop
