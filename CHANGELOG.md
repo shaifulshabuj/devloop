@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.0] — 2026-05-16
+
+### Added — TUI dashboard, chat REPL, approval gates, resume
+
+- **Go/Bubble Tea companion TUI** (`cmd/devloop-tui/`): `devloop` (no args)
+  opens a live dashboard with session picker + pipeline detail; `devloop chat`
+  opens a slash-command REPL (`/plan`, `/run`, `/diff`, `/rollback`, `/mode`);
+  `devloop status` shows live single-session view. Opt-in — install with
+  `make tui-install`. Bash one-shot commands keep working when the binary is
+  absent.
+- **Structured event stream** at `.devloop/events.ndjson` (NDJSON). Schema
+  documented in `docs/events.md`. Per-session mirror at
+  `.devloop/sessions/<TASK-ID>/events.ndjson`. Engine emits at every phase
+  boundary; TUI consumes via fsnotify. `DEVLOOP_EVENTS_DISABLED=1` to silence.
+- **Plan + diff approval gates** between pipeline stages. `devloop run` now
+  pauses after architect (plan review) and after worker (diff review). Skip
+  with `--auto` / `-y` or `DEVLOOP_AUTO=1`. Gate decisions also settle from
+  a pre-written `approvals/<gate>.json` file — same contract works in TUI,
+  gum, `/dev/tty`, and CI.
+- **`devloop resume [TASK-ID]`** — pick up an interrupted pipeline from the
+  last completed phase by replaying `events.ndjson`. `--list` shows
+  resumable sessions; `--dry-run` prints the planned action without
+  executing.
+- **`devloop permissions`** — gum-driven editor for `.devloop/permissions.yaml`
+  (allow/deny patterns extending the built-in permission hook).
+- **gum-driven `devloop configure`** — interactive wizard for provider,
+  models, permission mode, failover toggle. `--non-interactive` / `--yes`
+  for headless reruns. Schema of `devloop.config.sh` unchanged.
+- **Always-visible status header** in `devloop run` / `devloop resume`:
+  `[arch ✓] [work ⠙] [review ·] [fix ·]  TASK-…  feature`. Re-renders at
+  each stage boundary. No-op when stdout isn't a TTY or
+  `DEVLOOP_STATUS_HEADER=off`.
+- **Diff edit-on-reject** — rejecting at the diff gate can open the spec in
+  `$EDITOR` and re-run the worker against the edited spec.
+
+### Architecture
+
+- Engine stays bash (`devloop.sh`); the TUI is a sibling Go binary, not a
+  rewrite. Both speak the event-stream contract; everything degrades
+  gracefully when optional pieces (Go binary, `gum`, TTY) are missing.
+
+---
+
 ## [5.0.4] — 2026-05-11
 
 ### Fixed — permission hook noise + double macOS dialog
