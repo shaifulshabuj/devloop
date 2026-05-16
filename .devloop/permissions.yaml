@@ -1,0 +1,26 @@
+# DevLoop persistent permission policy
+# -------------------------------------
+# Read by .claude/hooks/devloop-permission.sh (PreToolUse Bash) BEFORE the
+# built-in tier logic. Decision order:
+#
+#   1) built-in BLOCK   (rm -rf /, curl|bash, mkfs, ...)         — cannot override
+#   2) deny:            (this file)                              — your project blocks
+#   3) built-in ALLOW   (git status, pytest, cat, ls, ...)       — safe defaults
+#   4) allow:           (this file)                              — your project allows
+#   5) escalate         (smart mode prompt) / strict block / etc.
+#
+# Patterns are shell-style globs anchored at both ends (* → .*). Quote entries
+# containing spaces. Add comments freely.
+
+deny: []
+  # Examples:
+  # - "git push --force *"
+  # - "git push --force-with-lease *"
+  # - "npm publish *"
+
+allow: []
+  # Examples (extend the built-in safe list with project-specific shortcuts):
+  # - "devloop *"
+  # - "make *"
+  # - "docker compose ps"
+  # - "bun test *"
