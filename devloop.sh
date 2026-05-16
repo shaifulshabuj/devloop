@@ -8265,6 +8265,7 @@ cmd_resume() {
     case "$1" in
       --help|-h)
         echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list]"
+        echo -e "       ${BOLD}devloop continue${RESET} [TASK-ID]  (alias for resume)"
         echo ""
         echo -e "  ${CYAN}devloop resume${RESET}              Resume the newest unfinished session"
         echo -e "  ${CYAN}devloop resume TASK-ID${RESET}      Resume the specified session"
