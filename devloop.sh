@@ -8284,8 +8284,8 @@ cmd_resume() {
         echo -e "  ${CYAN}devloop resume --list${RESET}                   List resumable sessions and exit"
         echo -e "  ${CYAN}devloop resume [TASK-ID] --approve-diff${RESET}  Force-approve the diff gate and continue to review"
         echo ""
-        echo -e "  Resumable statuses: ${GRAY}running, needs-work, timed-out-at-plan, timed-out-at-diff, (absent)${RESET}"
-        echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET}."
+        echo -e "  Resumable statuses: ${GRAY}running, needs-work, timed-out-at-plan, timed-out-at-diff, rejected-at-plan, rejected-at-diff, (absent)${RESET}"
+        echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET} (reviewer-rejected, no retries left)."
         exit 0
         ;;
       --dry-run)      dry_run=true;          shift ;;
@@ -8311,7 +8311,7 @@ cmd_resume() {
       sname="$(basename "$sdir")"
       sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
       case "$sstatus" in
-        approved|rejected|rejected-at-*) continue ;;
+        approved|rejected) continue ;;
       esac
       sfeature="$(cat "$sdir/feature.txt" 2>/dev/null | head -1 | head -c 60 || echo "(no feature)")"
       printf '%-32s  %-14s  %s\n' "$sname" "$sstatus" "$sfeature"
@@ -8335,7 +8335,7 @@ cmd_resume() {
       sname="$(basename "$sdir")"
       sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
       case "$sstatus" in
-        approved|rejected|rejected-at-*) continue ;;
+        approved|rejected) continue ;;
       esac
       id="$sname"
       break
@@ -8355,10 +8355,10 @@ cmd_resume() {
     exit 1
   fi
 
-  # Check if already complete
+  # Check if already complete (reviewer-rejected with no retries = truly terminal)
   local cur_status; cur_status="$(cat "$session_dir/status" 2>/dev/null || echo "running")"
   case "$cur_status" in
-    approved|rejected|rejected-at-*)
+    approved|rejected)
       info "Session $id already finished with status: $cur_status — nothing to resume."
       exit 0
       ;;
@@ -8376,10 +8376,19 @@ cmd_resume() {
   local next_phase
   next_phase="$(_compute_resume_from "$session_dir")"
 
-  # If the session timed out at the diff gate, the worker already completed.
+  # If the session timed out or was rejected at the diff gate, the worker already completed.
   # Override next_phase so we re-present only the diff gate, not re-run the worker.
-  if [[ "$cur_status" == "timed-out-at-diff" && "$next_phase" == "reviewer" ]]; then
+  if [[ "$cur_status" == "timed-out-at-diff" || "$cur_status" == "rejected-at-diff" ]] && \
+     [[ "$next_phase" == "reviewer" ]]; then
     next_phase="diff-gate"
+  fi
+
+  # If the session was rejected at the plan gate, we want to re-present the plan gate.
+  # _compute_resume_from returns "worker" since architect finished but worker hasn't run,
+  # which causes plan gate to be shown first — correct behavior, no override needed.
+  # But add an informational hint when status is rejected-at-plan:
+  if [[ "$cur_status" == "rejected-at-plan" ]]; then
+    info "Session was previously rejected at the plan gate — re-presenting plan for approval."
   fi
 
   if [[ -z "$next_phase" || "$next_phase" == "complete" ]]; then
