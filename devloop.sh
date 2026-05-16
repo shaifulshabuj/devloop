@@ -1813,6 +1813,17 @@ cmd_logs() {
 # ── Configure (standalone wizard) ────────────────────────────────────────────
 
 cmd_configure() {
+  # Parse flags before load_config so we can pass them along
+  local _non_interactive="false"
+  local _cfg_args=()
+  for _a in "$@"; do
+    case "$_a" in
+      --non-interactive|--yes|-y) _non_interactive="true" ;;
+      *) _cfg_args+=("$_a") ;;
+    esac
+  done
+  [[ ${#_cfg_args[@]} -gt 0 ]] && set -- "${_cfg_args[@]}" || set --
+
   load_config
   ensure_dirs
 
@@ -1846,12 +1857,16 @@ cmd_configure() {
 
   if [[ ! -f "$CONFIG_PATH" ]]; then
     info "No devloop.config.sh found — running full init first..."
-    cmd_init --configure
+    if [[ "$_non_interactive" == "true" ]]; then
+      cmd_init --yes
+    else
+      cmd_init --configure
+    fi
     return
   fi
 
   info "Current config: ${CYAN}$CONFIG_PATH${RESET}"
-  _setup_wizard "$CONFIG_PATH"
+  _setup_wizard "$CONFIG_PATH" "$_non_interactive"
 
   # After wizard, reload and regenerate agents with new model settings
   load_config
@@ -1859,9 +1874,8 @@ cmd_configure() {
   write_agent_architect "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
   write_agent_reviewer   "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
   success "Configuration saved and agent prompts updated"
-  echo ""
-  echo -e "  Run ${CYAN}devloop hooks${RESET} to re-install permission hooks with new settings"
-  echo -e "  Run ${CYAN}devloop status${RESET} to confirm active providers and models"
+  echo -e "  ${GRAY}Run ${CYAN}devloop hooks${GRAY} to re-install permission hooks with new settings${RESET}"
+  echo -e "  ${GRAY}Run ${CYAN}devloop doctor${GRAY} to verify your setup is complete${RESET}"
   echo ""
 }
 
@@ -2513,9 +2527,91 @@ cmd_install() {
 # ── Interactive setup wizard ───────────────────────────────────────────────────
 # Asks the user to choose providers, models, and permission mode.
 # Writes choices directly into the given config file.
-# Usage: _setup_wizard <config_file>
+# Usage: _setup_wizard <config_file> [--non-interactive]
+
+# ── Wizard UI helpers (gum if available, plain read fallback) ─────────────────
+
+# _cfg_choose <header> <default> <choice1> <choice2> ...
+# Prints the chosen value to stdout.
+_cfg_choose() {
+  local header="$1"; local default="$2"; shift 2
+  if command -v gum >/dev/null 2>&1; then
+    gum choose \
+      --header "$header" \
+      --selected "$default" \
+      --cursor.foreground "36" \
+      --header.foreground "36" \
+      "$@" 2>/dev/tty
+  else
+    echo -e "${BOLD}$header${RESET}" >&2
+    local i=1 choice
+    for choice in "$@"; do
+      local marker=""
+      [[ "$choice" == "$default" ]] && marker=" ${GRAY}(current)${RESET}"
+      printf "  %d) %s%b\n" "$i" "$choice" "$marker" >&2
+      i=$(( i + 1 ))
+    done
+    printf "  Pick [default: ${BOLD}%s${RESET}]: " "$default" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    if [[ -z "$answer" ]]; then
+      echo "$default"
+    elif [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= $# )); then
+      # positional lookup: set -- already consumed header+default, $@ is choices
+      local _choices=("$@")
+      echo "${_choices[$(( answer - 1 ))]}"
+    else
+      echo "$answer"
+    fi
+  fi
+}
+
+# _cfg_input <prompt> <default>
+# Prints the entered value to stdout.
+_cfg_input() {
+  local prompt="$1"; local default="$2"
+  if command -v gum >/dev/null 2>&1; then
+    gum input \
+      --prompt "$prompt " \
+      --value "$default" \
+      --cursor.foreground "36" 2>/dev/tty
+  else
+    printf "%s [${BOLD}%s${RESET}]: " "$prompt" "$default" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    echo "${answer:-$default}"
+  fi
+}
+
+# _cfg_confirm <prompt> <default-bool: true|false>
+# Prints "true" or "false" to stdout.
+_cfg_confirm() {
+  local prompt="$1"; local default="${2:-true}"
+  if command -v gum >/dev/null 2>&1; then
+    local gum_default="yes"
+    [[ "$default" == "false" ]] && gum_default="no"
+    if gum confirm "$prompt" \
+        --default="$gum_default" \
+        --affirmative "Yes" --negative "No" \
+        --selected.background "36" 2>/dev/tty; then
+      echo "true"
+    else
+      echo "false"
+    fi
+  else
+    local yn_hint="Y/n"
+    [[ "$default" == "false" ]] && yn_hint="y/N"
+    printf "%s [%s]: " "$prompt" "$yn_hint" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    case "${answer,,}" in
+      y|yes) echo "true" ;;
+      n|no)  echo "false" ;;
+      *)     echo "$default" ;;
+    esac
+  fi
+}
+
 _setup_wizard() {
   local cfg="$1"
+  local non_interactive="${2:-false}"
 
   # Detect installed providers
   local has_claude="false"; command -v claude &>/dev/null && has_claude="true"
@@ -2525,10 +2621,47 @@ _setup_wizard() {
 
   _avail() { [[ "$1" == "true" ]] && echo "${GREEN}✔ installed${RESET}" || echo "${YELLOW}⚠  not found${RESET}"; }
 
+  # Read current values from config as defaults (so Enter keeps current setting)
+  local cur_main;         cur_main="$(         grep -E '^DEVLOOP_MAIN_PROVIDER='   "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_worker;       cur_worker="$(       grep -E '^DEVLOOP_WORKER_PROVIDER=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_main_model;   cur_main_model="$(   grep -E '^CLAUDE_MAIN_MODEL='       "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_worker_model; cur_worker_model="$( grep -E '^CLAUDE_WORKER_MODEL='     "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_perm;         cur_perm="$(         grep -E '^DEVLOOP_PERMISSION_MODE=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+
+  # Smart defaults for fresh configs
+  local main_default="${cur_main:-claude}"
+  [[ "$has_claude" == "false" && "$has_copilot" == "true" && -z "$cur_main" ]] && main_default="copilot"
+  local worker_default="${cur_worker:-copilot}"
+  local main_model_default="${cur_main_model:-sonnet}"
+  [[ -z "$cur_main_model" ]] && { cur_model_base="$(grep -E '^CLAUDE_MODEL=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"')"; [[ -n "$cur_model_base" ]] && main_model_default="$cur_model_base"; } || true
+  local worker_model_default="${cur_worker_model:-sonnet}"
+  local perm_default="${cur_perm:-smart}"
+
+  # ── Non-interactive: write current/default values and return ─────────────────
+  if [[ "$non_interactive" == "true" ]]; then
+    _wizard_set_config "$cfg" "DEVLOOP_MAIN_PROVIDER"   "$main_default"
+    _wizard_set_config "$cfg" "DEVLOOP_WORKER_PROVIDER" "$worker_default"
+    _wizard_set_config "$cfg" "CLAUDE_MODEL"            "$main_model_default"
+    _wizard_set_config "$cfg" "CLAUDE_MAIN_MODEL"       "$main_model_default"
+    _wizard_set_config "$cfg" "CLAUDE_WORKER_MODEL"     "$worker_model_default"
+    _wizard_set_config "$cfg" "DEVLOOP_PERMISSION_MODE" "$perm_default"
+    success "Configuration written (non-interactive) to ${CYAN}$cfg${RESET}"
+    return 0
+  fi
+
+  # ── Banner ────────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-  echo -e "${BOLD}  DevLoop Setup Wizard${RESET}"
-  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  if command -v gum >/dev/null 2>&1; then
+    gum style \
+      --border double --border-foreground 36 \
+      --padding "1 4" --margin "0 2" \
+      --bold --foreground 36 \
+      "DevLoop Setup Wizard"
+  else
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  DevLoop Setup Wizard${RESET}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  fi
   echo ""
   echo -e "  Detected providers:"
   echo -e "    claude   $(_avail "$has_claude")"
@@ -2536,7 +2669,11 @@ _setup_wizard() {
   echo -e "    opencode $(_avail "$has_opencode")"
   echo -e "    pi       $(_avail "$has_pi")"
   echo ""
-  echo -e "  ${GRAY}Press Enter to accept default shown in [brackets]${RESET}"
+  if command -v gum >/dev/null 2>&1; then
+    echo -e "  ${CYAN}Use arrow keys to select, Enter to confirm.${RESET}"
+  else
+    echo -e "  ${GRAY}Press Enter to accept default shown in [brackets]${RESET}"
+  fi
   echo ""
 
   # ── Step 1: Main provider ────────────────────────────────────────────────────
@@ -2544,23 +2681,11 @@ _setup_wizard() {
   echo -e "  The main provider runs the ${CYAN}orchestrator${RESET}, ${CYAN}architect${RESET}, and ${CYAN}reviewer${RESET}."
   echo -e "  It must support remote control (mobile/browser → terminal handoff)."
   echo ""
-  echo -e "  1) claude   — Claude Code CLI  $(_avail "$has_claude")"
-  echo -e "  2) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
-  echo ""
-  local main_default="claude"
-  [[ "$has_claude" == "false" && "$has_copilot" == "true" ]] && main_default="copilot"
-  local wiz_main=""
-  while [[ -z "$wiz_main" ]]; do
-    printf "  Choose main provider [${BOLD}%s${RESET}]: " "$main_default"
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-$main_default}"
-    case "$_inp" in
-      1|claude)  wiz_main="claude" ;;
-      2|copilot) wiz_main="copilot" ;;
-      *) echo -e "  ${RED}Invalid — enter 1 (claude) or 2 (copilot)${RESET}" ;;
-    esac
-  done
+  local wiz_main
+  wiz_main="$(_cfg_choose \
+    "Main provider (orchestrator / architect / reviewer):" \
+    "$main_default" \
+    "claude" "copilot")"
   echo -e "  ${GREEN}✔${RESET} Main provider: ${BOLD}$wiz_main${RESET}"
   echo ""
 
@@ -2569,28 +2694,14 @@ _setup_wizard() {
   echo -e "  The worker executes ${CYAN}work${RESET} and ${CYAN}fix${RESET} tasks (implements the code)."
   echo -e "  All providers are supported here."
   echo ""
-  echo -e "  1) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
-  echo -e "  2) claude   — Claude Code CLI  $(_avail "$has_claude")"
-  echo -e "  3) opencode — OpenCode         $(_avail "$has_opencode")"
-  echo -e "  4) pi       — Pi               $(_avail "$has_pi")"
-  echo ""
-  local worker_default="copilot"
-  [[ "$wiz_main" == "copilot" ]] && worker_default="claude"
-  [[ "$has_copilot" == "false" && "$has_claude" == "true" ]] && worker_default="claude"
-  local wiz_worker=""
-  while [[ -z "$wiz_worker" ]]; do
-    printf "  Choose worker provider [${BOLD}%s${RESET}]: " "$worker_default"
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-$worker_default}"
-    case "$_inp" in
-      1|copilot)  wiz_worker="copilot" ;;
-      2|claude)   wiz_worker="claude" ;;
-      3|opencode) wiz_worker="opencode" ;;
-      4|pi)       wiz_worker="pi" ;;
-      *) echo -e "  ${RED}Invalid — enter 1-4 or provider name${RESET}" ;;
-    esac
-  done
+  # Adjust worker default based on newly chosen main
+  [[ "$wiz_main" == "copilot" && -z "$cur_worker" ]] && worker_default="claude"
+  [[ "$has_copilot" == "false" && "$has_claude" == "true" && -z "$cur_worker" ]] && worker_default="claude"
+  local wiz_worker
+  wiz_worker="$(_cfg_choose \
+    "Worker provider (work / fix):" \
+    "$worker_default" \
+    "copilot" "claude" "opencode" "pi")"
   echo -e "  ${GREEN}✔${RESET} Worker provider: ${BOLD}$wiz_worker${RESET}"
   echo ""
 
@@ -2598,58 +2709,32 @@ _setup_wizard() {
   echo -e "${BOLD}Step 3/4 — Claude model${RESET}"
   echo -e "  Used when Claude is the main or worker provider."
   echo ""
+
   echo -e "  ${BOLD}Main model${RESET} (architect / reviewer / orchestrator):"
-  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
-  echo -e "  2) opus    — most capable, slower/costlier"
-  echo -e "  3) haiku   — fastest and cheapest"
+  local wiz_main_model
+  wiz_main_model="$(_cfg_choose \
+    "Claude main model:" \
+    "$main_model_default" \
+    "sonnet" "opus" "haiku")"
+  # Allow free-text custom model name if gum wasn't available and user typed something else
+  if [[ -z "$wiz_main_model" ]]; then
+    wiz_main_model="$(_cfg_input "Custom main model name:" "$main_model_default")"
+  fi
   echo ""
-  local wiz_main_model=""
-  while [[ -z "$wiz_main_model" ]]; do
-    printf "  Choose main model [${BOLD}sonnet${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-sonnet}"
-    case "$_inp" in
-      1|sonnet) wiz_main_model="sonnet" ;;
-      2|opus)   wiz_main_model="opus" ;;
-      3|haiku)  wiz_main_model="haiku" ;;
-      *)
-        # allow any model name (custom or future claude-* values)
-        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
-          wiz_main_model="$_inp"
-        else
-          echo -e "  ${RED}Invalid — enter 1 (sonnet), 2 (opus), 3 (haiku), or a model name${RESET}"
-        fi
-        ;;
-    esac
-  done
-  echo ""
+
   echo -e "  ${BOLD}Worker model${RESET} (work / fix):"
-  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
-  echo -e "  2) opus    — most capable, slower/costlier"
-  echo -e "  3) haiku   — fastest and cheapest"
-  echo -e "  4) same    — same as main model (${BOLD}$wiz_main_model${RESET})"
-  echo ""
-  local wiz_worker_model=""
-  while [[ -z "$wiz_worker_model" ]]; do
-    printf "  Choose worker model [${BOLD}sonnet${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-sonnet}"
-    case "$_inp" in
-      1|sonnet) wiz_worker_model="sonnet" ;;
-      2|opus)   wiz_worker_model="opus" ;;
-      3|haiku)  wiz_worker_model="haiku" ;;
-      4|same)   wiz_worker_model="$wiz_main_model" ;;
-      *)
-        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
-          wiz_worker_model="$_inp"
-        else
-          echo -e "  ${RED}Invalid — enter 1-4 or a model name${RESET}"
-        fi
-        ;;
-    esac
-  done
+  local wiz_worker_model
+  wiz_worker_model="$(_cfg_choose \
+    "Claude worker model (same = match main):" \
+    "$worker_model_default" \
+    "sonnet" "opus" "haiku" "same as main ($wiz_main_model)")"
+  # Resolve "same as main" alias
+  if [[ "$wiz_worker_model" == "same as main ($wiz_main_model)" || "$wiz_worker_model" == "same" ]]; then
+    wiz_worker_model="$wiz_main_model"
+  fi
+  if [[ -z "$wiz_worker_model" ]]; then
+    wiz_worker_model="$(_cfg_input "Custom worker model name:" "$worker_model_default")"
+  fi
   echo -e "  ${GREEN}✔${RESET} Main model: ${BOLD}$wiz_main_model${RESET} | Worker model: ${BOLD}$wiz_worker_model${RESET}"
   echo ""
 
@@ -2657,43 +2742,28 @@ _setup_wizard() {
   echo -e "${BOLD}Step 4/4 — Permission mode${RESET}"
   echo -e "  Controls how devloop handles Bash commands from AI agents."
   echo ""
-  echo -e "  1) smart  — block dangerous, allow safe, ask user for unknowns  ${GRAY}[default]${RESET}"
-  echo -e "  2) auto   — allow everything (fastest, no interruptions)"
-  echo -e "  3) strict — allow only known-safe ops, block + ask for the rest"
-  echo -e "  4) off    — disable hook (Claude's built-in behaviour)"
-  echo ""
-  local wiz_perm=""
-  while [[ -z "$wiz_perm" ]]; do
-    printf "  Choose permission mode [${BOLD}smart${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-smart}"
-    case "$_inp" in
-      1|smart)  wiz_perm="smart" ;;
-      2|auto)   wiz_perm="auto" ;;
-      3|strict) wiz_perm="strict" ;;
-      4|off)    wiz_perm="off" ;;
-      *) echo -e "  ${RED}Invalid — enter 1-4 or: smart, auto, strict, off${RESET}" ;;
-    esac
-  done
+  local wiz_perm
+  wiz_perm="$(_cfg_choose \
+    "Permission mode:" \
+    "$perm_default" \
+    "smart" "auto" "strict" "off")"
   echo -e "  ${GREEN}✔${RESET} Permission mode: ${BOLD}$wiz_perm${RESET}"
   echo ""
 
   # ── Summary ──────────────────────────────────────────────────────────────────
   echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "  ${BOLD}Your selections:${RESET}"
-  echo -e "  Main provider:  ${CYAN}$wiz_main${RESET}"
-  echo -e "  Worker provider: ${CYAN}$wiz_worker${RESET}"
+  echo -e "  Main provider:       ${CYAN}$wiz_main${RESET}"
+  echo -e "  Worker provider:     ${CYAN}$wiz_worker${RESET}"
   echo -e "  Claude main model:   ${CYAN}$wiz_main_model${RESET}"
   echo -e "  Claude worker model: ${CYAN}$wiz_worker_model${RESET}"
-  echo -e "  Permission mode: ${CYAN}$wiz_perm${RESET}"
+  echo -e "  Permission mode:     ${CYAN}$wiz_perm${RESET}"
   echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo ""
-  printf "  Save to %s? [${BOLD}Y/n${RESET}]: " "$cfg"
-  local _confirm=""
-  read -r _confirm 2>/dev/null </dev/tty || _confirm=""
-  _confirm="${_confirm:-y}"
-  if [[ "$_confirm" =~ ^[Nn] ]]; then
+
+  local do_save
+  do_save="$(_cfg_confirm "Save to $(basename "$cfg")?" "true")"
+  if [[ "$do_save" == "false" ]]; then
     warn "Wizard cancelled — keeping existing config"
     return 0
   fi
@@ -2707,7 +2777,8 @@ _setup_wizard() {
   _wizard_set_config "$cfg" "CLAUDE_WORKER_MODEL"      "$wiz_worker_model"
   _wizard_set_config "$cfg" "DEVLOOP_PERMISSION_MODE"  "$wiz_perm"
 
-  success "Saved preferences to ${CYAN}$cfg${RESET}"
+  success "Configuration saved to ${CYAN}$(basename "$cfg")${RESET}"
+  echo -e "  ${GRAY}Run ${CYAN}devloop doctor${GRAY} to verify your setup is complete.${RESET}"
   echo ""
 }
 
