@@ -166,6 +166,17 @@ consumers must group by `session`.
 | `DEVLOOP_APPROVAL_TIMEOUT=N` | TTY prompt timeout in seconds (default 120) |
 | `DEVLOOP_EVENTS_DISABLED=1` | Disable event emission entirely |
 
+### `session.resume`
+
+Emitted by `cmd_resume` before re-entering a pipeline.
+
+```json
+{ "ts":"...", "session":"TASK-...", "kind":"session.resume", "from_phase":"worker", "next_phase":"reviewer" }
+```
+
+`from_phase` is the name of the last completed phase (or `"(none)"` if no `phase.end` events exist).
+`next_phase` is the first phase that will be executed on resume.
+
 ## Future kinds (Phase 2+, not yet emitted)
 
 | Kind | Purpose |

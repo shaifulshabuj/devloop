@@ -1813,6 +1813,17 @@ cmd_logs() {
 # ── Configure (standalone wizard) ────────────────────────────────────────────
 
 cmd_configure() {
+  # Parse flags before load_config so we can pass them along
+  local _non_interactive="false"
+  local _cfg_args=()
+  for _a in "$@"; do
+    case "$_a" in
+      --non-interactive|--yes|-y) _non_interactive="true" ;;
+      *) _cfg_args+=("$_a") ;;
+    esac
+  done
+  [[ ${#_cfg_args[@]} -gt 0 ]] && set -- "${_cfg_args[@]}" || set --
+
   load_config
   ensure_dirs
 
@@ -1846,12 +1857,16 @@ cmd_configure() {
 
   if [[ ! -f "$CONFIG_PATH" ]]; then
     info "No devloop.config.sh found — running full init first..."
-    cmd_init --configure
+    if [[ "$_non_interactive" == "true" ]]; then
+      cmd_init --yes
+    else
+      cmd_init --configure
+    fi
     return
   fi
 
   info "Current config: ${CYAN}$CONFIG_PATH${RESET}"
-  _setup_wizard "$CONFIG_PATH"
+  _setup_wizard "$CONFIG_PATH" "$_non_interactive"
 
   # After wizard, reload and regenerate agents with new model settings
   load_config
@@ -1859,9 +1874,8 @@ cmd_configure() {
   write_agent_architect "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
   write_agent_reviewer   "${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}" 2>/dev/null || true
   success "Configuration saved and agent prompts updated"
-  echo ""
-  echo -e "  Run ${CYAN}devloop hooks${RESET} to re-install permission hooks with new settings"
-  echo -e "  Run ${CYAN}devloop status${RESET} to confirm active providers and models"
+  echo -e "  ${GRAY}Run ${CYAN}devloop hooks${GRAY} to re-install permission hooks with new settings${RESET}"
+  echo -e "  ${GRAY}Run ${CYAN}devloop doctor${GRAY} to verify your setup is complete${RESET}"
   echo ""
 }
 
@@ -2513,9 +2527,91 @@ cmd_install() {
 # ── Interactive setup wizard ───────────────────────────────────────────────────
 # Asks the user to choose providers, models, and permission mode.
 # Writes choices directly into the given config file.
-# Usage: _setup_wizard <config_file>
+# Usage: _setup_wizard <config_file> [--non-interactive]
+
+# ── Wizard UI helpers (gum if available, plain read fallback) ─────────────────
+
+# _cfg_choose <header> <default> <choice1> <choice2> ...
+# Prints the chosen value to stdout.
+_cfg_choose() {
+  local header="$1"; local default="$2"; shift 2
+  if command -v gum >/dev/null 2>&1; then
+    gum choose \
+      --header "$header" \
+      --selected "$default" \
+      --cursor.foreground "36" \
+      --header.foreground "36" \
+      "$@" 2>/dev/tty
+  else
+    echo -e "${BOLD}$header${RESET}" >&2
+    local i=1 choice
+    for choice in "$@"; do
+      local marker=""
+      [[ "$choice" == "$default" ]] && marker=" ${GRAY}(current)${RESET}"
+      printf "  %d) %s%b\n" "$i" "$choice" "$marker" >&2
+      i=$(( i + 1 ))
+    done
+    printf "  Pick [default: ${BOLD}%s${RESET}]: " "$default" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    if [[ -z "$answer" ]]; then
+      echo "$default"
+    elif [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= $# )); then
+      # positional lookup: set -- already consumed header+default, $@ is choices
+      local _choices=("$@")
+      echo "${_choices[$(( answer - 1 ))]}"
+    else
+      echo "$answer"
+    fi
+  fi
+}
+
+# _cfg_input <prompt> <default>
+# Prints the entered value to stdout.
+_cfg_input() {
+  local prompt="$1"; local default="$2"
+  if command -v gum >/dev/null 2>&1; then
+    gum input \
+      --prompt "$prompt " \
+      --value "$default" \
+      --cursor.foreground "36" 2>/dev/tty
+  else
+    printf "%s [${BOLD}%s${RESET}]: " "$prompt" "$default" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    echo "${answer:-$default}"
+  fi
+}
+
+# _cfg_confirm <prompt> <default-bool: true|false>
+# Prints "true" or "false" to stdout.
+_cfg_confirm() {
+  local prompt="$1"; local default="${2:-true}"
+  if command -v gum >/dev/null 2>&1; then
+    local gum_default="yes"
+    [[ "$default" == "false" ]] && gum_default="no"
+    if gum confirm "$prompt" \
+        --default="$gum_default" \
+        --affirmative "Yes" --negative "No" \
+        --selected.background "36" 2>/dev/tty; then
+      echo "true"
+    else
+      echo "false"
+    fi
+  else
+    local yn_hint="Y/n"
+    [[ "$default" == "false" ]] && yn_hint="y/N"
+    printf "%s [%s]: " "$prompt" "$yn_hint" >&2
+    local answer; read -r answer 2>/dev/null </dev/tty || answer=""
+    case "${answer,,}" in
+      y|yes) echo "true" ;;
+      n|no)  echo "false" ;;
+      *)     echo "$default" ;;
+    esac
+  fi
+}
+
 _setup_wizard() {
   local cfg="$1"
+  local non_interactive="${2:-false}"
 
   # Detect installed providers
   local has_claude="false"; command -v claude &>/dev/null && has_claude="true"
@@ -2525,10 +2621,47 @@ _setup_wizard() {
 
   _avail() { [[ "$1" == "true" ]] && echo "${GREEN}✔ installed${RESET}" || echo "${YELLOW}⚠  not found${RESET}"; }
 
+  # Read current values from config as defaults (so Enter keeps current setting)
+  local cur_main;         cur_main="$(         grep -E '^DEVLOOP_MAIN_PROVIDER='   "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_worker;       cur_worker="$(       grep -E '^DEVLOOP_WORKER_PROVIDER=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_main_model;   cur_main_model="$(   grep -E '^CLAUDE_MAIN_MODEL='       "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_worker_model; cur_worker_model="$( grep -E '^CLAUDE_WORKER_MODEL='     "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+  local cur_perm;         cur_perm="$(         grep -E '^DEVLOOP_PERMISSION_MODE=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"' )" || true
+
+  # Smart defaults for fresh configs
+  local main_default="${cur_main:-claude}"
+  [[ "$has_claude" == "false" && "$has_copilot" == "true" && -z "$cur_main" ]] && main_default="copilot"
+  local worker_default="${cur_worker:-copilot}"
+  local main_model_default="${cur_main_model:-sonnet}"
+  [[ -z "$cur_main_model" ]] && { cur_model_base="$(grep -E '^CLAUDE_MODEL=' "$cfg" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"')"; [[ -n "$cur_model_base" ]] && main_model_default="$cur_model_base"; } || true
+  local worker_model_default="${cur_worker_model:-sonnet}"
+  local perm_default="${cur_perm:-smart}"
+
+  # ── Non-interactive: write current/default values and return ─────────────────
+  if [[ "$non_interactive" == "true" ]]; then
+    _wizard_set_config "$cfg" "DEVLOOP_MAIN_PROVIDER"   "$main_default"
+    _wizard_set_config "$cfg" "DEVLOOP_WORKER_PROVIDER" "$worker_default"
+    _wizard_set_config "$cfg" "CLAUDE_MODEL"            "$main_model_default"
+    _wizard_set_config "$cfg" "CLAUDE_MAIN_MODEL"       "$main_model_default"
+    _wizard_set_config "$cfg" "CLAUDE_WORKER_MODEL"     "$worker_model_default"
+    _wizard_set_config "$cfg" "DEVLOOP_PERMISSION_MODE" "$perm_default"
+    success "Configuration written (non-interactive) to ${CYAN}$cfg${RESET}"
+    return 0
+  fi
+
+  # ── Banner ────────────────────────────────────────────────────────────────────
   echo ""
-  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-  echo -e "${BOLD}  DevLoop Setup Wizard${RESET}"
-  echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  if command -v gum >/dev/null 2>&1; then
+    gum style \
+      --border double --border-foreground 36 \
+      --padding "1 4" --margin "0 2" \
+      --bold --foreground 36 \
+      "DevLoop Setup Wizard"
+  else
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${BOLD}  DevLoop Setup Wizard${RESET}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  fi
   echo ""
   echo -e "  Detected providers:"
   echo -e "    claude   $(_avail "$has_claude")"
@@ -2536,7 +2669,11 @@ _setup_wizard() {
   echo -e "    opencode $(_avail "$has_opencode")"
   echo -e "    pi       $(_avail "$has_pi")"
   echo ""
-  echo -e "  ${GRAY}Press Enter to accept default shown in [brackets]${RESET}"
+  if command -v gum >/dev/null 2>&1; then
+    echo -e "  ${CYAN}Use arrow keys to select, Enter to confirm.${RESET}"
+  else
+    echo -e "  ${GRAY}Press Enter to accept default shown in [brackets]${RESET}"
+  fi
   echo ""
 
   # ── Step 1: Main provider ────────────────────────────────────────────────────
@@ -2544,23 +2681,11 @@ _setup_wizard() {
   echo -e "  The main provider runs the ${CYAN}orchestrator${RESET}, ${CYAN}architect${RESET}, and ${CYAN}reviewer${RESET}."
   echo -e "  It must support remote control (mobile/browser → terminal handoff)."
   echo ""
-  echo -e "  1) claude   — Claude Code CLI  $(_avail "$has_claude")"
-  echo -e "  2) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
-  echo ""
-  local main_default="claude"
-  [[ "$has_claude" == "false" && "$has_copilot" == "true" ]] && main_default="copilot"
-  local wiz_main=""
-  while [[ -z "$wiz_main" ]]; do
-    printf "  Choose main provider [${BOLD}%s${RESET}]: " "$main_default"
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-$main_default}"
-    case "$_inp" in
-      1|claude)  wiz_main="claude" ;;
-      2|copilot) wiz_main="copilot" ;;
-      *) echo -e "  ${RED}Invalid — enter 1 (claude) or 2 (copilot)${RESET}" ;;
-    esac
-  done
+  local wiz_main
+  wiz_main="$(_cfg_choose \
+    "Main provider (orchestrator / architect / reviewer):" \
+    "$main_default" \
+    "claude" "copilot")"
   echo -e "  ${GREEN}✔${RESET} Main provider: ${BOLD}$wiz_main${RESET}"
   echo ""
 
@@ -2569,28 +2694,14 @@ _setup_wizard() {
   echo -e "  The worker executes ${CYAN}work${RESET} and ${CYAN}fix${RESET} tasks (implements the code)."
   echo -e "  All providers are supported here."
   echo ""
-  echo -e "  1) copilot  — GitHub Copilot   $(_avail "$has_copilot")"
-  echo -e "  2) claude   — Claude Code CLI  $(_avail "$has_claude")"
-  echo -e "  3) opencode — OpenCode         $(_avail "$has_opencode")"
-  echo -e "  4) pi       — Pi               $(_avail "$has_pi")"
-  echo ""
-  local worker_default="copilot"
-  [[ "$wiz_main" == "copilot" ]] && worker_default="claude"
-  [[ "$has_copilot" == "false" && "$has_claude" == "true" ]] && worker_default="claude"
-  local wiz_worker=""
-  while [[ -z "$wiz_worker" ]]; do
-    printf "  Choose worker provider [${BOLD}%s${RESET}]: " "$worker_default"
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-$worker_default}"
-    case "$_inp" in
-      1|copilot)  wiz_worker="copilot" ;;
-      2|claude)   wiz_worker="claude" ;;
-      3|opencode) wiz_worker="opencode" ;;
-      4|pi)       wiz_worker="pi" ;;
-      *) echo -e "  ${RED}Invalid — enter 1-4 or provider name${RESET}" ;;
-    esac
-  done
+  # Adjust worker default based on newly chosen main
+  [[ "$wiz_main" == "copilot" && -z "$cur_worker" ]] && worker_default="claude"
+  [[ "$has_copilot" == "false" && "$has_claude" == "true" && -z "$cur_worker" ]] && worker_default="claude"
+  local wiz_worker
+  wiz_worker="$(_cfg_choose \
+    "Worker provider (work / fix):" \
+    "$worker_default" \
+    "copilot" "claude" "opencode" "pi")"
   echo -e "  ${GREEN}✔${RESET} Worker provider: ${BOLD}$wiz_worker${RESET}"
   echo ""
 
@@ -2598,58 +2709,32 @@ _setup_wizard() {
   echo -e "${BOLD}Step 3/4 — Claude model${RESET}"
   echo -e "  Used when Claude is the main or worker provider."
   echo ""
+
   echo -e "  ${BOLD}Main model${RESET} (architect / reviewer / orchestrator):"
-  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
-  echo -e "  2) opus    — most capable, slower/costlier"
-  echo -e "  3) haiku   — fastest and cheapest"
+  local wiz_main_model
+  wiz_main_model="$(_cfg_choose \
+    "Claude main model:" \
+    "$main_model_default" \
+    "sonnet" "opus" "haiku")"
+  # Allow free-text custom model name if gum wasn't available and user typed something else
+  if [[ -z "$wiz_main_model" ]]; then
+    wiz_main_model="$(_cfg_input "Custom main model name:" "$main_model_default")"
+  fi
   echo ""
-  local wiz_main_model=""
-  while [[ -z "$wiz_main_model" ]]; do
-    printf "  Choose main model [${BOLD}sonnet${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-sonnet}"
-    case "$_inp" in
-      1|sonnet) wiz_main_model="sonnet" ;;
-      2|opus)   wiz_main_model="opus" ;;
-      3|haiku)  wiz_main_model="haiku" ;;
-      *)
-        # allow any model name (custom or future claude-* values)
-        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
-          wiz_main_model="$_inp"
-        else
-          echo -e "  ${RED}Invalid — enter 1 (sonnet), 2 (opus), 3 (haiku), or a model name${RESET}"
-        fi
-        ;;
-    esac
-  done
-  echo ""
+
   echo -e "  ${BOLD}Worker model${RESET} (work / fix):"
-  echo -e "  1) sonnet  — balanced speed and quality  ${GRAY}[default]${RESET}"
-  echo -e "  2) opus    — most capable, slower/costlier"
-  echo -e "  3) haiku   — fastest and cheapest"
-  echo -e "  4) same    — same as main model (${BOLD}$wiz_main_model${RESET})"
-  echo ""
-  local wiz_worker_model=""
-  while [[ -z "$wiz_worker_model" ]]; do
-    printf "  Choose worker model [${BOLD}sonnet${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-sonnet}"
-    case "$_inp" in
-      1|sonnet) wiz_worker_model="sonnet" ;;
-      2|opus)   wiz_worker_model="opus" ;;
-      3|haiku)  wiz_worker_model="haiku" ;;
-      4|same)   wiz_worker_model="$wiz_main_model" ;;
-      *)
-        if echo "$_inp" | grep -qE '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'; then
-          wiz_worker_model="$_inp"
-        else
-          echo -e "  ${RED}Invalid — enter 1-4 or a model name${RESET}"
-        fi
-        ;;
-    esac
-  done
+  local wiz_worker_model
+  wiz_worker_model="$(_cfg_choose \
+    "Claude worker model (same = match main):" \
+    "$worker_model_default" \
+    "sonnet" "opus" "haiku" "same as main ($wiz_main_model)")"
+  # Resolve "same as main" alias
+  if [[ "$wiz_worker_model" == "same as main ($wiz_main_model)" || "$wiz_worker_model" == "same" ]]; then
+    wiz_worker_model="$wiz_main_model"
+  fi
+  if [[ -z "$wiz_worker_model" ]]; then
+    wiz_worker_model="$(_cfg_input "Custom worker model name:" "$worker_model_default")"
+  fi
   echo -e "  ${GREEN}✔${RESET} Main model: ${BOLD}$wiz_main_model${RESET} | Worker model: ${BOLD}$wiz_worker_model${RESET}"
   echo ""
 
@@ -2657,43 +2742,28 @@ _setup_wizard() {
   echo -e "${BOLD}Step 4/4 — Permission mode${RESET}"
   echo -e "  Controls how devloop handles Bash commands from AI agents."
   echo ""
-  echo -e "  1) smart  — block dangerous, allow safe, ask user for unknowns  ${GRAY}[default]${RESET}"
-  echo -e "  2) auto   — allow everything (fastest, no interruptions)"
-  echo -e "  3) strict — allow only known-safe ops, block + ask for the rest"
-  echo -e "  4) off    — disable hook (Claude's built-in behaviour)"
-  echo ""
-  local wiz_perm=""
-  while [[ -z "$wiz_perm" ]]; do
-    printf "  Choose permission mode [${BOLD}smart${RESET}]: "
-    local _inp=""
-    read -r _inp 2>/dev/null </dev/tty || _inp=""
-    _inp="${_inp:-smart}"
-    case "$_inp" in
-      1|smart)  wiz_perm="smart" ;;
-      2|auto)   wiz_perm="auto" ;;
-      3|strict) wiz_perm="strict" ;;
-      4|off)    wiz_perm="off" ;;
-      *) echo -e "  ${RED}Invalid — enter 1-4 or: smart, auto, strict, off${RESET}" ;;
-    esac
-  done
+  local wiz_perm
+  wiz_perm="$(_cfg_choose \
+    "Permission mode:" \
+    "$perm_default" \
+    "smart" "auto" "strict" "off")"
   echo -e "  ${GREEN}✔${RESET} Permission mode: ${BOLD}$wiz_perm${RESET}"
   echo ""
 
   # ── Summary ──────────────────────────────────────────────────────────────────
   echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo -e "  ${BOLD}Your selections:${RESET}"
-  echo -e "  Main provider:  ${CYAN}$wiz_main${RESET}"
-  echo -e "  Worker provider: ${CYAN}$wiz_worker${RESET}"
+  echo -e "  Main provider:       ${CYAN}$wiz_main${RESET}"
+  echo -e "  Worker provider:     ${CYAN}$wiz_worker${RESET}"
   echo -e "  Claude main model:   ${CYAN}$wiz_main_model${RESET}"
   echo -e "  Claude worker model: ${CYAN}$wiz_worker_model${RESET}"
-  echo -e "  Permission mode: ${CYAN}$wiz_perm${RESET}"
+  echo -e "  Permission mode:     ${CYAN}$wiz_perm${RESET}"
   echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo ""
-  printf "  Save to %s? [${BOLD}Y/n${RESET}]: " "$cfg"
-  local _confirm=""
-  read -r _confirm 2>/dev/null </dev/tty || _confirm=""
-  _confirm="${_confirm:-y}"
-  if [[ "$_confirm" =~ ^[Nn] ]]; then
+
+  local do_save
+  do_save="$(_cfg_confirm "Save to $(basename "$cfg")?" "true")"
+  if [[ "$do_save" == "false" ]]; then
     warn "Wizard cancelled — keeping existing config"
     return 0
   fi
@@ -2707,7 +2777,8 @@ _setup_wizard() {
   _wizard_set_config "$cfg" "CLAUDE_WORKER_MODEL"      "$wiz_worker_model"
   _wizard_set_config "$cfg" "DEVLOOP_PERMISSION_MODE"  "$wiz_perm"
 
-  success "Saved preferences to ${CYAN}$cfg${RESET}"
+  success "Configuration saved to ${CYAN}$(basename "$cfg")${RESET}"
+  echo -e "  ${GRAY}Run ${CYAN}devloop doctor${GRAY} to verify your setup is complete.${RESET}"
   echo ""
 }
 
@@ -7929,6 +8000,842 @@ cmd_queue() {
   esac
 }
 
+# ── cmd: resume — resume an interrupted pipeline from last completed phase ────
+
+# _compute_resume_from <session_dir>
+# Pure function — no side effects, no I/O beyond reading the events file.
+# Returns the next phase name to execute (or "complete" if already finished).
+# Stage ordering: architect → worker → reviewer → fix-N loop
+_compute_resume_from() {
+  local sdir="${1:-}"
+  local events_file="$sdir/events.ndjson"
+
+  # Missing events file → start from scratch after architect
+  if [[ ! -f "$events_file" ]]; then
+    echo "worker"
+    return 0
+  fi
+
+  # Find the last phase.end event
+  local last_phase_end_line
+  last_phase_end_line="$(grep '"kind":"phase.end"' "$events_file" 2>/dev/null | tail -1 || true)"
+
+  if [[ -z "$last_phase_end_line" ]]; then
+    # No phase.end found at all — resume from architect (re-run worker)
+    echo "worker"
+    return 0
+  fi
+
+  # Extract phase and status from JSON (jq preferred; sed fallback)
+  local phase status
+  if command -v jq >/dev/null 2>&1; then
+    phase="$(printf '%s' "$last_phase_end_line"  | jq -r '.phase  // empty' 2>/dev/null || true)"
+    status="$(printf '%s' "$last_phase_end_line" | jq -r '.status // empty' 2>/dev/null || true)"
+  else
+    phase="$(printf '%s'  "$last_phase_end_line" | sed 's/.*"phase":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+    status="$(printf '%s' "$last_phase_end_line" | sed 's/.*"status":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+  fi
+
+  case "$phase" in
+    architect)
+      echo "worker"
+      ;;
+    worker)
+      echo "reviewer"
+      ;;
+    reviewer)
+      case "$status" in
+        approved)   echo "complete" ;;
+        rejected)   echo "complete" ;;
+        needs-work) echo "fix" ;;
+        *)          echo "reviewer" ;;
+      esac
+      ;;
+    fix-*)
+      # After any fix-N, we re-review
+      echo "reviewer"
+      ;;
+    respec)
+      echo "complete"
+      ;;
+    *)
+      # Unknown last phase — safe fallback is re-run reviewer
+      echo "reviewer"
+      ;;
+  esac
+}
+
+cmd_resume() {
+  local dry_run=false
+  local do_list=false
+  local target_id=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list]"
+        echo ""
+        echo -e "  ${CYAN}devloop resume${RESET}              Resume the newest unfinished session"
+        echo -e "  ${CYAN}devloop resume TASK-ID${RESET}      Resume the specified session"
+        echo -e "  ${CYAN}devloop resume --dry-run${RESET}    Print would-resume info without executing"
+        echo -e "  ${CYAN}devloop resume --list${RESET}       List resumable sessions and exit"
+        echo ""
+        echo -e "  Resumable statuses: ${GRAY}running, needs-work, (absent)${RESET}"
+        echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET}."
+        exit 0
+        ;;
+      --dry-run) dry_run=true;  shift ;;
+      --list)    do_list=true;  shift ;;
+      TASK-*)    target_id="$1"; shift ;;
+      *)         shift ;;
+    esac
+  done
+
+  load_config
+  ensure_dirs
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_base="$root/$DEVLOOP_DIR/sessions"
+
+  # ── --list mode ─────────────────────────────────────────────────────────────
+  if [[ "$do_list" == "true" ]]; then
+    local found=0
+    local sdir sname sstatus sfeature
+    while IFS= read -r sdir; do
+      [[ -d "$sdir" ]] || continue
+      sname="$(basename "$sdir")"
+      sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
+      case "$sstatus" in
+        approved|rejected|rejected-at-*) continue ;;
+      esac
+      sfeature="$(cat "$sdir/feature.txt" 2>/dev/null | head -1 | head -c 60 || echo "(no feature)")"
+      printf '%-32s  %-14s  %s\n' "$sname" "$sstatus" "$sfeature"
+      found=$(( found + 1 ))
+    done < <(ls -dt "$sessions_base"/TASK-* 2>/dev/null || true)
+    if [[ "$found" -eq 0 ]]; then
+      info "No resumable sessions found."
+    fi
+    exit 0
+  fi
+
+  # ── Resolve target session ────────────────────────────────────────────────
+  local id=""
+  if [[ -n "$target_id" ]]; then
+    id="$target_id"
+  else
+    # Find the newest session that is not already finished
+    local sdir sname sstatus
+    while IFS= read -r sdir; do
+      [[ -d "$sdir" ]] || continue
+      sname="$(basename "$sdir")"
+      sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
+      case "$sstatus" in
+        approved|rejected|rejected-at-*) continue ;;
+      esac
+      id="$sname"
+      break
+    done < <(ls -dt "$sessions_base"/TASK-* 2>/dev/null || true)
+  fi
+
+  if [[ -z "$id" ]]; then
+    error "No resumable session found."
+    echo -e "  ${GRAY}Use ${CYAN}devloop resume --list${GRAY} to see available sessions.${RESET}"
+    exit 1
+  fi
+
+  # ── Validate session ──────────────────────────────────────────────────────
+  local session_dir="$sessions_base/$id"
+  if [[ ! -d "$session_dir" ]]; then
+    error "Session directory not found: $session_dir"
+    exit 1
+  fi
+
+  # Check if already complete
+  local cur_status; cur_status="$(cat "$session_dir/status" 2>/dev/null || echo "running")"
+  case "$cur_status" in
+    approved|rejected|rejected-at-*)
+      info "Session $id already finished with status: $cur_status — nothing to resume."
+      exit 0
+      ;;
+  esac
+
+  # Validate spec file exists
+  local spec_file="$SPECS_PATH/$id.md"
+  if [[ ! -f "$spec_file" ]]; then
+    error "Spec file not found: $spec_file"
+    echo -e "  ${GRAY}Cannot resume without the spec. Check: ${CYAN}$SPECS_PATH/${RESET}"
+    exit 1
+  fi
+
+  # ── Compute resume point ──────────────────────────────────────────────────
+  local next_phase
+  next_phase="$(_compute_resume_from "$session_dir")"
+
+  if [[ -z "$next_phase" || "$next_phase" == "complete" ]]; then
+    # Events say approved/complete — close out cleanly
+    export DEVLOOP_CURRENT_SESSION_ID="$id"
+    if [[ "$dry_run" == "false" ]]; then
+      _session_finish "approved"
+    fi
+    info "Session $id already reached a terminal state — marking approved."
+    exit 0
+  fi
+
+  # ── --dry-run mode ────────────────────────────────────────────────────────
+  if [[ "$dry_run" == "true" ]]; then
+    echo "Would resume $id from architect → next phase: $next_phase"
+    exit 0
+  fi
+
+  # ── Set up env and emit session.resume event ──────────────────────────────
+  export DEVLOOP_CURRENT_SESSION_ID="$id"
+
+  # Determine the "from_phase" (last completed) by re-reading last phase.end
+  local from_phase="(none)"
+  if [[ -f "$session_dir/events.ndjson" ]]; then
+    local _lpe
+    _lpe="$(grep '"kind":"phase.end"' "$session_dir/events.ndjson" 2>/dev/null | tail -1 || true)"
+    if [[ -n "$_lpe" ]]; then
+      if command -v jq >/dev/null 2>&1; then
+        from_phase="$(printf '%s' "$_lpe" | jq -r '.phase // empty' 2>/dev/null || true)"
+      else
+        from_phase="$(printf '%s' "$_lpe" | sed 's/.*"phase":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+      fi
+    fi
+  fi
+
+  emit_event "session.resume" from_phase="$from_phase" next_phase="$next_phase"
+
+  local feature; feature="$(cat "$session_dir/feature.txt" 2>/dev/null | head -1 || echo "(unknown)")"
+  step "▶ Resuming ${BOLD}$id${RESET}"
+  echo -e "  ${GRAY}Feature:  ${RESET}$feature"
+  echo -e "  ${GRAY}From:     ${RESET}$from_phase"
+  echo -e "  ${GRAY}Next:     ${CYAN}$next_phase${RESET}"
+  echo ""
+
+  # ── Pipeline parameters (mirror cmd_run defaults) ─────────────────────────
+  local max_retries=3
+  local fix_strategy="${DEVLOOP_FIX_STRATEGY:-escalate}"
+  local deep_threshold=$(( (max_retries + 1) / 2 ))
+  local review_file="$SPECS_PATH/$id-review.md"
+  local fix_history_parts=()
+
+  # Count how many fix rounds have already completed (for correct numbering)
+  local existing_fix_rounds=0
+  if [[ -f "$session_dir/events.ndjson" ]]; then
+    existing_fix_rounds="$(grep '"kind":"phase.end"' "$session_dir/events.ndjson" 2>/dev/null \
+      | grep '"phase":"fix-' | wc -l | tr -d ' ' || echo 0)"
+  fi
+  local fix_round="$existing_fix_rounds"
+
+  # ── Execute pipeline tail ─────────────────────────────────────────────────
+
+  # Worker stage (if needed)
+  if [[ "$next_phase" == "worker" ]]; then
+    # Run plan gate if configured
+    if [[ "${DEVLOOP_PLAN_GATE:-on}" != "off" ]]; then
+      local _spec_path="$SPECS_PATH/$id.md"
+      local _plan_summary; _plan_summary="$(_extract_plan_summary "$_spec_path")"
+      set +e
+      approve_plan "$_plan_summary" "$_spec_path"
+      local _plan_rc=$?
+      set -e
+      case "$_plan_rc" in
+        0) success "Plan approved" ;;
+        2)
+          info "Plan edit requested — opening spec in \$EDITOR..."
+          "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
+          info "Spec edited — continuing."
+          ;;
+        *)
+          _session_finish "rejected-at-plan"
+          error "Plan rejected — pipeline stopped"
+          exit 1
+          ;;
+      esac
+      echo ""
+    fi
+
+    step "🔨 Implementing..."
+    _session_phase_start "worker"
+    cmd_work "$id"
+    _session_phase_end "worker" "done"
+    echo ""
+    next_phase="reviewer"
+
+    # Diff gate
+    if [[ "${DEVLOOP_DIFF_GATE:-on}" != "off" ]]; then
+      local _diff_summary _diff_full
+      _diff_summary="$(_extract_diff_summary "$id")"
+      _diff_full="$(_capture_worker_diff "$id")"
+      if [[ -n "$_diff_summary" ]]; then
+        local diff_edit_round=0
+        local diff_max_edits="${DEVLOOP_DIFF_MAX_EDITS:-2}"
+        while :; do
+          set +e; approve_diff "$_diff_summary" "$_diff_full"; local _diff_rc=$?; set -e
+          case "$_diff_rc" in
+            0) success "Diff approved"; break ;;
+            2)
+              if (( diff_edit_round >= diff_max_edits )); then
+                warn "Diff edit limit reached — proceeding."
+                break
+              fi
+              diff_edit_round=$(( diff_edit_round + 1 ))
+              local _feedback_file="$session_dir/diff-feedback-$diff_edit_round.md"
+              _build_diff_feedback_template "$id" "$_diff_full" > "$_feedback_file"
+              "${EDITOR:-vi}" "$_feedback_file" </dev/tty >/dev/tty 2>/dev/tty || true
+              if ! _diff_feedback_has_content "$_feedback_file"; then
+                warn "No feedback content — skipping fix round."; break
+              fi
+              _session_phase_start "fix-edit-$diff_edit_round"
+              DEVLOOP_FIX_EXTRA_INSTRUCTIONS="$_feedback_file" cmd_fix "$id"
+              _session_phase_end "fix-edit-$diff_edit_round" "done"
+              _diff_summary="$(_extract_diff_summary "$id")"
+              _diff_full="$(_capture_worker_diff "$id")"
+              [[ -z "$_diff_summary" ]] && { info "No further changes — accepting."; break; }
+              ;;
+            *)
+              _session_finish "rejected-at-diff"
+              error "Diff rejected — pipeline stopped"; exit 1 ;;
+          esac
+        done
+        echo ""
+      fi
+    fi
+  fi
+
+  # Reviewer + fix loop
+  local verdict="NEEDS_WORK"
+  local unknown_round=0
+  local max_unknown_retries=2
+
+  # If next_phase is "fix", we need to run a fix first then reviewer
+  local start_with_fix=false
+  [[ "$next_phase" == "fix" ]] && start_with_fix=true
+
+  if [[ "$start_with_fix" == "true" ]]; then
+    # We're resuming into a fix round
+    fix_round=$(( fix_round + 1 ))
+    local fix_phase_name="fix-$fix_round"
+    step "🔧 Fixing (attempt $fix_round — resume)..."
+    _session_phase_start "$fix_phase_name"
+    cmd_fix "$id"
+    _session_phase_end "$fix_phase_name" "done"
+    echo ""
+    verdict="NEEDS_WORK"
+  elif [[ "$next_phase" == "reviewer" ]]; then
+    # Start with reviewer (verdict loop handles it below)
+    true
+  else
+    # next_phase == "worker" is handled above; anything else falls to reviewer
+    true
+  fi
+
+  # Reviewer / fix loop
+  while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
+    if (( fix_round == 0 )); then
+      step "🔍 Reviewing..."
+    else
+      step "🔍 Re-reviewing (fix $fix_round/$max_retries)..."
+    fi
+    _session_phase_start "reviewer"
+    cmd_review "$id"
+    echo ""
+    verdict="$(parse_review_verdict "$review_file")"
+
+    case "$verdict" in
+      APPROVED)
+        _session_phase_end "reviewer" "approved"
+        break
+        ;;
+      REJECTED)
+        _session_phase_end "reviewer" "rejected"
+        _session_finish "rejected"
+        error "REJECTED — pipeline stopped"
+        echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Review: ${CYAN}devloop status $id${RESET}"
+        exit 1
+        ;;
+      NEEDS_WORK)
+        _session_phase_end "reviewer" "needs-work"
+        unknown_round=0
+        if [[ -f "$review_file" ]]; then
+          fix_history_parts+=("=== Review after fix round $fix_round ===$(printf '\n')$(cat "$review_file")")
+        fi
+        fix_round=$(( fix_round + 1 ))
+        if (( fix_round > max_retries )); then
+          if [[ "$fix_strategy" == "escalate" ]]; then
+            warn "Max fix retries reached — task left as NEEDS_WORK"
+          fi
+          _session_finish "needs-work"
+          warn "Max fix retries ($max_retries) reached"
+          echo -e "  ${GRAY}Continue: ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
+          exit 2
+        fi
+        local fix_phase_name="fix-$fix_round"
+        _session_phase_start "$fix_phase_name"
+        if (( fix_round <= deep_threshold )); then
+          step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
+          cmd_fix "$id"
+        else
+          step "🔧 Fixing (attempt $fix_round/$max_retries — deep)..."
+          local combined_history=""; local h
+          for h in "${fix_history_parts[@]}"; do combined_history+="$h"$'\n'; done
+          cmd_fix --history "$combined_history" "$id"
+        fi
+        _session_phase_end "$fix_phase_name" "done"
+        echo ""
+        ;;
+      *)
+        _session_phase_end "reviewer" "unknown"
+        unknown_round=$(( unknown_round + 1 ))
+        warn "Could not determine verdict from review output."
+        if (( unknown_round >= max_unknown_retries )); then
+          _session_finish "error"
+          error "Unknown verdict repeated — stopping."
+          exit 2
+        fi
+        ;;
+    esac
+  done
+
+  _session_finish "approved"
+  divider
+  success "Pipeline complete: ${CYAN}$id${RESET}"
+  if (( fix_round > 0 )); then
+    echo -e "  ${GRAY}Approved after $fix_round fix round(s)${RESET}"
+  fi
+  echo ""
+}
+
+# ── cmd: permissions — interactive allow/deny editor ─────────────────────────
+
+cmd_permissions() {
+  local PERMISSIONS_YAML
+  PERMISSIONS_YAML="$(find_project_root 2>/dev/null || pwd)/.devloop/permissions.yaml"
+
+  # ── Internal helpers ────────────────────────────────────────────────────────
+
+  _perms_ensure_yaml() {
+    if [[ ! -f "$PERMISSIONS_YAML" ]]; then
+      mkdir -p "$(dirname "$PERMISSIONS_YAML")"
+      cat > "$PERMISSIONS_YAML" <<'YAML'
+# DevLoop persistent permission policy
+# See: docs in .claude/hooks/devloop-permission.sh
+
+deny: []
+
+allow: []
+YAML
+    fi
+  }
+
+  _perms_list() {
+    # _perms_list <key>  -> prints each entry on its own line
+    local key="$1"
+    [[ -f "$PERMISSIONS_YAML" ]] || return 0
+    awk -v key="$key" '
+      BEGIN { in_section=0 }
+      /^[^[:space:]#]/ {
+        if ($0 ~ "^"key":[[:space:]]*(\\[\\])?[[:space:]]*$") { in_section=1; next }
+        in_section=0
+      }
+      in_section && /^[[:space:]]*-/ {
+        line=$0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        sub(/^"/, "", line); sub(/"$/, "", line)
+        sub(/^'\''/, "", line); sub(/'\''$/, "", line)
+        print line
+      }
+    ' "$PERMISSIONS_YAML"
+  }
+
+  _perms_append() {
+    # _perms_append <key> <pattern>   atomic add
+    local key="$1"; local pattern="$2"
+    _perms_ensure_yaml
+    python3 - "$PERMISSIONS_YAML" "$key" "$pattern" <<'PY'
+import sys, re, pathlib
+path, key, pattern = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+# Convert `key: []` (possibly with trailing comment / spaces) to `key:` block form.
+text = re.sub(rf'^({re.escape(key)}):\s*\[\]\s*$', rf'\1:', text, count=1, flags=re.MULTILINE)
+# If the key block doesn't exist, append it at the end.
+if not re.search(rf'^{re.escape(key)}:\s*$', text, flags=re.MULTILINE):
+    text = text.rstrip() + f'\n\n{key}:\n'
+# Append the new entry after the key header (and any existing entries / comments
+# that belong to this section before the next top-level key).
+lines = text.splitlines(keepends=True)
+out = []
+i = 0
+inserted = False
+while i < len(lines):
+    line_str = lines[i]
+    # Ensure the key header line ends with a newline (it may not if it's the last line)
+    if not line_str.endswith('\n'):
+        line_str += '\n'
+    out.append(line_str)
+    if not inserted and re.match(rf'^{re.escape(key)}:\s*$', lines[i].rstrip('\n')):
+        # Find end of this section.
+        j = i + 1
+        while j < len(lines):
+            ln = lines[j]
+            # New top-level key (no leading whitespace, ends with :)
+            if re.match(r'^[A-Za-z_][\w-]*:', ln):
+                break
+            out.append(ln)
+            j += 1
+        # Insert before whatever comes after the section.
+        out.append(f'  - "{pattern}"\n')
+        i = j
+        inserted = True
+        continue
+    i += 1
+pathlib.Path(path).write_text(''.join(out))
+PY
+  }
+
+  _perms_remove() {
+    # _perms_remove <key> <pattern>   removes one exact-match line under key
+    local key="$1"; local pattern="$2"
+    python3 - "$PERMISSIONS_YAML" "$key" "$pattern" <<'PY'
+import sys, re, pathlib
+path, key, pattern = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+lines = text.splitlines(keepends=True)
+in_section = False
+out = []
+for ln in lines:
+    if re.match(rf'^{re.escape(key)}:\s*$', ln):
+        in_section = True
+        out.append(ln); continue
+    if in_section and re.match(r'^[A-Za-z_][\w-]*:', ln):
+        in_section = False
+    if in_section:
+        m = re.match(r'^\s*-\s*"?([^"]*)"?\s*$', ln)
+        if m and m.group(1).strip() == pattern.strip():
+            continue  # drop this line
+    out.append(ln)
+pathlib.Path(path).write_text(''.join(out))
+PY
+  }
+
+  _perms_validate() {
+    # Quick round-trip check — mirrors hook's _yaml_extract_list logic.
+    # Returns 0 if both keys parse without error.
+    _perms_list allow >/dev/null 2>&1 && _perms_list deny >/dev/null 2>&1
+  }
+
+  _perms_print_lists() {
+    echo -e "\n${BOLD}allow:${RESET}"
+    local idx=1 pat
+    while IFS= read -r pat; do
+      echo -e "  ${GREEN}$idx)${RESET} $pat"
+      idx=$((idx+1))
+    done < <(_perms_list allow)
+    [[ $idx -eq 1 ]] && echo -e "  ${GRAY}(empty)${RESET}"
+
+    echo -e "\n${BOLD}deny:${RESET}"
+    idx=1
+    while IFS= read -r pat; do
+      echo -e "  ${RED}$idx)${RESET} $pat"
+      idx=$((idx+1))
+    done < <(_perms_list deny)
+    [[ $idx -eq 1 ]] && echo -e "  ${GRAY}(empty)${RESET}"
+    echo ""
+  }
+
+  _perms_pick_from_list() {
+    # _perms_pick_from_list <key>  → prints chosen pattern or empty string
+    local key="$1"
+    local -a entries=()
+    local pat
+    while IFS= read -r pat; do
+      entries+=("$pat")
+    done < <(_perms_list "$key")
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+      warn "No entries in $key list."
+      return 1
+    fi
+
+    if command -v gum &>/dev/null; then
+      gum choose "${entries[@]}"
+    else
+      local i=1
+      for pat in "${entries[@]}"; do
+        echo "  $i) $pat"
+        i=$((i+1))
+      done
+      printf "  Enter number [1]: "
+      local _n=""
+      read -r _n 2>/dev/null </dev/tty || _n=""
+      _n="${_n:-1}"
+      if [[ "$_n" =~ ^[0-9]+$ ]] && (( _n >= 1 && _n <= ${#entries[@]} )); then
+        echo "${entries[$((_n-1))]}"
+      else
+        warn "Invalid selection."
+        return 1
+      fi
+    fi
+  }
+
+  _perms_prompt_pattern() {
+    # _perms_prompt_pattern <prompt-label>  → prints entered pattern
+    local label="$1"
+    if command -v gum &>/dev/null; then
+      gum input --prompt "  $label: " --placeholder "e.g. make *"
+    else
+      printf "  %s: " "$label"
+      local _pat=""
+      read -r _pat 2>/dev/null </dev/tty || _pat=""
+      echo "$_pat"
+    fi
+  }
+
+  _perms_confirm() {
+    # _perms_confirm <question>  → returns 0 if yes
+    local question="$1"
+    if command -v gum &>/dev/null; then
+      gum confirm "$question"
+    else
+      printf "  %s [y/N]: " "$question"
+      local _ans=""
+      read -r _ans 2>/dev/null </dev/tty || _ans=""
+      [[ "${_ans,,}" == "y" || "${_ans,,}" == "yes" ]]
+    fi
+  }
+
+  # ── Subcommand dispatch ─────────────────────────────────────────────────────
+
+  local subcmd="${1:-}"
+
+  case "$subcmd" in
+    --help|-h)
+      echo -e "${BOLD}devloop permissions${RESET} — manage .devloop/permissions.yaml"
+      echo ""
+      echo -e "  ${CYAN}devloop permissions${RESET}              interactive menu"
+      echo -e "  ${CYAN}devloop permissions list${RESET}         print allow + deny lists"
+      echo -e "  ${CYAN}devloop permissions allow <pat>${RESET}  append pattern to allow list"
+      echo -e "  ${CYAN}devloop permissions deny  <pat>${RESET}  append pattern to deny list"
+      echo -e "  ${CYAN}devloop permissions remove allow|deny <pat>${RESET}  remove a pattern"
+      echo -e "  ${CYAN}devloop permissions edit${RESET}         open in \$EDITOR"
+      echo ""
+      echo -e "  Patterns use shell-style globs (* = wildcard)."
+      echo -e "  File: ${GRAY}$PERMISSIONS_YAML${RESET}"
+      return 0
+      ;;
+
+    list)
+      _perms_ensure_yaml
+      step "Permissions — ${GRAY}$PERMISSIONS_YAML${RESET}"
+      divider
+      _perms_print_lists
+      return 0
+      ;;
+
+    allow|deny)
+      local key="$subcmd"
+      local pattern="${2:-}"
+      if [[ -z "$pattern" ]]; then
+        error "Usage: devloop permissions $key <pattern>"
+        return 1
+      fi
+      _perms_ensure_yaml
+      if _perms_append "$key" "$pattern"; then
+        success "Added to ${key}: $pattern"
+      else
+        error "Failed to update $PERMISSIONS_YAML"
+        return 1
+      fi
+      return 0
+      ;;
+
+    remove)
+      local key="${2:-}"
+      local pattern="${3:-}"
+      if [[ -z "$key" || -z "$pattern" ]]; then
+        error "Usage: devloop permissions remove allow|deny <pattern>"
+        return 1
+      fi
+      if [[ "$key" != "allow" && "$key" != "deny" ]]; then
+        error "Key must be 'allow' or 'deny', got: $key"
+        return 1
+      fi
+      if [[ ! -f "$PERMISSIONS_YAML" ]]; then
+        error "No permissions.yaml found: $PERMISSIONS_YAML"
+        return 1
+      fi
+      if _perms_remove "$key" "$pattern"; then
+        success "Removed from ${key}: $pattern"
+      else
+        error "Failed to update $PERMISSIONS_YAML"
+        return 1
+      fi
+      return 0
+      ;;
+
+    edit)
+      _perms_ensure_yaml
+      local editor="${EDITOR:-}"
+      [[ -z "$editor" ]] && command -v nano &>/dev/null && editor="nano"
+      [[ -z "$editor" ]] && command -v vi   &>/dev/null && editor="vi"
+      if [[ -z "$editor" ]]; then
+        error "No editor found. Set \$EDITOR or edit manually: $PERMISSIONS_YAML"
+        return 1
+      fi
+      "$editor" "$PERMISSIONS_YAML"
+      # Validate after edit
+      if ! _perms_validate; then
+        warn "YAML validation warning — check $PERMISSIONS_YAML for syntax issues"
+      else
+        success "Permissions file saved: $PERMISSIONS_YAML"
+      fi
+      return 0
+      ;;
+
+    "")
+      # ── Interactive menu ────────────────────────────────────────────────────
+      _perms_ensure_yaml
+      step "DevLoop Permissions Editor"
+      divider
+      info "File: ${GRAY}$PERMISSIONS_YAML${RESET}"
+      echo ""
+
+      local _menu_items=(
+        "view current rules"
+        "add allow pattern"
+        "add deny pattern"
+        "remove allow pattern"
+        "remove deny pattern"
+        "open in \$EDITOR"
+        "quit"
+      )
+
+      while true; do
+        local _choice
+        if command -v gum &>/dev/null; then
+          _choice="$(gum choose "${_menu_items[@]}" 2>/dev/null)" || _choice="quit"
+        else
+          echo -e "${BOLD}Actions:${RESET}"
+          local _i=1
+          local _item
+          for _item in "${_menu_items[@]}"; do
+            echo -e "  ${CYAN}$_i)${RESET} $_item"
+            _i=$((_i+1))
+          done
+          echo ""
+          printf "  Choose [1-%d]: " "${#_menu_items[@]}"
+          local _n=""
+          read -r _n 2>/dev/null </dev/tty || _n=""
+          _n="${_n:-7}"
+          if [[ "$_n" =~ ^[0-9]+$ ]] && (( _n >= 1 && _n <= ${#_menu_items[@]} )); then
+            _choice="${_menu_items[$((_n-1))]}"
+          else
+            _choice="quit"
+          fi
+        fi
+
+        case "$_choice" in
+          "view current rules")
+            _perms_print_lists
+            ;;
+
+          "add allow pattern")
+            local _pat
+            _pat="$(_perms_prompt_pattern "Allow pattern (glob)")"
+            if [[ -n "$_pat" ]]; then
+              if _perms_confirm "Add to allow: $_pat"; then
+                if _perms_append "allow" "$_pat"; then
+                  success "Added to allow: $_pat"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "add deny pattern")
+            local _pat
+            _pat="$(_perms_prompt_pattern "Deny pattern (glob)")"
+            if [[ -n "$_pat" ]]; then
+              if _perms_confirm "Add to deny: $_pat"; then
+                if _perms_append "deny" "$_pat"; then
+                  success "Added to deny: $_pat"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "remove allow pattern")
+            local _picked
+            if _picked="$(_perms_pick_from_list allow)" && [[ -n "$_picked" ]]; then
+              if _perms_confirm "Remove from allow: $_picked"; then
+                if _perms_remove "allow" "$_picked"; then
+                  success "Removed from allow: $_picked"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "remove deny pattern")
+            local _picked
+            if _picked="$(_perms_pick_from_list deny)" && [[ -n "$_picked" ]]; then
+              if _perms_confirm "Remove from deny: $_picked"; then
+                if _perms_remove "deny" "$_picked"; then
+                  success "Removed from deny: $_picked"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "open in \$EDITOR")
+            local _editor="${EDITOR:-}"
+            [[ -z "$_editor" ]] && command -v nano &>/dev/null && _editor="nano"
+            [[ -z "$_editor" ]] && command -v vi   &>/dev/null && _editor="vi"
+            if [[ -z "$_editor" ]]; then
+              error "No editor found. Set \$EDITOR."
+            else
+              "$_editor" "$PERMISSIONS_YAML"
+              if ! _perms_validate; then
+                warn "YAML validation warning — check $PERMISSIONS_YAML"
+              else
+                success "File saved."
+              fi
+            fi
+            ;;
+
+          "quit"|*)
+            info "Exiting permissions editor."
+            break
+            ;;
+        esac
+        echo ""
+      done
+      return 0
+      ;;
+
+    *)
+      error "Unknown subcommand: $subcmd"
+      echo -e "  Run ${CYAN}devloop permissions --help${RESET} for usage."
+      return 1
+      ;;
+  esac
+}
+
 # ── cmd: help ─────────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -7958,6 +8865,9 @@ cmd_help() {
   echo -e "      Rounds 1-N/2: standard fix   |  Rounds N/2-N: deep fix (history injected)  |  After N: re-architect"
   echo -e "    ${GRAY}--no-respec${RESET}  skip the re-architect phase after all fix rounds are exhausted"
   echo -e "    One command replaces: architect + work + review + fix + review + ...\n"
+  echo -e "  ${CYAN}devloop resume [TASK-ID]${RESET}${GRAY}                — resume an interrupted pipeline from the last completed phase${RESET}"
+  echo -e "    ${GRAY}--list${RESET}      list resumable sessions"
+  echo -e "    ${GRAY}--dry-run${RESET}   print would-resume info without executing\n"
   echo -e "  ${CYAN}devloop queue [add|list|run|clear]${RESET}  ${GRAY}alias: q${RESET}"
   echo -e "    Batch mode: queue multiple tasks and run them all sequentially"
   echo -e "    ${GRAY}add [--type TYPE] \"desc\"${RESET}  — enqueue a task"
@@ -8040,6 +8950,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop hooks${RESET}"
   echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)"
   echo -e "    Includes: PreToolUse permission hook + PostToolUse audit hook\n"
+  echo -e "  ${CYAN}devloop permissions${RESET}${GRAY}                     — edit .devloop/permissions.yaml (allow/deny lists)${RESET}"
   echo -e "  ${CYAN}devloop permit [subcmd]${RESET}  ${GRAY}← manage permission requests${RESET}"
   echo -e "    ${GRAY}status${RESET}           — show pending permission requests"
   echo -e "    ${GRAY}watch${RESET}            — interactive prompt for pending requests"
@@ -8266,7 +9177,9 @@ main() {
     check)            cmd_check    "$@" ;;
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)         cmd_failover "$@" ;;
-    permit)           cmd_permit   "$@" ;;
+    permit)           cmd_permit      "$@" ;;
+    resume)            cmd_resume      "$@" ;;
+    permissions|perms) cmd_permissions "$@" ;;
     hooks)            cmd_hooks    "$@" ;;
     logs)             cmd_logs     "$@" ;;
     doctor)           cmd_doctor   "$@" ;;
