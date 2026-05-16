@@ -4417,6 +4417,11 @@ _extract_plan_summary() {
       in_section { print }
     ' "$spec" | sed '/^$/d' | head -25
   fi
+  if ! grep -q '^## Copilot Instructions Block' "$spec" 2>/dev/null; then
+    echo
+    echo "⚠  WARNING: '## Copilot Instructions Block' is missing from this spec."
+    echo "   The worker will reject this spec. Consider regenerating before approving."
+  fi
 }
 
 # Extract a diff summary (stat) from the worker's commit against the baseline.
@@ -5657,10 +5662,32 @@ FRAMEWORK: $TEST_FRAMEWORK
 PROMPT
 )"
 
-  info "Calling ${provider} for spec generation..."
-  echo ""
+  # ── Generate spec (retry once if '## Copilot Instructions Block' is absent) ──
+  local _arch_attempt=0
+  local _arch_max_attempts=2
+  while (( _arch_attempt < _arch_max_attempts )); do
+    _arch_attempt=$(( _arch_attempt + 1 ))
+    if (( _arch_attempt > 1 )); then
+      warn "⚠  Spec is incomplete (missing '## Copilot Instructions Block') — retrying architect..."
+      echo -e "     ${GRAY}[1] Architecting...  (attempt $_arch_attempt/$_arch_max_attempts)${RESET}"
+      echo ""
+    fi
 
-  run_provider_prompt "$provider" "$prompt" "$spec_file"
+    info "Calling ${provider} for spec generation..."
+    echo ""
+
+    run_provider_prompt "$provider" "$prompt" "$spec_file"
+
+    if grep -q '^## Copilot Instructions Block' "$spec_file"; then
+      break
+    fi
+
+    if (( _arch_attempt >= _arch_max_attempts )); then
+      error "Spec $id is missing '## Copilot Instructions Block' after $_arch_max_attempts attempt(s)."
+      echo -e "  ${GRAY}Hint: devloop architect \"$feature\"${RESET}"
+      exit 1
+    fi
+  done
 
   success "Spec saved: ${CYAN}$spec_file${RESET}"
   divider
@@ -7696,7 +7723,18 @@ done'" 2>/dev/null || true
   local before_specs=""
   before_specs="$(ls -t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md' || true)"
 
+  # Call architect with auto-recovery: if spec comes back incomplete (exit non-zero),
+  # re-architect once more before giving up.
+  set +e
   cmd_architect "$feature" "$task_type" "$file_hints"
+  local _run_arch_rc=$?
+  set -e
+  if [[ $_run_arch_rc -ne 0 ]]; then
+    warn "⚠  Spec incomplete — re-architecting (attempt 2/2)..."
+    echo ""
+    before_specs="$(ls -t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md' || true)"
+    cmd_architect "$feature" "$task_type" "$file_hints"
+  fi
 
   # Identify the new spec by diffing the directory listing
   local id=""
