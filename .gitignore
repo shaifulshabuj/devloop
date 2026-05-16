@@ -8,3 +8,14 @@
 # devloop-tui build artifacts
 cmd/devloop-tui/bin/
 cmd/devloop-tui/devloop-tui
+
+# Runtime logs (append-only, not source)
+.devloop/*.log
+
+# Proposed/draft settings files from subagents
+.devloop/*.proposed
+
+# Tool and editor artifacts
+.agents/
+.codex/
+.vscode/
