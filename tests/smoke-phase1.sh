@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 1 smoke test — exercises emit_event, _approval_gate, _approval_resolve,
 # _extract_plan_summary, _extract_diff_summary, _build_diff_feedback_template,
-# _diff_feedback_has_content against a temp project.
+# _diff_feedback_has_content, _compute_resume_from, and _render_status_header
+# against a temp project.
 # Does NOT invoke any LLM provider — stubs the pipeline commands.
 
 set -uo pipefail
@@ -33,12 +34,51 @@ step()    { echo "[step] $*"; }
 divider() { echo "----"; }
 
 # Load just the slice of devloop.sh that has the helpers we want.
-# emit_event lives 84..129; approval/extraction/diff helpers 4008..4271.
-# _approval_read_decision is at ~4028; diff-gate helpers end at ~4271.
-# _compute_resume_from lives 8009..8066 (Phase 4C).
-# Slice on exact function boundaries so the source is balanced.
+# We locate each block dynamically by finding its opening line and its
+# matching closing "^}" so the test is robust to future line-count shifts.
+#
+# Blocks we need:
+#   emit_event                    (84-ish)
+#   _render_status_header         (includes inner _hdr_block)
+#   _reset_status_header
+#   _read_session_states
+#   approval/extraction/diff helpers (_approval_resolve .. _diff_feedback_has_content)
+#   _compute_resume_from
+#
+# Strategy: find the FIRST line of the earliest helper (emit_event at line 84)
+# and the LAST closing brace of the last header helper (_read_session_states),
+# capturing that contiguous block in one pass.  Then append the approval and
+# _compute_resume_from blocks.
+
+_find_func_end() {
+  # _find_func_end <file> <start_line>  → prints the line number of the first
+  # "^}" at or after start_line (the function's closing brace).
+  awk -v s="$1" 'NR>=s && /^\}$/{print NR; exit}' "$2"
+}
+
 TMPSRC="$(mktemp)"
-sed -n '84,129p; 4008,4271p; 8009,8066p' "$SCRIPT" > "$TMPSRC"
+
+# Block 1: _render_status_header helpers + emit_event (one contiguous region).
+# _render_status_header lives just after divider() (~line 91).
+# emit_event follows the header helpers (~line 235).
+# We capture from the start of the header comment block through the closing
+# brace of emit_event, which includes _reset_status_header and _read_session_states.
+BLOCK1_START=84
+BLOCK1_END_FUNC="$(grep -n '^emit_event\b' "$SCRIPT" | head -1 | cut -d: -f1)"
+BLOCK1_END="$(_find_func_end "$BLOCK1_END_FUNC" "$SCRIPT")"
+
+# Block 2: approval helpers (_approval_resolve or _approval_gate, whichever is first)
+BLOCK2_START="$(grep -n '^_approval_resolve\b\|^_approval_gate\b' "$SCRIPT" | head -1 | cut -d: -f1)"
+BLOCK2_END_FUNC="$(grep -n '^_diff_feedback_has_content\b' "$SCRIPT" | head -1 | cut -d: -f1)"
+BLOCK2_END="$(_find_func_end "$BLOCK2_END_FUNC" "$SCRIPT")"
+
+# Block 3: _compute_resume_from
+BLOCK3_START="$(grep -n '^_compute_resume_from\b' "$SCRIPT" | head -1 | cut -d: -f1)"
+BLOCK3_END="$(_find_func_end "$BLOCK3_START" "$SCRIPT")"
+
+sed -n "${BLOCK1_START},${BLOCK1_END}p; ${BLOCK2_START},${BLOCK2_END}p; ${BLOCK3_START},${BLOCK3_END}p" \
+  "$SCRIPT" > "$TMPSRC"
+
 # shellcheck disable=SC1090
 source "$TMPSRC"
 rm -f "$TMPSRC"
@@ -234,6 +274,68 @@ mkdir -p "$RSESS2"
 # deliberately no events.ndjson
 result_4c5="$(_compute_resume_from "$RSESS2")"
 assert "4C-5: missing events file → worker"    "[[ \"$result_4c5\" == 'worker' ]]"
+
+# ── Phase 4B: _render_status_header unit tests ────────────────────────────────
+# All tests bypass the TTY check via DEVLOOP_STATUS_HEADER_FORCE=1.
+
+_reset_status_header   # ensure clean state before our tests
+
+# ── 4B-1: no-op when stdout is not a TTY (no FORCE) ──────────────────────────
+nontty_out="$TMP/nontty_header.txt"
+DEVLOOP_STATUS_HEADER_FORCE=0 DEVLOOP_STATUS_HEADER=on \
+  _render_status_header "done" "" "" "" "TASK-test" "test feature" \
+  > "$nontty_out" 2>&1
+assert "4B-1: non-TTY stdout → output is empty (no ANSI)" \
+  "[[ ! -s '$nontty_out' ]]"
+
+# ── 4B-2: DEVLOOP_STATUS_HEADER=off is a no-op even with FORCE ───────────────
+_reset_status_header
+off_out="$TMP/off_header.txt"
+DEVLOOP_STATUS_HEADER=off DEVLOOP_STATUS_HEADER_FORCE=1 \
+  _render_status_header "done" "done" "" "" "TASK-test" "dark mode toggle" \
+  > "$off_out" 2>&1
+assert "4B-4: DEVLOOP_STATUS_HEADER=off → no output even with force" \
+  "[[ ! -s '$off_out' ]]"
+
+# ── 4B-3: glyphs present in forced-TTY render ─────────────────────────────────
+_reset_status_header
+hdr_out="$TMP/hdr_basic.txt"
+DEVLOOP_STATUS_HEADER=on DEVLOOP_STATUS_HEADER_FORCE=1 \
+  _render_status_header "done" "running" "" "" "TASK-20260516-2240" "add dark mode toggle" \
+  > "$hdr_out" 2>&1
+assert "4B-3a: arch=done shows ✓ glyph" \
+  "grep -qF '✓' '$hdr_out'"
+assert "4B-3b: work=running shows a spinner glyph" \
+  "grep -qE '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' '$hdr_out'"
+assert "4B-3c: review=pending shows · glyph" \
+  "grep -qF '·' '$hdr_out'"
+assert "4B-3d: task-id appears in header" \
+  "grep -q 'TASK-20260516-2240' '$hdr_out'"
+assert "4B-3e: feature appears in header" \
+  "grep -q 'add dark mode toggle' '$hdr_out'"
+assert "4B-3f: divider line present" \
+  "grep -q -- '----' '$hdr_out'"
+
+# ── 4B-4: fix-state "fix-3:running" renders with round number ─────────────────
+_reset_status_header
+fix_out="$TMP/hdr_fix.txt"
+DEVLOOP_STATUS_HEADER=on DEVLOOP_STATUS_HEADER_FORCE=1 \
+  _render_status_header "done" "done" "needs-work" "fix-3:running" "TASK-abc" "add feature" \
+  > "$fix_out" 2>&1
+assert "4B-5a: fix-3:running shows [fix-3 ...]" \
+  "grep -q 'fix-3' '$fix_out'"
+assert "4B-5b: fix-3:running shows a spinner glyph" \
+  "grep -qE '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' '$fix_out'"
+
+# ── 4B-5: overwrite mode — second call emits cursor-up sequence ───────────────
+_reset_status_header
+seq_out="$TMP/hdr_seq.txt"
+DEVLOOP_STATUS_HEADER=on DEVLOOP_STATUS_HEADER_FORCE=1 \
+  _render_status_header "running" "" "" "" "" "feature one" > "$seq_out" 2>&1
+DEVLOOP_STATUS_HEADER=on DEVLOOP_STATUS_HEADER_FORCE=1 \
+  _render_status_header "done" "running" "" "" "" "feature one" >> "$seq_out" 2>&1
+assert "4B-6: second render contains cursor-up escape (\\033[2A)" \
+  "LC_ALL=C grep -q $'\\033\\[2A' '$seq_out'"
 
 echo ""
 echo "Summary: $pass passed, $fail failed"

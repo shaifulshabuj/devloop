@@ -62,6 +62,157 @@ error()   { echo -e "${RED}✖${RESET}  $*" >&2; }
 step()    { echo -e "\n${BOLD}$*${RESET}"; }
 divider() { echo -e "${GRAY}$(printf '─%.0s' {1..60})${RESET}"; }
 
+# ── Pipeline status header ──────────────────────────────────────────────────
+# _render_status_header arch_state work_state review_state fix_state task_id feature
+#
+# Prints (or refreshes) a one-line summary of all four pipeline phases above a
+# divider line.  Safe to call multiple times — subsequent calls move the cursor
+# up 2 lines and overwrite.
+#
+# State values and their glyphs:
+#   ""              → · (pending, dim)
+#   "running"       → spinner frame (yellow)
+#   "done"          → ✓ (green)
+#   "approved"      → ✓ (green)
+#   "needs-work"    → ⠿ (yellow)
+#   "failed"        → ✗ (red)
+#   "rejected"      → ✗ (red)
+#   "skipped"       → → (blue)
+#   "fix-N:running" → [fix-N ⠙] (yellow, shows round number)
+#   "fix-N:done"    → [fix-N ✓] (green)
+#   anything else   → · (dim)
+#
+# Environment:
+#   DEVLOOP_STATUS_HEADER=off        suppress entirely
+#   DEVLOOP_STATUS_HEADER_FORCE=1    bypass TTY check (for tests)
+_HEADER_SPIN_TICK=0
+_HEADER_RENDERED=0   # how many times we've rendered (0 = first call)
+
+_render_status_header() {
+  # No-op when explicitly disabled
+  [[ "${DEVLOOP_STATUS_HEADER:-on}" == "off" ]] && return 0
+  # No-op when stdout is not a TTY (unless forced for tests)
+  if [[ "${DEVLOOP_STATUS_HEADER_FORCE:-0}" != "1" ]]; then
+    [[ -t 1 ]] || return 0
+  fi
+
+  local arch_state="${1:-}"
+  local work_state="${2:-}"
+  local review_state="${3:-}"
+  local fix_state="${4:-}"
+  local task_id="${5:-}"
+  local feature="${6:-}"
+
+  # Advance spinner tick
+  _HEADER_SPIN_TICK=$(( (_HEADER_SPIN_TICK + 1) % 10 ))
+  local spin_frames="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local spin_char="${spin_frames:$_HEADER_SPIN_TICK:1}"
+
+  # Terminal width — truncate feature label to fit
+  local cols="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+  local max_feat=$(( cols - 60 ))
+  [[ $max_feat -lt 20 ]] && max_feat=20
+  if [[ ${#feature} -gt $max_feat ]]; then
+    feature="${feature:0:$((max_feat - 1))}…"
+  fi
+
+  # Helper: render one phase block   _hdr_block label state spinner_char
+  _hdr_block() {
+    local label="$1" state="$2" sp="$3"
+    local glyph color
+    case "$state" in
+      "")           glyph="·";   color="${GRAY}" ;;
+      running)      glyph="$sp"; color="${YELLOW}" ;;
+      done|approved) glyph="✓"; color="${GREEN}" ;;
+      needs-work)   glyph="⠿";  color="${YELLOW}" ;;
+      failed|rejected) glyph="✗"; color="${RED}" ;;
+      skipped)      glyph="→";  color='\033[0;34m' ;;  # blue
+      *)            glyph="·";   color="${GRAY}" ;;
+    esac
+    printf "${GRAY}[${RESET}%s${color}%s${RESET}${GRAY}]${RESET}" "$label " "$glyph"
+  }
+
+  # Special-case fix_state: "fix-N:running" or "fix-N:done"
+  local fix_block
+  if [[ "$fix_state" =~ ^fix-([0-9]+):(.+)$ ]]; then
+    local fix_n="${BASH_REMATCH[1]}"
+    local fix_sub="${BASH_REMATCH[2]}"
+    local fix_glyph fix_color
+    case "$fix_sub" in
+      running)      fix_glyph="$spin_char"; fix_color="${YELLOW}" ;;
+      done|approved) fix_glyph="✓";        fix_color="${GREEN}" ;;
+      failed)       fix_glyph="✗";         fix_color="${RED}" ;;
+      *)            fix_glyph="·";          fix_color="${GRAY}" ;;
+    esac
+    fix_block="${GRAY}[${RESET}fix-${fix_n} ${fix_color}${fix_glyph}${RESET}${GRAY}]${RESET}"
+  else
+    fix_block="$(_hdr_block "fix" "$fix_state" "$spin_char")"
+  fi
+
+  local arch_block work_block review_block
+  arch_block="$(_hdr_block "arch"   "$arch_state"   "$spin_char")"
+  work_block="$(_hdr_block "work"   "$work_state"   "$spin_char")"
+  review_block="$(_hdr_block "review" "$review_state" "$spin_char")"
+
+  local task_part=""
+  [[ -n "$task_id" ]] && task_part="  ${CYAN}${task_id}${RESET}"
+
+  local feat_part=""
+  [[ -n "$feature" ]] && feat_part="  ${GRAY}${feature}${RESET}"
+
+  # Overwrite previous header if already rendered
+  if [[ "$_HEADER_RENDERED" -gt 0 ]]; then
+    # Move up 2 lines and clear them
+    printf '\033[2A\033[2K\033[2K'
+  fi
+
+  # Print header line + divider
+  echo -e "${arch_block} ${work_block} ${review_block} ${fix_block}${task_part}${feat_part}"
+  divider
+
+  _HEADER_RENDERED=$(( _HEADER_RENDERED + 1 ))
+}
+
+# _reset_status_header — call at the start of cmd_run / cmd_resume so the
+# rendered-count is fresh for each pipeline run (supports multiple calls in
+# a single shell session, e.g. from the test suite).
+_reset_status_header() {
+  _HEADER_RENDERED=0
+  _HEADER_SPIN_TICK=0
+}
+
+# _read_session_states — populate *_state vars by scanning events.ndjson.
+# Outputs: sets arch_state work_state review_state fix_state in caller scope.
+# Usage: eval "$(_read_session_states "$session_dir")"
+_read_session_states() {
+  local sdir="$1"
+  local _arch="" _work="" _review="" _fix=""
+  local _efile="$sdir/events.ndjson"
+  if [[ -f "$_efile" ]]; then
+    while IFS= read -r _line; do
+      local _phase _status _kind
+      if command -v jq >/dev/null 2>&1; then
+        _kind="$(printf '%s' "$_line"   | jq -r '.kind   // empty' 2>/dev/null || true)"
+        _phase="$(printf '%s' "$_line"  | jq -r '.phase  // empty' 2>/dev/null || true)"
+        _status="$(printf '%s' "$_line" | jq -r '.status // empty' 2>/dev/null || true)"
+      else
+        _kind="$(printf '%s' "$_line"   | sed 's/.*"kind":"\([^"]*\)".*/\1/'   2>/dev/null || true)"
+        _phase="$(printf '%s' "$_line"  | sed 's/.*"phase":"\([^"]*\)".*/\1/'  2>/dev/null || true)"
+        _status="$(printf '%s' "$_line" | sed 's/.*"status":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+      fi
+      [[ "$_kind" == "phase.end" ]] || continue
+      case "$_phase" in
+        architect)  _arch="$_status" ;;
+        worker)     _work="$_status" ;;
+        reviewer)   _review="$_status" ;;
+        fix-*)      _fix="${_phase}:${_status}" ;;
+      esac
+    done < "$_efile"
+  fi
+  printf 'arch_state=%q work_state=%q review_state=%q fix_state=%q\n' \
+    "$_arch" "$_work" "$_review" "$_fix"
+}
+
 # _find_tui — locate the devloop-tui binary, preferring $HOME/.devloop/bin/.
 # Echoes the absolute path on stdout if found; exits non-zero if not.
 _find_tui() {
@@ -7443,6 +7594,10 @@ cmd_run() {
   # deep_threshold: rounds 1..threshold use standard fix; above uses deep fix
   local deep_threshold=$(( (max_retries + 1) / 2 ))
 
+  # ── Status header state tracking ─────────────────────────────────────────────
+  local arch_state="" work_state="" review_state="" fix_state=""
+  _reset_status_header
+
   step "🚀 Full pipeline: ${BOLD}\"$feature\"${RESET}"
   echo -e "  ${GRAY}Stages: arch → work → review → [fix loop ×$max_retries max]${RESET}"
   if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
@@ -7525,6 +7680,8 @@ done'" 2>/dev/null || true
   fi
 
   # ── Stage 1: Architect ───────────────────────────────────────────────────────
+  arch_state="running"
+  _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "" "$feature"
   step "📐 [1] Architecting..."
 
   # Snapshot existing specs so we can identify the newly-created one
@@ -7565,6 +7722,8 @@ done'" 2>/dev/null || true
   # Register this project in the global registry (updates last_run timestamp)
   _register_project "$(find_project_root)" 2>/dev/null || true
 
+  arch_state="done"
+  _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
   success "Spec: ${CYAN}$id${RESET}"
   echo ""
 
@@ -7599,10 +7758,14 @@ done'" 2>/dev/null || true
   fi
 
   # ── Stage 2: Work ────────────────────────────────────────────────────────────
+  work_state="running"
+  _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
   step "🔨 [2] Implementing..."
   _session_phase_start "worker"
   cmd_work "$id"
   _session_phase_end "worker" "done"
+  work_state="done"
+  _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
   echo ""
 
   # ── Gate: Diff approval ──────────────────────────────────────────────────────
@@ -7686,11 +7849,15 @@ done'" 2>/dev/null || true
 
   while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
     if (( fix_round == 0 )); then
+      review_state="running"
+      _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
       step "🔍 [3] Reviewing..."
       _session_phase_start "reviewer"
     else
       local phase_label="standard"
       (( fix_round > deep_threshold )) && phase_label="deep"
+      review_state="running"
+      _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
       step "🔍 Re-reviewing (fix $fix_round/$max_retries — $phase_label)..."
       _session_phase_start "reviewer"
     fi
@@ -7703,10 +7870,14 @@ done'" 2>/dev/null || true
     case "$verdict" in
       APPROVED)
         _session_phase_end "reviewer" "approved"
+        review_state="approved"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         break
         ;;
       REJECTED)
         _session_phase_end "reviewer" "rejected"
+        review_state="rejected"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         _session_finish "rejected"
         _inbox_write "$(find_project_root)" "blocked" "Pipeline REJECTED for task $id. Reviewer: $(head -5 "$review_file" 2>/dev/null | tr '\n' ' ')" "$id" || true
         error "❌ REJECTED — pipeline stopped"
@@ -7716,6 +7887,7 @@ done'" 2>/dev/null || true
         ;;
       NEEDS_WORK)
         _session_phase_end "reviewer" "needs-work"
+        review_state="needs-work"
         unknown_round=0
         # Snapshot this review into history
         if [[ -f "$review_file" ]]; then
@@ -7745,6 +7917,8 @@ $(cat "$review_file")
             done
             if _run_respec_phase "$id" "$combined_history"; then
               _session_phase_end "respec" "approved"
+              review_state="approved"; fix_state=""
+              _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
               verdict="APPROVED"
             else
               _session_phase_end "respec" "needs-work"
@@ -7769,6 +7943,8 @@ $(cat "$review_file")
 
         # ── Phase 1 or 2: standard vs deep fix ──────────────────────────
         local fix_phase_name="fix-$fix_round"
+        fix_state="fix-${fix_round}:running"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         _session_phase_start "$fix_phase_name"
         if (( fix_round <= deep_threshold )); then
           step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
@@ -7794,6 +7970,9 @@ PERSISTING CONTEXT: Previous fix round had $prev_count tracked issues; this roun
           cmd_fix --history "$combined_history" "$id"
         fi
         _session_phase_end "$fix_phase_name" "done"
+        fix_state="fix-${fix_round}:done"
+        review_state=""
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         echo ""
         ;;
       *)
@@ -8228,6 +8407,12 @@ cmd_resume() {
   fi
   local fix_round="$existing_fix_rounds"
 
+  # ── Status header: initialise from existing events then render once ────────
+  local arch_state="" work_state="" review_state="" fix_state=""
+  _reset_status_header
+  eval "$(_read_session_states "$session_dir")"
+  _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+
   # ── Execute pipeline tail ─────────────────────────────────────────────────
 
   # Worker stage (if needed)
@@ -8256,10 +8441,14 @@ cmd_resume() {
       echo ""
     fi
 
+    work_state="running"
+    _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
     step "🔨 Implementing..."
     _session_phase_start "worker"
     cmd_work "$id"
     _session_phase_end "worker" "done"
+    work_state="done"
+    _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
     echo ""
     next_phase="reviewer"
 
@@ -8317,10 +8506,15 @@ cmd_resume() {
     # We're resuming into a fix round
     fix_round=$(( fix_round + 1 ))
     local fix_phase_name="fix-$fix_round"
+    fix_state="fix-${fix_round}:running"
+    _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
     step "🔧 Fixing (attempt $fix_round — resume)..."
     _session_phase_start "$fix_phase_name"
     cmd_fix "$id"
     _session_phase_end "$fix_phase_name" "done"
+    fix_state="fix-${fix_round}:done"
+    review_state=""
+    _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
     echo ""
     verdict="NEEDS_WORK"
   elif [[ "$next_phase" == "reviewer" ]]; then
@@ -8333,6 +8527,8 @@ cmd_resume() {
 
   # Reviewer / fix loop
   while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
+    review_state="running"
+    _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
     if (( fix_round == 0 )); then
       step "🔍 Reviewing..."
     else
@@ -8346,10 +8542,14 @@ cmd_resume() {
     case "$verdict" in
       APPROVED)
         _session_phase_end "reviewer" "approved"
+        review_state="approved"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         break
         ;;
       REJECTED)
         _session_phase_end "reviewer" "rejected"
+        review_state="rejected"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         _session_finish "rejected"
         error "REJECTED — pipeline stopped"
         echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Review: ${CYAN}devloop status $id${RESET}"
@@ -8357,6 +8557,7 @@ cmd_resume() {
         ;;
       NEEDS_WORK)
         _session_phase_end "reviewer" "needs-work"
+        review_state="needs-work"
         unknown_round=0
         if [[ -f "$review_file" ]]; then
           fix_history_parts+=("=== Review after fix round $fix_round ===$(printf '\n')$(cat "$review_file")")
@@ -8372,6 +8573,8 @@ cmd_resume() {
           exit 2
         fi
         local fix_phase_name="fix-$fix_round"
+        fix_state="fix-${fix_round}:running"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         _session_phase_start "$fix_phase_name"
         if (( fix_round <= deep_threshold )); then
           step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
@@ -8383,6 +8586,9 @@ cmd_resume() {
           cmd_fix --history "$combined_history" "$id"
         fi
         _session_phase_end "$fix_phase_name" "done"
+        fix_state="fix-${fix_round}:done"
+        review_state=""
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
         echo ""
         ;;
       *)
@@ -9068,7 +9274,8 @@ cmd_help() {
   echo -e "    Replay recorded phase logs from a completed session. Supports phase filter.\n"
   echo -e "  ${BOLD}Config:${RESET} ${CYAN}DEVLOOP_SESSION_LOGGING=true${RESET}    enable/disable session logging"
   echo -e "           ${CYAN}DEVLOOP_AUTO_VIEW=false${RESET}        auto-open tmux view on devloop run"
-  echo -e "           ${CYAN}DEVLOOP_SESSION_KEEP_DAYS=30${RESET}   auto-prune sessions older than N days (0=keep all)\n"
+  echo -e "           ${CYAN}DEVLOOP_SESSION_KEEP_DAYS=30${RESET}   auto-prune sessions older than N days (0=keep all)"
+  echo -e "           ${CYAN}DEVLOOP_STATUS_HEADER=on${RESET}       pipeline status header in devloop run/resume (off to disable)\n"
 }
 
 # ── cmd: do — natural-language entry point ────────────────────────────────────
