@@ -8000,6 +8000,413 @@ cmd_queue() {
   esac
 }
 
+# ── cmd: resume — resume an interrupted pipeline from last completed phase ────
+
+# _compute_resume_from <session_dir>
+# Pure function — no side effects, no I/O beyond reading the events file.
+# Returns the next phase name to execute (or "complete" if already finished).
+# Stage ordering: architect → worker → reviewer → fix-N loop
+_compute_resume_from() {
+  local sdir="${1:-}"
+  local events_file="$sdir/events.ndjson"
+
+  # Missing events file → start from scratch after architect
+  if [[ ! -f "$events_file" ]]; then
+    echo "worker"
+    return 0
+  fi
+
+  # Find the last phase.end event
+  local last_phase_end_line
+  last_phase_end_line="$(grep '"kind":"phase.end"' "$events_file" 2>/dev/null | tail -1 || true)"
+
+  if [[ -z "$last_phase_end_line" ]]; then
+    # No phase.end found at all — resume from architect (re-run worker)
+    echo "worker"
+    return 0
+  fi
+
+  # Extract phase and status from JSON (jq preferred; sed fallback)
+  local phase status
+  if command -v jq >/dev/null 2>&1; then
+    phase="$(printf '%s' "$last_phase_end_line"  | jq -r '.phase  // empty' 2>/dev/null || true)"
+    status="$(printf '%s' "$last_phase_end_line" | jq -r '.status // empty' 2>/dev/null || true)"
+  else
+    phase="$(printf '%s'  "$last_phase_end_line" | sed 's/.*"phase":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+    status="$(printf '%s' "$last_phase_end_line" | sed 's/.*"status":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+  fi
+
+  case "$phase" in
+    architect)
+      echo "worker"
+      ;;
+    worker)
+      echo "reviewer"
+      ;;
+    reviewer)
+      case "$status" in
+        approved)   echo "complete" ;;
+        rejected)   echo "complete" ;;
+        needs-work) echo "fix" ;;
+        *)          echo "reviewer" ;;
+      esac
+      ;;
+    fix-*)
+      # After any fix-N, we re-review
+      echo "reviewer"
+      ;;
+    respec)
+      echo "complete"
+      ;;
+    *)
+      # Unknown last phase — safe fallback is re-run reviewer
+      echo "reviewer"
+      ;;
+  esac
+}
+
+cmd_resume() {
+  local dry_run=false
+  local do_list=false
+  local target_id=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list]"
+        echo ""
+        echo -e "  ${CYAN}devloop resume${RESET}              Resume the newest unfinished session"
+        echo -e "  ${CYAN}devloop resume TASK-ID${RESET}      Resume the specified session"
+        echo -e "  ${CYAN}devloop resume --dry-run${RESET}    Print would-resume info without executing"
+        echo -e "  ${CYAN}devloop resume --list${RESET}       List resumable sessions and exit"
+        echo ""
+        echo -e "  Resumable statuses: ${GRAY}running, needs-work, (absent)${RESET}"
+        echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET}."
+        exit 0
+        ;;
+      --dry-run) dry_run=true;  shift ;;
+      --list)    do_list=true;  shift ;;
+      TASK-*)    target_id="$1"; shift ;;
+      *)         shift ;;
+    esac
+  done
+
+  load_config
+  ensure_dirs
+
+  local root; root="$(find_project_root 2>/dev/null || pwd)"
+  local sessions_base="$root/$DEVLOOP_DIR/sessions"
+
+  # ── --list mode ─────────────────────────────────────────────────────────────
+  if [[ "$do_list" == "true" ]]; then
+    local found=0
+    local sdir sname sstatus sfeature
+    while IFS= read -r sdir; do
+      [[ -d "$sdir" ]] || continue
+      sname="$(basename "$sdir")"
+      sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
+      case "$sstatus" in
+        approved|rejected|rejected-at-*) continue ;;
+      esac
+      sfeature="$(cat "$sdir/feature.txt" 2>/dev/null | head -1 | head -c 60 || echo "(no feature)")"
+      printf '%-32s  %-14s  %s\n' "$sname" "$sstatus" "$sfeature"
+      found=$(( found + 1 ))
+    done < <(ls -dt "$sessions_base"/TASK-* 2>/dev/null || true)
+    if [[ "$found" -eq 0 ]]; then
+      info "No resumable sessions found."
+    fi
+    exit 0
+  fi
+
+  # ── Resolve target session ────────────────────────────────────────────────
+  local id=""
+  if [[ -n "$target_id" ]]; then
+    id="$target_id"
+  else
+    # Find the newest session that is not already finished
+    local sdir sname sstatus
+    while IFS= read -r sdir; do
+      [[ -d "$sdir" ]] || continue
+      sname="$(basename "$sdir")"
+      sstatus="$(cat "$sdir/status" 2>/dev/null || echo "running")"
+      case "$sstatus" in
+        approved|rejected|rejected-at-*) continue ;;
+      esac
+      id="$sname"
+      break
+    done < <(ls -dt "$sessions_base"/TASK-* 2>/dev/null || true)
+  fi
+
+  if [[ -z "$id" ]]; then
+    error "No resumable session found."
+    echo -e "  ${GRAY}Use ${CYAN}devloop resume --list${GRAY} to see available sessions.${RESET}"
+    exit 1
+  fi
+
+  # ── Validate session ──────────────────────────────────────────────────────
+  local session_dir="$sessions_base/$id"
+  if [[ ! -d "$session_dir" ]]; then
+    error "Session directory not found: $session_dir"
+    exit 1
+  fi
+
+  # Check if already complete
+  local cur_status; cur_status="$(cat "$session_dir/status" 2>/dev/null || echo "running")"
+  case "$cur_status" in
+    approved|rejected|rejected-at-*)
+      info "Session $id already finished with status: $cur_status — nothing to resume."
+      exit 0
+      ;;
+  esac
+
+  # Validate spec file exists
+  local spec_file="$SPECS_PATH/$id.md"
+  if [[ ! -f "$spec_file" ]]; then
+    error "Spec file not found: $spec_file"
+    echo -e "  ${GRAY}Cannot resume without the spec. Check: ${CYAN}$SPECS_PATH/${RESET}"
+    exit 1
+  fi
+
+  # ── Compute resume point ──────────────────────────────────────────────────
+  local next_phase
+  next_phase="$(_compute_resume_from "$session_dir")"
+
+  if [[ -z "$next_phase" || "$next_phase" == "complete" ]]; then
+    # Events say approved/complete — close out cleanly
+    export DEVLOOP_CURRENT_SESSION_ID="$id"
+    if [[ "$dry_run" == "false" ]]; then
+      _session_finish "approved"
+    fi
+    info "Session $id already reached a terminal state — marking approved."
+    exit 0
+  fi
+
+  # ── --dry-run mode ────────────────────────────────────────────────────────
+  if [[ "$dry_run" == "true" ]]; then
+    echo "Would resume $id from architect → next phase: $next_phase"
+    exit 0
+  fi
+
+  # ── Set up env and emit session.resume event ──────────────────────────────
+  export DEVLOOP_CURRENT_SESSION_ID="$id"
+
+  # Determine the "from_phase" (last completed) by re-reading last phase.end
+  local from_phase="(none)"
+  if [[ -f "$session_dir/events.ndjson" ]]; then
+    local _lpe
+    _lpe="$(grep '"kind":"phase.end"' "$session_dir/events.ndjson" 2>/dev/null | tail -1 || true)"
+    if [[ -n "$_lpe" ]]; then
+      if command -v jq >/dev/null 2>&1; then
+        from_phase="$(printf '%s' "$_lpe" | jq -r '.phase // empty' 2>/dev/null || true)"
+      else
+        from_phase="$(printf '%s' "$_lpe" | sed 's/.*"phase":"\([^"]*\)".*/\1/' 2>/dev/null || true)"
+      fi
+    fi
+  fi
+
+  emit_event "session.resume" from_phase="$from_phase" next_phase="$next_phase"
+
+  local feature; feature="$(cat "$session_dir/feature.txt" 2>/dev/null | head -1 || echo "(unknown)")"
+  step "▶ Resuming ${BOLD}$id${RESET}"
+  echo -e "  ${GRAY}Feature:  ${RESET}$feature"
+  echo -e "  ${GRAY}From:     ${RESET}$from_phase"
+  echo -e "  ${GRAY}Next:     ${CYAN}$next_phase${RESET}"
+  echo ""
+
+  # ── Pipeline parameters (mirror cmd_run defaults) ─────────────────────────
+  local max_retries=3
+  local fix_strategy="${DEVLOOP_FIX_STRATEGY:-escalate}"
+  local deep_threshold=$(( (max_retries + 1) / 2 ))
+  local review_file="$SPECS_PATH/$id-review.md"
+  local fix_history_parts=()
+
+  # Count how many fix rounds have already completed (for correct numbering)
+  local existing_fix_rounds=0
+  if [[ -f "$session_dir/events.ndjson" ]]; then
+    existing_fix_rounds="$(grep '"kind":"phase.end"' "$session_dir/events.ndjson" 2>/dev/null \
+      | grep '"phase":"fix-' | wc -l | tr -d ' ' || echo 0)"
+  fi
+  local fix_round="$existing_fix_rounds"
+
+  # ── Execute pipeline tail ─────────────────────────────────────────────────
+
+  # Worker stage (if needed)
+  if [[ "$next_phase" == "worker" ]]; then
+    # Run plan gate if configured
+    if [[ "${DEVLOOP_PLAN_GATE:-on}" != "off" ]]; then
+      local _spec_path="$SPECS_PATH/$id.md"
+      local _plan_summary; _plan_summary="$(_extract_plan_summary "$_spec_path")"
+      set +e
+      approve_plan "$_plan_summary" "$_spec_path"
+      local _plan_rc=$?
+      set -e
+      case "$_plan_rc" in
+        0) success "Plan approved" ;;
+        2)
+          info "Plan edit requested — opening spec in \$EDITOR..."
+          "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
+          info "Spec edited — continuing."
+          ;;
+        *)
+          _session_finish "rejected-at-plan"
+          error "Plan rejected — pipeline stopped"
+          exit 1
+          ;;
+      esac
+      echo ""
+    fi
+
+    step "🔨 Implementing..."
+    _session_phase_start "worker"
+    cmd_work "$id"
+    _session_phase_end "worker" "done"
+    echo ""
+    next_phase="reviewer"
+
+    # Diff gate
+    if [[ "${DEVLOOP_DIFF_GATE:-on}" != "off" ]]; then
+      local _diff_summary _diff_full
+      _diff_summary="$(_extract_diff_summary "$id")"
+      _diff_full="$(_capture_worker_diff "$id")"
+      if [[ -n "$_diff_summary" ]]; then
+        local diff_edit_round=0
+        local diff_max_edits="${DEVLOOP_DIFF_MAX_EDITS:-2}"
+        while :; do
+          set +e; approve_diff "$_diff_summary" "$_diff_full"; local _diff_rc=$?; set -e
+          case "$_diff_rc" in
+            0) success "Diff approved"; break ;;
+            2)
+              if (( diff_edit_round >= diff_max_edits )); then
+                warn "Diff edit limit reached — proceeding."
+                break
+              fi
+              diff_edit_round=$(( diff_edit_round + 1 ))
+              local _feedback_file="$session_dir/diff-feedback-$diff_edit_round.md"
+              _build_diff_feedback_template "$id" "$_diff_full" > "$_feedback_file"
+              "${EDITOR:-vi}" "$_feedback_file" </dev/tty >/dev/tty 2>/dev/tty || true
+              if ! _diff_feedback_has_content "$_feedback_file"; then
+                warn "No feedback content — skipping fix round."; break
+              fi
+              _session_phase_start "fix-edit-$diff_edit_round"
+              DEVLOOP_FIX_EXTRA_INSTRUCTIONS="$_feedback_file" cmd_fix "$id"
+              _session_phase_end "fix-edit-$diff_edit_round" "done"
+              _diff_summary="$(_extract_diff_summary "$id")"
+              _diff_full="$(_capture_worker_diff "$id")"
+              [[ -z "$_diff_summary" ]] && { info "No further changes — accepting."; break; }
+              ;;
+            *)
+              _session_finish "rejected-at-diff"
+              error "Diff rejected — pipeline stopped"; exit 1 ;;
+          esac
+        done
+        echo ""
+      fi
+    fi
+  fi
+
+  # Reviewer + fix loop
+  local verdict="NEEDS_WORK"
+  local unknown_round=0
+  local max_unknown_retries=2
+
+  # If next_phase is "fix", we need to run a fix first then reviewer
+  local start_with_fix=false
+  [[ "$next_phase" == "fix" ]] && start_with_fix=true
+
+  if [[ "$start_with_fix" == "true" ]]; then
+    # We're resuming into a fix round
+    fix_round=$(( fix_round + 1 ))
+    local fix_phase_name="fix-$fix_round"
+    step "🔧 Fixing (attempt $fix_round — resume)..."
+    _session_phase_start "$fix_phase_name"
+    cmd_fix "$id"
+    _session_phase_end "$fix_phase_name" "done"
+    echo ""
+    verdict="NEEDS_WORK"
+  elif [[ "$next_phase" == "reviewer" ]]; then
+    # Start with reviewer (verdict loop handles it below)
+    true
+  else
+    # next_phase == "worker" is handled above; anything else falls to reviewer
+    true
+  fi
+
+  # Reviewer / fix loop
+  while [[ "$verdict" != "APPROVED" && "$verdict" != "REJECTED" ]]; do
+    if (( fix_round == 0 )); then
+      step "🔍 Reviewing..."
+    else
+      step "🔍 Re-reviewing (fix $fix_round/$max_retries)..."
+    fi
+    _session_phase_start "reviewer"
+    cmd_review "$id"
+    echo ""
+    verdict="$(parse_review_verdict "$review_file")"
+
+    case "$verdict" in
+      APPROVED)
+        _session_phase_end "reviewer" "approved"
+        break
+        ;;
+      REJECTED)
+        _session_phase_end "reviewer" "rejected"
+        _session_finish "rejected"
+        error "REJECTED — pipeline stopped"
+        echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Review: ${CYAN}devloop status $id${RESET}"
+        exit 1
+        ;;
+      NEEDS_WORK)
+        _session_phase_end "reviewer" "needs-work"
+        unknown_round=0
+        if [[ -f "$review_file" ]]; then
+          fix_history_parts+=("=== Review after fix round $fix_round ===$(printf '\n')$(cat "$review_file")")
+        fi
+        fix_round=$(( fix_round + 1 ))
+        if (( fix_round > max_retries )); then
+          if [[ "$fix_strategy" == "escalate" ]]; then
+            warn "Max fix retries reached — task left as NEEDS_WORK"
+          fi
+          _session_finish "needs-work"
+          warn "Max fix retries ($max_retries) reached"
+          echo -e "  ${GRAY}Continue: ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
+          exit 2
+        fi
+        local fix_phase_name="fix-$fix_round"
+        _session_phase_start "$fix_phase_name"
+        if (( fix_round <= deep_threshold )); then
+          step "🔧 Fixing (attempt $fix_round/$max_retries — standard)..."
+          cmd_fix "$id"
+        else
+          step "🔧 Fixing (attempt $fix_round/$max_retries — deep)..."
+          local combined_history=""; local h
+          for h in "${fix_history_parts[@]}"; do combined_history+="$h"$'\n'; done
+          cmd_fix --history "$combined_history" "$id"
+        fi
+        _session_phase_end "$fix_phase_name" "done"
+        echo ""
+        ;;
+      *)
+        _session_phase_end "reviewer" "unknown"
+        unknown_round=$(( unknown_round + 1 ))
+        warn "Could not determine verdict from review output."
+        if (( unknown_round >= max_unknown_retries )); then
+          _session_finish "error"
+          error "Unknown verdict repeated — stopping."
+          exit 2
+        fi
+        ;;
+    esac
+  done
+
+  _session_finish "approved"
+  divider
+  success "Pipeline complete: ${CYAN}$id${RESET}"
+  if (( fix_round > 0 )); then
+    echo -e "  ${GRAY}Approved after $fix_round fix round(s)${RESET}"
+  fi
+  echo ""
+}
+
 # ── cmd: permissions — interactive allow/deny editor ─────────────────────────
 
 cmd_permissions() {
@@ -8458,6 +8865,9 @@ cmd_help() {
   echo -e "      Rounds 1-N/2: standard fix   |  Rounds N/2-N: deep fix (history injected)  |  After N: re-architect"
   echo -e "    ${GRAY}--no-respec${RESET}  skip the re-architect phase after all fix rounds are exhausted"
   echo -e "    One command replaces: architect + work + review + fix + review + ...\n"
+  echo -e "  ${CYAN}devloop resume [TASK-ID]${RESET}${GRAY}                — resume an interrupted pipeline from the last completed phase${RESET}"
+  echo -e "    ${GRAY}--list${RESET}      list resumable sessions"
+  echo -e "    ${GRAY}--dry-run${RESET}   print would-resume info without executing\n"
   echo -e "  ${CYAN}devloop queue [add|list|run|clear]${RESET}  ${GRAY}alias: q${RESET}"
   echo -e "    Batch mode: queue multiple tasks and run them all sequentially"
   echo -e "    ${GRAY}add [--type TYPE] \"desc\"${RESET}  — enqueue a task"
@@ -8768,6 +9178,7 @@ main() {
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)         cmd_failover "$@" ;;
     permit)           cmd_permit      "$@" ;;
+    resume)            cmd_resume      "$@" ;;
     permissions|perms) cmd_permissions "$@" ;;
     hooks)            cmd_hooks    "$@" ;;
     logs)             cmd_logs     "$@" ;;

@@ -35,9 +35,10 @@ divider() { echo "----"; }
 # Load just the slice of devloop.sh that has the helpers we want.
 # emit_event lives 84..129; approval/extraction/diff helpers 4008..4271.
 # _approval_read_decision is at ~4028; diff-gate helpers end at ~4271.
+# _compute_resume_from lives 8009..8066 (Phase 4C).
 # Slice on exact function boundaries so the source is balanced.
 TMPSRC="$(mktemp)"
-sed -n '84,129p; 4008,4271p' "$SCRIPT" > "$TMPSRC"
+sed -n '84,129p; 4008,4271p; 8009,8066p' "$SCRIPT" > "$TMPSRC"
 # shellcheck disable=SC1090
 source "$TMPSRC"
 rm -f "$TMPSRC"
@@ -177,6 +178,62 @@ _build_diff_feedback_template "TASK-001" "$fake_diff" > "$edited_file"
 awk '{gsub(/\(your instructions here\)/, "Remove the unused import on line 5.")} 1' "$edited_file" > "${edited_file}.tmp" && mv "${edited_file}.tmp" "$edited_file"
 _diff_feedback_has_content "$edited_file" && rc_edited=0 || rc_edited=$?
 assert "edited template has content (returns 0)" "[[ $rc_edited -eq 0 ]]"
+
+# ── Phase 4C: _compute_resume_from ──────────────────────────────────────────
+# All tests use a temporary session dir with hand-crafted events.ndjson.
+
+RSESS="$TMP/.devloop/sessions/TASK-phase4c-test"
+mkdir -p "$RSESS"
+
+# Helper: write events.ndjson from positional args (one JSON line each)
+_write_events() {
+  local sdir="$1"; shift
+  printf '' > "$sdir/events.ndjson"
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$sdir/events.ndjson"
+  done
+}
+
+# ── 4C-1: last event = phase.end{architect,done} → next = worker ────────────
+_write_events "$RSESS" \
+  '{"ts":"2026-01-01T00:00:00Z","session":"TASK-phase4c-test","kind":"session.start","feature":"x"}' \
+  '{"ts":"2026-01-01T00:01:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"architect","status":"done"}'
+result_4c1="$(_compute_resume_from "$RSESS")"
+assert "4C-1: after architect.done → worker"   "[[ \"$result_4c1\" == 'worker' ]]"
+
+# ── 4C-2: last event = phase.end{worker,done} → next = reviewer ─────────────
+_write_events "$RSESS" \
+  '{"ts":"2026-01-01T00:00:00Z","session":"TASK-phase4c-test","kind":"session.start","feature":"x"}' \
+  '{"ts":"2026-01-01T00:01:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"architect","status":"done"}' \
+  '{"ts":"2026-01-01T00:02:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"worker","status":"done"}'
+result_4c2="$(_compute_resume_from "$RSESS")"
+assert "4C-2: after worker.done → reviewer"    "[[ \"$result_4c2\" == 'reviewer' ]]"
+
+# ── 4C-3: reviewer.needs-work + fix-1.done → next = reviewer ────────────────
+_write_events "$RSESS" \
+  '{"ts":"2026-01-01T00:00:00Z","session":"TASK-phase4c-test","kind":"session.start","feature":"x"}' \
+  '{"ts":"2026-01-01T00:01:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"architect","status":"done"}' \
+  '{"ts":"2026-01-01T00:02:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"worker","status":"done"}' \
+  '{"ts":"2026-01-01T00:03:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"reviewer","status":"needs-work"}' \
+  '{"ts":"2026-01-01T00:04:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"fix-1","status":"done"}'
+result_4c3="$(_compute_resume_from "$RSESS")"
+assert "4C-3: after fix-1.done → reviewer"     "[[ \"$result_4c3\" == 'reviewer' ]]"
+
+# ── 4C-4: reviewer.approved → complete ──────────────────────────────────────
+_write_events "$RSESS" \
+  '{"ts":"2026-01-01T00:00:00Z","session":"TASK-phase4c-test","kind":"session.start","feature":"x"}' \
+  '{"ts":"2026-01-01T00:01:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"architect","status":"done"}' \
+  '{"ts":"2026-01-01T00:02:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"worker","status":"done"}' \
+  '{"ts":"2026-01-01T00:03:00Z","session":"TASK-phase4c-test","kind":"phase.end","phase":"reviewer","status":"approved"}'
+result_4c4="$(_compute_resume_from "$RSESS")"
+assert "4C-4: after reviewer.approved → complete" "[[ \"$result_4c4\" == 'complete' ]]"
+
+# ── 4C-5: no events.ndjson → worker ──────────────────────────────────────────
+RSESS2="$TMP/.devloop/sessions/TASK-phase4c-nofile"
+mkdir -p "$RSESS2"
+# deliberately no events.ndjson
+result_4c5="$(_compute_resume_from "$RSESS2")"
+assert "4C-5: missing events file → worker"    "[[ \"$result_4c5\" == 'worker' ]]"
 
 echo ""
 echo "Summary: $pass passed, $fail failed"
