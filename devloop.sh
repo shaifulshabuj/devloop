@@ -4391,6 +4391,7 @@ approve_diff() {
 
 # Extract a human-readable plan summary from an architect spec file.
 # Pulls the Summary section (if present) and a Files-to-Touch list.
+# FIX shaifulshabuj/devloop#4: Warn if Copilot Instructions Block is missing
 _extract_plan_summary() {
   local spec="$1"
   [[ -f "$spec" ]] || { echo "(no spec found at $spec)"; return; }
@@ -4416,6 +4417,12 @@ _extract_plan_summary() {
       in_section && /^#+[[:space:]]/ { exit }
       in_section { print }
     ' "$spec" | sed '/^$/d' | head -25
+  fi
+  # Warn if Copilot Instructions Block is missing
+  if ! grep -q '^## Copilot Instructions Block' "$spec" 2>/dev/null; then
+    echo
+    echo "⚠️  WARNING: Spec is missing '## Copilot Instructions Block' section."
+    echo "   The worker phase will fail. Consider rejecting to regenerate."
   fi
 }
 
@@ -5657,30 +5664,57 @@ FRAMEWORK: $TEST_FRAMEWORK
 PROMPT
 )"
 
-  info "Calling ${provider} for spec generation..."
-  echo ""
+  # FIX shaifulshabuj/devloop#4: Validate spec completeness and retry if needed
+  local max_attempts=2
+  local attempt=1
+  local spec_valid=false
 
-  run_provider_prompt "$provider" "$prompt" "$spec_file"
+  while [[ $attempt -le $max_attempts ]]; do
+    if [[ $attempt -gt 1 ]]; then
+      warn "Spec incomplete (missing '## Copilot Instructions Block') — retrying architect (attempt $attempt/$max_attempts)..."
+      echo ""
+    fi
 
-  success "Spec saved: ${CYAN}$spec_file${RESET}"
-  divider
+    info "Calling ${provider} for spec generation..."
+    echo ""
 
-  # FIX #2: Match ``` with or without a language tag (was /^```$/ which broke
-  #         on ```bash, ```csharp, etc. inside the Copilot Instructions Block)
-  step "📋 Copilot Instructions Block"
-  local block
-  block="$(awk '/^## Copilot Instructions Block/{f=1;next} f&&/^```/{c++;if(c==2)exit} f&&c==1' "$spec_file")"
+    run_provider_prompt "$provider" "$prompt" "$spec_file"
 
-  if [[ -n "$block" ]]; then
+    success "Spec saved: ${CYAN}$spec_file${RESET}"
     divider
-    echo -e "${YELLOW}$block${RESET}"
-    divider
-    local instructions_file="$PROMPTS_PATH/$id-copilot.txt"
-    echo "$block" > "$instructions_file"
-    success "Instructions saved: ${CYAN}$instructions_file${RESET}"
-  else
-    warn "Could not extract Copilot Instructions Block — showing last 20 lines of spec:"
-    tail -20 "$spec_file"
+
+    # FIX #2: Match ``` with or without a language tag (was /^```$/ which broke
+    #         on ```bash, ```csharp, etc. inside the Copilot Instructions Block)
+    step "📋 Copilot Instructions Block"
+    local block
+    block="$(awk '/^## Copilot Instructions Block/{f=1;next} f&&/^```/{c++;if(c==2)exit} f&&c==1' "$spec_file")"
+
+    # Validate that the Copilot Instructions Block section exists
+    if grep -q '^## Copilot Instructions Block' "$spec_file"; then
+      spec_valid=true
+      if [[ -n "$block" ]]; then
+        divider
+        echo -e "${YELLOW}$block${RESET}"
+        divider
+        local instructions_file="$PROMPTS_PATH/$id-copilot.txt"
+        echo "$block" > "$instructions_file"
+        success "Instructions saved: ${CYAN}$instructions_file${RESET}"
+      else
+        warn "Could not extract Copilot Instructions Block content — showing last 20 lines of spec:"
+        tail -20 "$spec_file"
+      fi
+      break
+    fi
+
+    attempt=$((attempt + 1))
+  done
+
+  # Final validation — exit if still incomplete after retries
+  if [[ "$spec_valid" == "false" ]]; then
+    error "Spec is incomplete after $max_attempts attempts — '## Copilot Instructions Block' section is missing."
+    error "The LLM may have hit a token limit or the prompt structure needs adjustment."
+    error "Manually edit the spec: ${CYAN}devloop open $id${RESET}"
+    exit 1
   fi
 
   echo ""
@@ -5712,10 +5746,19 @@ cmd_work() {
     return
   fi
 
-  # FIX #7: Validate spec completeness before handing to Copilot
+  # FIX shaifulshabuj/devloop#4: Validate spec completeness with actionable error messages
   if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
-    error "Spec appears incomplete — '## Copilot Instructions Block' section is missing."
-    error "Regenerate with: devloop architect \"<feature>\""
+    # Extract feature name from spec for actionable error message
+    local feature_name
+    feature_name="$(grep -m1 '^\*\*Feature\*\*:' "$spec_file" | sed 's/^\*\*Feature\*\*:[[:space:]]*//' || echo "")"
+
+    error "Spec ${CYAN}$id${RESET} is missing '## Copilot Instructions Block'."
+    if [[ -n "$feature_name" ]]; then
+      error "  Re-generate: ${CYAN}devloop architect \"$feature_name\"${RESET}"
+    else
+      error "  Re-generate: ${CYAN}devloop architect \"<feature>\" --task $id${RESET}"
+    fi
+    error "  Then retry:  ${CYAN}devloop work $id${RESET}"
     exit 1
   fi
 
@@ -7762,7 +7805,75 @@ done'" 2>/dev/null || true
   _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
   step "🔨 [2] Implementing..."
   _session_phase_start "worker"
+
+  # FIX shaifulshabuj/devloop#4: Auto-recovery if spec is incomplete
+  # Try cmd_work, and if it fails due to incomplete spec, re-architect once
+  set +e
   cmd_work "$id"
+  local work_rc=$?
+  set -e
+
+  if [[ $work_rc -ne 0 ]]; then
+    # Check if the spec is incomplete (missing Copilot Instructions Block)
+    local _spec_path="$SPECS_PATH/$id.md"
+    if [[ -f "$_spec_path" ]] && ! grep -q '^## Copilot Instructions Block' "$_spec_path"; then
+      warn "⚠  Spec incomplete — re-architecting (attempt 2/2)..."
+      echo ""
+
+      # Re-architect with same feature/type
+      arch_state="running"
+      _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+      step "📐 [1] Re-architecting..."
+
+      # Remove the incomplete spec
+      rm -f "$_spec_path" "$SPECS_PATH/$id.pre-commit" "$PROMPTS_PATH/$id-copilot.txt" 2>/dev/null || true
+
+      # Re-run architect with same parameters (will create new spec with same ID)
+      cmd_architect "$feature" "$task_type" "$file_hints"
+
+      arch_state="done"
+      _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+      success "Spec regenerated: ${CYAN}$id${RESET}"
+      echo ""
+
+      # Re-run plan gate if enabled
+      if [[ "${DEVLOOP_PLAN_GATE:-on}" != "off" ]]; then
+        local _plan_summary
+        _plan_summary="$(_extract_plan_summary "$_spec_path")"
+        set +e
+        approve_plan "$_plan_summary" "$_spec_path"
+        local _plan_rc=$?
+        set -e
+        case "$_plan_rc" in
+          0) success "Plan approved" ;;
+          2)
+            info "Plan edit requested — opening spec in \$EDITOR..."
+            "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
+            info "Spec edited — continuing pipeline."
+            ;;
+          *)
+            _inbox_write "$(find_project_root)" "blocked" \
+              "Pipeline halted at plan-approval gate (regenerated spec) for task $id." "$id" 2>/dev/null || true
+            _session_finish "rejected-at-plan"
+            error "❌ Plan rejected at approval gate — pipeline stopped"
+            echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Edit: ${CYAN}devloop open $id${RESET}"
+            exit 1
+            ;;
+        esac
+        echo ""
+      fi
+
+      # Retry work phase
+      work_state="running"
+      _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+      step "🔨 [2] Implementing (retry)..."
+      cmd_work "$id"
+    else
+      # Different error, not incomplete spec — propagate
+      exit $work_rc
+    fi
+  fi
+
   _session_phase_end "worker" "done"
   work_state="done"
   _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
