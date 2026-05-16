@@ -4394,6 +4394,13 @@ approve_diff() {
 _extract_plan_summary() {
   local spec="$1"
   [[ -f "$spec" ]] || { echo "(no spec found at $spec)"; return; }
+
+  # FIX #4 (shaifulshabuj/devloop#4): Check if spec is complete before displaying it at plan gate
+  local has_instructions_block=false
+  if grep -q '^## Copilot Instructions Block' "$spec" 2>/dev/null; then
+    has_instructions_block=true
+  fi
+
   local out=""
   if grep -qiE '^#+[[:space:]]*Summary' "$spec" 2>/dev/null; then
     out="$(awk '
@@ -4406,6 +4413,14 @@ _extract_plan_summary() {
   if [[ -z "$out" ]]; then
     out="$(head -c 600 "$spec" 2>/dev/null)"
   fi
+
+  # Add warning if Instructions Block is missing
+  if [[ "$has_instructions_block" != "true" ]]; then
+    echo "⚠️  WARNING: This spec is INCOMPLETE — missing '## Copilot Instructions Block'"
+    echo "   The worker will FAIL if you approve this spec."
+    echo ""
+  fi
+
   echo "$out"
   if grep -qiE '^#+[[:space:]]*Files[[:space:]]*(to[[:space:]]+Touch)?' "$spec" 2>/dev/null; then
     echo
@@ -5657,13 +5672,52 @@ FRAMEWORK: $TEST_FRAMEWORK
 PROMPT
 )"
 
-  info "Calling ${provider} for spec generation..."
-  echo ""
+  # FIX #4 (shaifulshabuj/devloop#4): Validate spec completeness and retry if Instructions Block is missing
+  local max_attempts=2
+  local attempt=1
+  local spec_complete=false
 
-  run_provider_prompt "$provider" "$prompt" "$spec_file"
+  while [[ $attempt -le $max_attempts ]]; do
+    if [[ $attempt -gt 1 ]]; then
+      warn "Spec incomplete on attempt $((attempt-1)) — retrying architect..."
+      echo ""
+    fi
 
-  success "Spec saved: ${CYAN}$spec_file${RESET}"
-  divider
+    info "Calling ${provider} for spec generation... (attempt $attempt/$max_attempts)"
+    echo ""
+
+    run_provider_prompt "$provider" "$prompt" "$spec_file"
+
+    success "Spec saved: ${CYAN}$spec_file${RESET}"
+    divider
+
+    # Validate that the spec contains the Copilot Instructions Block
+    if grep -q '^## Copilot Instructions Block' "$spec_file"; then
+      spec_complete=true
+      break
+    else
+      error "✘ Spec is incomplete — '## Copilot Instructions Block' section is missing."
+      if [[ $attempt -lt $max_attempts ]]; then
+        info "Retrying in 2 seconds..."
+        sleep 2
+      fi
+      attempt=$((attempt + 1))
+    fi
+  done
+
+  # Exit with error if spec is still incomplete after all attempts
+  if [[ "$spec_complete" != "true" ]]; then
+    error "Failed to generate complete spec after $max_attempts attempts."
+    error "The spec at $spec_file is missing the '## Copilot Instructions Block' section."
+    error "This may be due to token limits or LLM output truncation."
+    echo ""
+    echo -e "${BOLD}Troubleshooting:${RESET}"
+    echo -e "  1. Try again: ${CYAN}devloop architect \"$feature\"${RESET}"
+    echo -e "  2. Simplify the feature request to reduce output size"
+    echo -e "  3. Manually add the missing section to: ${CYAN}$spec_file${RESET}"
+    echo ""
+    exit 1
+  fi
 
   # FIX #2: Match ``` with or without a language tag (was /^```$/ which broke
   #         on ```bash, ```csharp, etc. inside the Copilot Instructions Block)
@@ -5679,7 +5733,7 @@ PROMPT
     echo "$block" > "$instructions_file"
     success "Instructions saved: ${CYAN}$instructions_file${RESET}"
   else
-    warn "Could not extract Copilot Instructions Block — showing last 20 lines of spec:"
+    warn "Could not extract Copilot Instructions Block content — showing last 20 lines of spec:"
     tail -20 "$spec_file"
   fi
 
@@ -5712,10 +5766,25 @@ cmd_work() {
     return
   fi
 
-  # FIX #7: Validate spec completeness before handing to Copilot
+  # FIX #4 (shaifulshabuj/devloop#4): Validate spec completeness before handing to worker
+  # This should rarely fail now that cmd_architect validates and retries,
+  # but we keep it as a safety check for manually-edited or legacy specs.
   if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
-    error "Spec appears incomplete — '## Copilot Instructions Block' section is missing."
-    error "Regenerate with: devloop architect \"<feature>\""
+    # Extract feature name from spec metadata (Feature: line)
+    local feature_name
+    feature_name="$(grep -i '^**Feature' "$spec_file" 2>/dev/null | sed 's/^**[Ff]eature[^:]*:[[:space:]]*//; s/\*\*$//' | head -1)"
+    [[ -z "$feature_name" ]] && feature_name="<unknown feature>"
+
+    error "✘ Spec ${BOLD}$id${RESET} is incomplete — '## Copilot Instructions Block' section is missing."
+    echo ""
+    echo -e "${BOLD}This spec cannot be implemented without the Instructions Block.${RESET}"
+    echo ""
+    echo -e "${BOLD}To fix:${RESET}"
+    echo -e "  1. Re-generate the spec:  ${CYAN}devloop architect \"$feature_name\"${RESET}"
+    echo -e "  2. Then continue working:  ${CYAN}devloop work $id${RESET}"
+    echo ""
+    echo -e "  ${GRAY}Or edit manually:  ${CYAN}devloop open $id${RESET}"
+    echo ""
     exit 1
   fi
 
@@ -7762,7 +7831,47 @@ done'" 2>/dev/null || true
   _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
   step "🔨 [2] Implementing..."
   _session_phase_start "worker"
-  cmd_work "$id"
+
+  # FIX #4 (shaifulshabuj/devloop#4): Auto-recovery if spec is incomplete — re-architect once and retry
+  local work_attempt=1
+  local work_max_attempts=2
+  while [[ $work_attempt -le $work_max_attempts ]]; do
+    set +e
+    cmd_work "$id"
+    local work_rc=$?
+    set -e
+
+    if [[ $work_rc -eq 0 ]]; then
+      # Work succeeded
+      break
+    else
+      # Work failed — check if it's due to incomplete spec
+      local spec_path="$SPECS_PATH/$id.md"
+      if [[ $work_attempt -lt $work_max_attempts ]] && ! grep -q '^## Copilot Instructions Block' "$spec_path"; then
+        warn "⚠️  Spec incomplete — re-architecting (attempt $((work_attempt + 1))/$work_max_attempts)..."
+        echo ""
+
+        # Re-run architect for the same task
+        arch_state="running"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+        step "📐 [1-retry] Re-architecting..."
+        cmd_architect "$feature" "$task_type" "$file_hints"
+        arch_state="done"
+        _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+        echo ""
+
+        work_attempt=$((work_attempt + 1))
+        info "Retrying work phase with updated spec..."
+        echo ""
+      else
+        # Non-recoverable error or max attempts reached
+        _session_phase_end "worker" "failed"
+        error "Worker failed. Aborting pipeline."
+        exit $work_rc
+      fi
+    fi
+  done
+
   _session_phase_end "worker" "done"
   work_state="done"
   _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
