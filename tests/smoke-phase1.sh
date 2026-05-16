@@ -128,11 +128,12 @@ assert "pre-written edit returns 2"   "[[ $rc -eq 2 ]]"
 # ── Test 5: no surface → reject ─────────────────────────────────────────────
 rm -f ".devloop/sessions/$TASK/approvals/plan.json"
 > .devloop/events.ndjson
-# Force the no-surface branch: no AUTO, no gum, redirect /dev/tty to /dev/null
-DEVLOOP_CURRENT_SESSION_ID="$TASK" PATH="/usr/bin:/bin" _approval_gate "plan" "test" </dev/null >/dev/null 2>&1
+# Force the no-surface branch: no AUTO, no gum, redirect /dev/tty to /dev/null.
+# DEVLOOP_APPROVAL_TIMEOUT=1 keeps the test fast if /dev/tty happens to be accessible.
+DEVLOOP_APPROVAL_TIMEOUT=1 DEVLOOP_CURRENT_SESSION_ID="$TASK" PATH="/usr/bin:/bin" _approval_gate "plan" "test" </dev/null >/dev/null 2>&1
 rc=$?
-# Either tty branch (timeout reject) or no-tty branch — both should return 1
-assert "no-input → returns 1 (reject)" "[[ $rc -eq 1 ]]"
+# no-tty branch → returns 1; tty branch timeout → returns 3 (stalled, not rejected)
+assert "no-input → returns 1 (no-tty) or 3 (tty timeout)" "[[ $rc -eq 1 || $rc -eq 3 ]]"
 
 # ── Test 5b: _approval_read_decision helper ─────────────────────────────────
 echo '{"ts":"2026-01-01T00:00:00Z","gate":"plan","decision":"edit","source":"tui"}' \
@@ -161,11 +162,25 @@ assert "APPROVAL_WAIT poll emits tui-poll source" \
 # ── Test 5d: DEVLOOP_APPROVAL_WAIT timeout falls through ────────────────────
 rm -f ".devloop/sessions/$TASK/approvals/plan.json"
 > .devloop/events.ndjson
-# No background writer — poll should time out and hit no-tty → reject
-DEVLOOP_APPROVAL_WAIT=1 DEVLOOP_CURRENT_SESSION_ID="$TASK" \
+# No background writer — poll should time out and fall through to:
+#   no-tty branch (rc=1) if /dev/tty is not accessible, or
+#   tty-timeout branch (rc=3, new stalled-not-rejected semantics) if it is.
+# DEVLOOP_APPROVAL_TIMEOUT=1 keeps the test fast in TTY environments.
+DEVLOOP_APPROVAL_WAIT=1 DEVLOOP_APPROVAL_TIMEOUT=1 DEVLOOP_CURRENT_SESSION_ID="$TASK" \
   _approval_gate "plan" "timeout test" </dev/null >/dev/null 2>&1
 rc_timeout=$?
-assert "APPROVAL_WAIT timeout → falls through to no-tty reject (rc=1)" "[[ $rc_timeout -eq 1 ]]"
+assert "APPROVAL_WAIT timeout → falls through (rc=1 no-tty or rc=3 tty-stall)" "[[ $rc_timeout -eq 1 || $rc_timeout -eq 3 ]]"
+
+# ── Test 5e: tty-read timeout returns 3, not 1 ──────────────────────────────
+# Verify the new stalled-not-rejected exit code using a very short TTY timeout.
+# Only meaningful when /dev/tty is accessible; in no-tty environments the gate
+# falls to rc=1 — we accept both to keep the suite portable.
+rm -f ".devloop/sessions/$TASK/approvals/plan.json"
+> .devloop/events.ndjson
+DEVLOOP_APPROVAL_TIMEOUT=1 DEVLOOP_CURRENT_SESSION_ID="$TASK" \
+  _approval_gate "plan" "tty-stall test" </dev/null >/dev/null 2>&1
+rc_stall=$?
+assert "tty timeout → rc=1 (no-tty) or rc=3 (tty-stall, not rejected)" "[[ $rc_stall -eq 1 || $rc_stall -eq 3 ]]"
 
 # ── Test 6: extract plan summary from spec ─────────────────────────────────
 cat > "$SPECS_PATH/$TASK.md" <<'SPEC'
