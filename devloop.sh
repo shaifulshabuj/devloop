@@ -4369,6 +4369,12 @@ _approval_gate() {
     else
       warn "Approval timed out after ${timeout}s — rejecting."
       _approval_resolve "$gate" "reject" "timeout" "$decision_file"
+      # Print recovery hint for user
+      if [[ -n "$run_id" ]]; then
+        echo ""
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop resume $run_id${GRAY}    — retry the gate${RESET}"
+        echo -e "  ${GRAY}     ${CYAN}devloop continue $run_id${GRAY}  — alias for resume${RESET}"
+      fi
       return 1
     fi
   fi
@@ -7751,6 +7757,9 @@ done'" 2>/dev/null || true
         _session_finish "rejected-at-plan"
         error "❌ Plan rejected at approval gate — pipeline stopped"
         echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Edit: ${CYAN}devloop open $id${RESET}"
+        echo ""
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop resume $id${GRAY}    — retry the gate${RESET}"
+        echo -e "  ${GRAY}     ${CYAN}devloop continue $id${GRAY}  — alias for resume${RESET}"
         exit 1
         ;;
     esac
@@ -7830,6 +7839,9 @@ done'" 2>/dev/null || true
             _session_finish "rejected-at-diff"
             error "❌ Diff rejected at approval gate — pipeline stopped"
             echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Inspect: ${CYAN}git diff HEAD${RESET}"
+            echo ""
+            echo -e "  ${GRAY}Tip: ${CYAN}devloop resume $id${GRAY}    — retry the gate${RESET}"
+            echo -e "  ${GRAY}     ${CYAN}devloop continue $id${GRAY}  — alias for resume${RESET}"
             exit 1
             ;;
         esac
@@ -9385,7 +9397,7 @@ main() {
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)         cmd_failover "$@" ;;
     permit)           cmd_permit      "$@" ;;
-    resume)            cmd_resume      "$@" ;;
+    resume|continue)   cmd_resume      "$@" ;;
     permissions|perms) cmd_permissions "$@" ;;
     hooks)            cmd_hooks    "$@" ;;
     logs)             cmd_logs     "$@" ;;
@@ -9397,6 +9409,23 @@ main() {
     *)
       # Unknown command: if it looks like natural language, route to NL pipeline
       local _nl_candidate="$cmd${*:+ $*}"
+
+      # Guard: if any arg is a TASK-ID, suggest resume instead of NL routing
+      local _has_task_id=false _a
+      for _a in "$@"; do
+        if [[ "$_a" =~ ^TASK-[0-9]+-[0-9]+$ ]]; then
+          _has_task_id=true
+          break
+        fi
+      done
+      if [[ "$_has_task_id" == "true" ]]; then
+        error "Unknown command with TASK-ID detected: $cmd"
+        echo ""
+        echo -e "  ${GRAY}Did you mean: ${CYAN}devloop resume $_a${GRAY}?${RESET}"
+        echo -e "  ${GRAY}             ${CYAN}devloop status $_a${GRAY}?${RESET}"
+        exit 1
+      fi
+
       if [[ "$cmd" != -* ]] && [[ "$_nl_candidate" == *" "* ]]; then
         info "Unknown command — interpreting as natural language task"
         echo -e "  ${GRAY}Tip: ${CYAN}devloop do $_nl_candidate${GRAY} to be explicit next time${RESET}"
