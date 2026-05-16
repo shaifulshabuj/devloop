@@ -4369,6 +4369,9 @@ _approval_gate() {
     else
       warn "Approval timed out after ${timeout}s — rejecting."
       _approval_resolve "$gate" "reject" "timeout" "$decision_file"
+      local _sid="${DEVLOOP_CURRENT_SESSION_ID:-<TASK-ID>}"
+      local _next_cmd="work"; [[ "$gate" == "diff" ]] && _next_cmd="review"
+      echo -e "  ${GRAY}Tip: ${CYAN}devloop $_next_cmd $_sid${GRAY}  to skip gate and continue${RESET}"
       return 1
     fi
   fi
@@ -5681,6 +5684,11 @@ PROMPT
   else
     warn "Could not extract Copilot Instructions Block — showing last 20 lines of spec:"
     tail -20 "$spec_file"
+    if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
+      warn "⚠  Spec $id appears INCOMPLETE — header '## Copilot Instructions Block' is missing."
+      warn "   LLM output may have been truncated. Running 'devloop work $id' will fail."
+      warn "   Re-run: devloop architect \"$feature\""
+    fi
   fi
 
   echo ""
@@ -5714,8 +5722,11 @@ cmd_work() {
 
   # FIX #7: Validate spec completeness before handing to Copilot
   if ! grep -q '^## Copilot Instructions Block' "$spec_file"; then
-    error "Spec appears incomplete — '## Copilot Instructions Block' section is missing."
-    error "Regenerate with: devloop architect \"<feature>\""
+    local _feat; _feat="$(awk '/^\*\*Feature\*\*:/{sub(/^\*\*Feature\*\*: /,""); print; exit}' "$spec_file")"
+    [[ -z "$_feat" ]] && _feat="<feature>"
+    error "Spec $id is missing '## Copilot Instructions Block' — likely truncated by LLM."
+    info  "Regenerate: devloop architect \"$_feat\""
+    info  "Then retry: devloop work $id"
     exit 1
   fi
 
@@ -7751,6 +7762,7 @@ done'" 2>/dev/null || true
         _session_finish "rejected-at-plan"
         error "❌ Plan rejected at approval gate — pipeline stopped"
         echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Edit: ${CYAN}devloop open $id${RESET}"
+        echo -e "  ${GRAY}Skip gate: ${CYAN}devloop work $id${RESET}   (goes directly to worker)"
         exit 1
         ;;
     esac
@@ -7830,6 +7842,7 @@ done'" 2>/dev/null || true
             _session_finish "rejected-at-diff"
             error "❌ Diff rejected at approval gate — pipeline stopped"
             echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Inspect: ${CYAN}git diff HEAD${RESET}"
+            echo -e "  ${GRAY}Skip gate: ${CYAN}devloop review $id${RESET}   (goes directly to reviewer)"
             exit 1
             ;;
         esac
@@ -8435,6 +8448,7 @@ cmd_resume() {
         *)
           _session_finish "rejected-at-plan"
           error "Plan rejected — pipeline stopped"
+          echo -e "  ${GRAY}Skip gate: ${CYAN}devloop work $id${RESET}   (goes directly to worker)"
           exit 1
           ;;
       esac
@@ -8485,7 +8499,9 @@ cmd_resume() {
               ;;
             *)
               _session_finish "rejected-at-diff"
-              error "Diff rejected — pipeline stopped"; exit 1 ;;
+              error "Diff rejected — pipeline stopped"
+              echo -e "  ${GRAY}Skip gate: ${CYAN}devloop review $id${RESET}   (goes directly to reviewer)"
+              exit 1 ;;
           esac
         done
         echo ""
@@ -9385,7 +9401,7 @@ main() {
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)         cmd_failover "$@" ;;
     permit)           cmd_permit      "$@" ;;
-    resume)            cmd_resume      "$@" ;;
+    resume|continue)   cmd_resume      "$@" ;;
     permissions|perms) cmd_permissions "$@" ;;
     hooks)            cmd_hooks    "$@" ;;
     logs)             cmd_logs     "$@" ;;
@@ -9397,7 +9413,12 @@ main() {
     *)
       # Unknown command: if it looks like natural language, route to NL pipeline
       local _nl_candidate="$cmd${*:+ $*}"
-      if [[ "$cmd" != -* ]] && [[ "$_nl_candidate" == *" "* ]]; then
+      # Guard: if the command itself is a TASK-ID, user likely meant 'devloop resume TASK-...'
+      if [[ "$cmd" =~ ^TASK-[0-9]{8}-[0-9]{6}$ ]]; then
+        warn "Looks like a task ID — routing to: devloop resume $cmd"
+        echo -e "  ${GRAY}Tip: ${CYAN}devloop resume $cmd${GRAY} to be explicit next time${RESET}"
+        cmd_resume "$cmd" "$@"
+      elif [[ "$cmd" != -* ]] && [[ "$_nl_candidate" == *" "* ]]; then
         info "Unknown command — interpreting as natural language task"
         echo -e "  ${GRAY}Tip: ${CYAN}devloop do $_nl_candidate${GRAY} to be explicit next time${RESET}"
         echo ""
