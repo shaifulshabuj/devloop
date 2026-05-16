@@ -8000,6 +8000,435 @@ cmd_queue() {
   esac
 }
 
+# ── cmd: permissions — interactive allow/deny editor ─────────────────────────
+
+cmd_permissions() {
+  local PERMISSIONS_YAML
+  PERMISSIONS_YAML="$(find_project_root 2>/dev/null || pwd)/.devloop/permissions.yaml"
+
+  # ── Internal helpers ────────────────────────────────────────────────────────
+
+  _perms_ensure_yaml() {
+    if [[ ! -f "$PERMISSIONS_YAML" ]]; then
+      mkdir -p "$(dirname "$PERMISSIONS_YAML")"
+      cat > "$PERMISSIONS_YAML" <<'YAML'
+# DevLoop persistent permission policy
+# See: docs in .claude/hooks/devloop-permission.sh
+
+deny: []
+
+allow: []
+YAML
+    fi
+  }
+
+  _perms_list() {
+    # _perms_list <key>  -> prints each entry on its own line
+    local key="$1"
+    [[ -f "$PERMISSIONS_YAML" ]] || return 0
+    awk -v key="$key" '
+      BEGIN { in_section=0 }
+      /^[^[:space:]#]/ {
+        if ($0 ~ "^"key":[[:space:]]*(\\[\\])?[[:space:]]*$") { in_section=1; next }
+        in_section=0
+      }
+      in_section && /^[[:space:]]*-/ {
+        line=$0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+        sub(/^"/, "", line); sub(/"$/, "", line)
+        sub(/^'\''/, "", line); sub(/'\''$/, "", line)
+        print line
+      }
+    ' "$PERMISSIONS_YAML"
+  }
+
+  _perms_append() {
+    # _perms_append <key> <pattern>   atomic add
+    local key="$1"; local pattern="$2"
+    _perms_ensure_yaml
+    python3 - "$PERMISSIONS_YAML" "$key" "$pattern" <<'PY'
+import sys, re, pathlib
+path, key, pattern = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+# Convert `key: []` (possibly with trailing comment / spaces) to `key:` block form.
+text = re.sub(rf'^({re.escape(key)}):\s*\[\]\s*$', rf'\1:', text, count=1, flags=re.MULTILINE)
+# If the key block doesn't exist, append it at the end.
+if not re.search(rf'^{re.escape(key)}:\s*$', text, flags=re.MULTILINE):
+    text = text.rstrip() + f'\n\n{key}:\n'
+# Append the new entry after the key header (and any existing entries / comments
+# that belong to this section before the next top-level key).
+lines = text.splitlines(keepends=True)
+out = []
+i = 0
+inserted = False
+while i < len(lines):
+    line_str = lines[i]
+    # Ensure the key header line ends with a newline (it may not if it's the last line)
+    if not line_str.endswith('\n'):
+        line_str += '\n'
+    out.append(line_str)
+    if not inserted and re.match(rf'^{re.escape(key)}:\s*$', lines[i].rstrip('\n')):
+        # Find end of this section.
+        j = i + 1
+        while j < len(lines):
+            ln = lines[j]
+            # New top-level key (no leading whitespace, ends with :)
+            if re.match(r'^[A-Za-z_][\w-]*:', ln):
+                break
+            out.append(ln)
+            j += 1
+        # Insert before whatever comes after the section.
+        out.append(f'  - "{pattern}"\n')
+        i = j
+        inserted = True
+        continue
+    i += 1
+pathlib.Path(path).write_text(''.join(out))
+PY
+  }
+
+  _perms_remove() {
+    # _perms_remove <key> <pattern>   removes one exact-match line under key
+    local key="$1"; local pattern="$2"
+    python3 - "$PERMISSIONS_YAML" "$key" "$pattern" <<'PY'
+import sys, re, pathlib
+path, key, pattern = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+lines = text.splitlines(keepends=True)
+in_section = False
+out = []
+for ln in lines:
+    if re.match(rf'^{re.escape(key)}:\s*$', ln):
+        in_section = True
+        out.append(ln); continue
+    if in_section and re.match(r'^[A-Za-z_][\w-]*:', ln):
+        in_section = False
+    if in_section:
+        m = re.match(r'^\s*-\s*"?([^"]*)"?\s*$', ln)
+        if m and m.group(1).strip() == pattern.strip():
+            continue  # drop this line
+    out.append(ln)
+pathlib.Path(path).write_text(''.join(out))
+PY
+  }
+
+  _perms_validate() {
+    # Quick round-trip check — mirrors hook's _yaml_extract_list logic.
+    # Returns 0 if both keys parse without error.
+    _perms_list allow >/dev/null 2>&1 && _perms_list deny >/dev/null 2>&1
+  }
+
+  _perms_print_lists() {
+    echo -e "\n${BOLD}allow:${RESET}"
+    local idx=1 pat
+    while IFS= read -r pat; do
+      echo -e "  ${GREEN}$idx)${RESET} $pat"
+      idx=$((idx+1))
+    done < <(_perms_list allow)
+    [[ $idx -eq 1 ]] && echo -e "  ${GRAY}(empty)${RESET}"
+
+    echo -e "\n${BOLD}deny:${RESET}"
+    idx=1
+    while IFS= read -r pat; do
+      echo -e "  ${RED}$idx)${RESET} $pat"
+      idx=$((idx+1))
+    done < <(_perms_list deny)
+    [[ $idx -eq 1 ]] && echo -e "  ${GRAY}(empty)${RESET}"
+    echo ""
+  }
+
+  _perms_pick_from_list() {
+    # _perms_pick_from_list <key>  → prints chosen pattern or empty string
+    local key="$1"
+    local -a entries=()
+    local pat
+    while IFS= read -r pat; do
+      entries+=("$pat")
+    done < <(_perms_list "$key")
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+      warn "No entries in $key list."
+      return 1
+    fi
+
+    if command -v gum &>/dev/null; then
+      gum choose "${entries[@]}"
+    else
+      local i=1
+      for pat in "${entries[@]}"; do
+        echo "  $i) $pat"
+        i=$((i+1))
+      done
+      printf "  Enter number [1]: "
+      local _n=""
+      read -r _n 2>/dev/null </dev/tty || _n=""
+      _n="${_n:-1}"
+      if [[ "$_n" =~ ^[0-9]+$ ]] && (( _n >= 1 && _n <= ${#entries[@]} )); then
+        echo "${entries[$((_n-1))]}"
+      else
+        warn "Invalid selection."
+        return 1
+      fi
+    fi
+  }
+
+  _perms_prompt_pattern() {
+    # _perms_prompt_pattern <prompt-label>  → prints entered pattern
+    local label="$1"
+    if command -v gum &>/dev/null; then
+      gum input --prompt "  $label: " --placeholder "e.g. make *"
+    else
+      printf "  %s: " "$label"
+      local _pat=""
+      read -r _pat 2>/dev/null </dev/tty || _pat=""
+      echo "$_pat"
+    fi
+  }
+
+  _perms_confirm() {
+    # _perms_confirm <question>  → returns 0 if yes
+    local question="$1"
+    if command -v gum &>/dev/null; then
+      gum confirm "$question"
+    else
+      printf "  %s [y/N]: " "$question"
+      local _ans=""
+      read -r _ans 2>/dev/null </dev/tty || _ans=""
+      [[ "${_ans,,}" == "y" || "${_ans,,}" == "yes" ]]
+    fi
+  }
+
+  # ── Subcommand dispatch ─────────────────────────────────────────────────────
+
+  local subcmd="${1:-}"
+
+  case "$subcmd" in
+    --help|-h)
+      echo -e "${BOLD}devloop permissions${RESET} — manage .devloop/permissions.yaml"
+      echo ""
+      echo -e "  ${CYAN}devloop permissions${RESET}              interactive menu"
+      echo -e "  ${CYAN}devloop permissions list${RESET}         print allow + deny lists"
+      echo -e "  ${CYAN}devloop permissions allow <pat>${RESET}  append pattern to allow list"
+      echo -e "  ${CYAN}devloop permissions deny  <pat>${RESET}  append pattern to deny list"
+      echo -e "  ${CYAN}devloop permissions remove allow|deny <pat>${RESET}  remove a pattern"
+      echo -e "  ${CYAN}devloop permissions edit${RESET}         open in \$EDITOR"
+      echo ""
+      echo -e "  Patterns use shell-style globs (* = wildcard)."
+      echo -e "  File: ${GRAY}$PERMISSIONS_YAML${RESET}"
+      return 0
+      ;;
+
+    list)
+      _perms_ensure_yaml
+      step "Permissions — ${GRAY}$PERMISSIONS_YAML${RESET}"
+      divider
+      _perms_print_lists
+      return 0
+      ;;
+
+    allow|deny)
+      local key="$subcmd"
+      local pattern="${2:-}"
+      if [[ -z "$pattern" ]]; then
+        error "Usage: devloop permissions $key <pattern>"
+        return 1
+      fi
+      _perms_ensure_yaml
+      if _perms_append "$key" "$pattern"; then
+        success "Added to ${key}: $pattern"
+      else
+        error "Failed to update $PERMISSIONS_YAML"
+        return 1
+      fi
+      return 0
+      ;;
+
+    remove)
+      local key="${2:-}"
+      local pattern="${3:-}"
+      if [[ -z "$key" || -z "$pattern" ]]; then
+        error "Usage: devloop permissions remove allow|deny <pattern>"
+        return 1
+      fi
+      if [[ "$key" != "allow" && "$key" != "deny" ]]; then
+        error "Key must be 'allow' or 'deny', got: $key"
+        return 1
+      fi
+      if [[ ! -f "$PERMISSIONS_YAML" ]]; then
+        error "No permissions.yaml found: $PERMISSIONS_YAML"
+        return 1
+      fi
+      if _perms_remove "$key" "$pattern"; then
+        success "Removed from ${key}: $pattern"
+      else
+        error "Failed to update $PERMISSIONS_YAML"
+        return 1
+      fi
+      return 0
+      ;;
+
+    edit)
+      _perms_ensure_yaml
+      local editor="${EDITOR:-}"
+      [[ -z "$editor" ]] && command -v nano &>/dev/null && editor="nano"
+      [[ -z "$editor" ]] && command -v vi   &>/dev/null && editor="vi"
+      if [[ -z "$editor" ]]; then
+        error "No editor found. Set \$EDITOR or edit manually: $PERMISSIONS_YAML"
+        return 1
+      fi
+      "$editor" "$PERMISSIONS_YAML"
+      # Validate after edit
+      if ! _perms_validate; then
+        warn "YAML validation warning — check $PERMISSIONS_YAML for syntax issues"
+      else
+        success "Permissions file saved: $PERMISSIONS_YAML"
+      fi
+      return 0
+      ;;
+
+    "")
+      # ── Interactive menu ────────────────────────────────────────────────────
+      _perms_ensure_yaml
+      step "DevLoop Permissions Editor"
+      divider
+      info "File: ${GRAY}$PERMISSIONS_YAML${RESET}"
+      echo ""
+
+      local _menu_items=(
+        "view current rules"
+        "add allow pattern"
+        "add deny pattern"
+        "remove allow pattern"
+        "remove deny pattern"
+        "open in \$EDITOR"
+        "quit"
+      )
+
+      while true; do
+        local _choice
+        if command -v gum &>/dev/null; then
+          _choice="$(gum choose "${_menu_items[@]}" 2>/dev/null)" || _choice="quit"
+        else
+          echo -e "${BOLD}Actions:${RESET}"
+          local _i=1
+          local _item
+          for _item in "${_menu_items[@]}"; do
+            echo -e "  ${CYAN}$_i)${RESET} $_item"
+            _i=$((_i+1))
+          done
+          echo ""
+          printf "  Choose [1-%d]: " "${#_menu_items[@]}"
+          local _n=""
+          read -r _n 2>/dev/null </dev/tty || _n=""
+          _n="${_n:-7}"
+          if [[ "$_n" =~ ^[0-9]+$ ]] && (( _n >= 1 && _n <= ${#_menu_items[@]} )); then
+            _choice="${_menu_items[$((_n-1))]}"
+          else
+            _choice="quit"
+          fi
+        fi
+
+        case "$_choice" in
+          "view current rules")
+            _perms_print_lists
+            ;;
+
+          "add allow pattern")
+            local _pat
+            _pat="$(_perms_prompt_pattern "Allow pattern (glob)")"
+            if [[ -n "$_pat" ]]; then
+              if _perms_confirm "Add to allow: $_pat"; then
+                if _perms_append "allow" "$_pat"; then
+                  success "Added to allow: $_pat"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "add deny pattern")
+            local _pat
+            _pat="$(_perms_prompt_pattern "Deny pattern (glob)")"
+            if [[ -n "$_pat" ]]; then
+              if _perms_confirm "Add to deny: $_pat"; then
+                if _perms_append "deny" "$_pat"; then
+                  success "Added to deny: $_pat"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "remove allow pattern")
+            local _picked
+            if _picked="$(_perms_pick_from_list allow)" && [[ -n "$_picked" ]]; then
+              if _perms_confirm "Remove from allow: $_picked"; then
+                if _perms_remove "allow" "$_picked"; then
+                  success "Removed from allow: $_picked"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "remove deny pattern")
+            local _picked
+            if _picked="$(_perms_pick_from_list deny)" && [[ -n "$_picked" ]]; then
+              if _perms_confirm "Remove from deny: $_picked"; then
+                if _perms_remove "deny" "$_picked"; then
+                  success "Removed from deny: $_picked"
+                else
+                  error "Failed to update permissions file"
+                fi
+              else
+                info "Cancelled."
+              fi
+            fi
+            ;;
+
+          "open in \$EDITOR")
+            local _editor="${EDITOR:-}"
+            [[ -z "$_editor" ]] && command -v nano &>/dev/null && _editor="nano"
+            [[ -z "$_editor" ]] && command -v vi   &>/dev/null && _editor="vi"
+            if [[ -z "$_editor" ]]; then
+              error "No editor found. Set \$EDITOR."
+            else
+              "$_editor" "$PERMISSIONS_YAML"
+              if ! _perms_validate; then
+                warn "YAML validation warning — check $PERMISSIONS_YAML"
+              else
+                success "File saved."
+              fi
+            fi
+            ;;
+
+          "quit"|*)
+            info "Exiting permissions editor."
+            break
+            ;;
+        esac
+        echo ""
+      done
+      return 0
+      ;;
+
+    *)
+      error "Unknown subcommand: $subcmd"
+      echo -e "  Run ${CYAN}devloop permissions --help${RESET} for usage."
+      return 1
+      ;;
+  esac
+}
+
 # ── cmd: help ─────────────────────────────────────────────────────────────────
 
 cmd_help() {
@@ -8111,6 +8540,7 @@ cmd_help() {
   echo -e "  ${CYAN}devloop hooks${RESET}"
   echo -e "    Install Claude pipeline hooks (.claude/settings.json + hook scripts)"
   echo -e "    Includes: PreToolUse permission hook + PostToolUse audit hook\n"
+  echo -e "  ${CYAN}devloop permissions${RESET}${GRAY}                     — edit .devloop/permissions.yaml (allow/deny lists)${RESET}"
   echo -e "  ${CYAN}devloop permit [subcmd]${RESET}  ${GRAY}← manage permission requests${RESET}"
   echo -e "    ${GRAY}status${RESET}           — show pending permission requests"
   echo -e "    ${GRAY}watch${RESET}            — interactive prompt for pending requests"
@@ -8337,7 +8767,8 @@ main() {
     check)            cmd_check    "$@" ;;
     agent-sync|sync-agents|agentsync) cmd_agent_sync "$@" ;;
     failover)         cmd_failover "$@" ;;
-    permit)           cmd_permit   "$@" ;;
+    permit)           cmd_permit      "$@" ;;
+    permissions|perms) cmd_permissions "$@" ;;
     hooks)            cmd_hooks    "$@" ;;
     logs)             cmd_logs     "$@" ;;
     doctor)           cmd_doctor   "$@" ;;
