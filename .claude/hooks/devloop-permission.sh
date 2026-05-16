@@ -5,6 +5,7 @@
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 QUEUE_DIR="$ROOT/.devloop/permission-queue"
 LOG="$ROOT/.devloop/permissions.log"
+PERMISSIONS_YAML="$ROOT/.devloop/permissions.yaml"
 PERMISSION_MODE="smart"
 PERMISSION_TIMEOUT="60"
 
@@ -131,13 +132,62 @@ _is_always_safe() {
   return 1
 }
 
+# ── YAML allowlist helpers ──────────────────────────────────────────────────
+# Reads a flat top-level YAML list under <key> and prints each entry.
+# Supports simple format:
+#   allow:
+#     - "git status"
+#     - "pytest *"
+_yaml_extract_list() {
+  local file="$1"; local key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v key="$key" '
+    BEGIN { in_section=0 }
+    /^[^[:space:]#]/ {
+      if ($0 ~ "^"key":[[:space:]]*$") { in_section=1; next }
+      in_section=0
+    }
+    in_section && /^[[:space:]]*-/ {
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      sub(/^"/, "", line); sub(/"$/, "", line)
+      sub(/^'\''/, "", line); sub(/'\''$/, "", line)
+      print line
+    }
+  ' "$file"
+}
+
+# Returns 0 if $CMD matches any pattern under <key> in permissions.yaml.
+# Patterns are shell-style globs (* → .*) anchored at both ends.
+_yaml_match() {
+  local cmd="$1"; local key="$2"
+  [[ -f "$PERMISSIONS_YAML" ]] || return 1
+  local pattern regex
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    regex="$(printf '%s' "$pattern" | sed -E 's/[][\\.^$+?{}|()]/\\&/g; s/\*/.*/g')"
+    if [[ "$cmd" =~ ^${regex}$ ]]; then return 0; fi
+  done < <(_yaml_extract_list "$PERMISSIONS_YAML" "$key")
+  return 1
+}
+
 # Apply tiers
 if _is_always_block "$CMD"; then
   _block "Destructive command blocked by DevLoop safety policy. Run manually in terminal if needed."
 fi
 
+# Tier 1.5: project-level YAML deny (overrides built-in safe list)
+if _yaml_match "$CMD" "deny"; then
+  _block "Command matched deny pattern in .devloop/permissions.yaml"
+fi
+
 if _is_always_safe "$CMD"; then
   _approve "safe"
+fi
+
+# Tier 2.5: project-level YAML allow (extends built-in safe list, before escalation)
+if _yaml_match "$CMD" "allow"; then
+  _approve "permissions.yaml allow"
 fi
 
 # ── Tier 3: Strict mode — block everything not in safe list ─────────────────

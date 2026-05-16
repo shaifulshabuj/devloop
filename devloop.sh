@@ -36,6 +36,10 @@ CONFIG_FILE="devloop.config.sh"
 DEVLOOP_GITHUB_REPO="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
 DEVLOOP_SOURCE_URL="${DEVLOOP_SOURCE_URL:-}"   # override to use a custom script URL
 DEVLOOP_GLOBAL_DIR="${HOME}/.devloop"          # user-level global state directory
+# DEVLOOP_DEFAULT_VIEW=dashboard   # default no-arg behavior; set to "help" for old behavior
+# DEVLOOP_STATUS_VIEW=tui                          # default: "tui" launches the TUI; set to "text" to keep the old plain-text dump
+# DEVLOOP_DIFF_MAX_EDITS=2                         # rounds of diff-gate edit-on-reject before bailing
+# DEVLOOP_FIX_EXTRA_INSTRUCTIONS=<path>            # internal: extra prompt from edit-on-reject (do not set manually)
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 CYAN='\033[0;36m'
@@ -57,6 +61,72 @@ warn()    { echo -e "${YELLOW}⚠${RESET}  $*"; }
 error()   { echo -e "${RED}✖${RESET}  $*" >&2; }
 step()    { echo -e "\n${BOLD}$*${RESET}"; }
 divider() { echo -e "${GRAY}$(printf '─%.0s' {1..60})${RESET}"; }
+
+# _find_tui — locate the devloop-tui binary, preferring $HOME/.devloop/bin/.
+# Echoes the absolute path on stdout if found; exits non-zero if not.
+_find_tui() {
+  if [[ -x "$HOME/.devloop/bin/devloop-tui" ]]; then
+    echo "$HOME/.devloop/bin/devloop-tui"
+    return 0
+  fi
+  if command -v devloop-tui >/dev/null 2>&1; then
+    command -v devloop-tui
+    return 0
+  fi
+  return 1
+}
+
+# ── Structured Event Stream ───────────────────────────────────────────────────
+# emit_event <kind> [key=value ...]   — append one NDJSON line to two sinks:
+#   1) .devloop/events.ndjson          (project-wide stream — single source of truth for TUI / monitors)
+#   2) <session_dir>/events.ndjson     (per-session, if DEVLOOP_CURRENT_SESSION_ID is set)
+# Failures are silent: a broken event stream must never break the pipeline.
+emit_event() {
+  [[ "${DEVLOOP_EVENTS_DISABLED:-}" == "1" ]] && return 0
+  local kind="${1:-}"; [[ -z "$kind" ]] && return 0
+  shift || true
+
+  local ts run_id root json
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"
+  root="$(find_project_root 2>/dev/null || pwd)"
+
+  if command -v jq >/dev/null 2>&1; then
+    local args=(--arg ts "$ts" --arg session "$run_id" --arg kind "$kind")
+    local query='{ts: $ts, session: $session, kind: $kind}'
+    local kv k v
+    for kv in "$@"; do
+      k="${kv%%=*}"
+      v="${kv#*=}"
+      [[ -z "$k" || "$k" == "$kv" ]] && continue
+      args+=(--arg "$k" "$v")
+      query+=" | .${k} = \$${k}"
+    done
+    json="$(jq -nc "${args[@]}" "$query" 2>/dev/null)" || return 0
+  else
+    # Fallback hand-rolled JSON (best-effort escaping of \ and ").
+    json="{\"ts\":\"$ts\",\"session\":\"$run_id\",\"kind\":\"$kind\""
+    local kv k v
+    for kv in "$@"; do
+      k="${kv%%=*}"; v="${kv#*=}"
+      [[ -z "$k" || "$k" == "$kv" ]] && continue
+      v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+      v="${v//$'\n'/\\n}"; v="${v//$'\t'/\\t}"
+      json+=",\"$k\":\"$v\""
+    done
+    json+="}"
+  fi
+
+  local stream="$root/$DEVLOOP_DIR/events.ndjson"
+  mkdir -p "$(dirname "$stream")" 2>/dev/null || true
+  printf '%s\n' "$json" >> "$stream" 2>/dev/null || true
+
+  if [[ -n "$run_id" ]]; then
+    local sdir
+    sdir="$root/$DEVLOOP_DIR/sessions/$run_id"
+    [[ -d "$sdir" ]] && printf '%s\n' "$json" >> "$sdir/events.ndjson" 2>/dev/null || true
+  fi
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3807,7 +3877,7 @@ _session_init() {
   local run_id="$1"; local feature="$2"
   [[ "${DEVLOOP_SESSION_LOGGING:-true}" != "true" ]] && return 0
   local dir; dir="$(_session_dir "$run_id")"
-  mkdir -p "$dir/decisions/pending" "$dir/decisions/approved"
+  mkdir -p "$dir/decisions/pending" "$dir/decisions/approved" "$dir/approvals"
   echo "$feature"                                  > "$dir/feature.txt"
   echo "running"                                   > "$dir/status"
   date '+%Y-%m-%dT%H:%M:%S'                       > "$dir/started_at"
@@ -3816,6 +3886,8 @@ _session_init() {
   # Write global hint so `devloop view/session` works from any terminal/cwd
   mkdir -p "$HOME/.devloop"
   echo "$dir" > "$HOME/.devloop/last-session"
+  # Structured event: session.start
+  DEVLOOP_CURRENT_SESSION_ID="$run_id" emit_event "session.start" feature="$feature"
   # Prune old sessions in background to avoid blocking the pipeline
   ( _session_prune 2>/dev/null ) &
 }
@@ -3827,9 +3899,14 @@ _session_phase_start() {
   [[ -d "$dir" ]] || return 0
   printf '[%s] === %s started ===\n' "$(date '+%H:%M:%S')" "$phase" > "$dir/$phase.log"
   echo "running:$(date '+%Y-%m-%dT%H:%M:%S')"     > "$dir/$phase.state"
+  # Track epoch for duration_ms in phase.end
+  date +%s%3N 2>/dev/null > "$dir/$phase.start_epoch_ms" \
+    || date +%s | awk '{print $1 "000"}' > "$dir/$phase.start_epoch_ms"
   printf '[%s] Phase started: %s\n' "$(date '+%H:%M:%S')" "$phase" >> "$dir/main.log"
   # Export so run_provider_prompt and cmd_work can tee live output here
   export DEVLOOP_SESSION_PHASE_LOG="$dir/$phase.log"
+  # Structured event: phase.start
+  emit_event "phase.start" phase="$phase"
 }
 
 _session_phase_end() {
@@ -3840,6 +3917,22 @@ _session_phase_end() {
   printf '[%s] === %s ended: %s ===\n' "$(date '+%H:%M:%S')" "$phase" "$status" >> "$dir/$phase.log"
   echo "$status:$(date '+%Y-%m-%dT%H:%M:%S')"     > "$dir/$phase.state"
   printf '[%s] Phase ended: %s (%s)\n' "$(date '+%H:%M:%S')" "$phase" "$status" >> "$dir/main.log"
+  # Structured event: phase.end with duration_ms when possible
+  local duration_ms=""
+  if [[ -f "$dir/$phase.start_epoch_ms" ]]; then
+    local start_ms end_ms
+    start_ms="$(cat "$dir/$phase.start_epoch_ms" 2>/dev/null || echo 0)"
+    end_ms="$(date +%s%3N 2>/dev/null || date +%s | awk '{print $1 "000"}')"
+    if [[ "$start_ms" =~ ^[0-9]+$ && "$end_ms" =~ ^[0-9]+$ ]]; then
+      duration_ms="$((end_ms - start_ms))"
+    fi
+    rm -f "$dir/$phase.start_epoch_ms" 2>/dev/null || true
+  fi
+  if [[ -n "$duration_ms" ]]; then
+    emit_event "phase.end" phase="$phase" status="$status" duration_ms="$duration_ms"
+  else
+    emit_event "phase.end" phase="$phase" status="$status"
+  fi
 }
 
 _session_append_log() {
@@ -3859,6 +3952,8 @@ _session_finish() {
   echo "$status" > "$dir/status"
   date '+%Y-%m-%dT%H:%M:%S' > "$dir/finished_at"
   printf '[%s] Session finished: %s\n' "$(date '+%H:%M:%S')" "$status" >> "$dir/main.log"
+  # Structured event: session.end
+  emit_event "session.end" status="$status"
   unset DEVLOOP_SESSION_PHASE_LOG
 }
 
@@ -3891,6 +3986,317 @@ _session_prune() {
     fi
   done < <(ls -d "$sessions_dir"/TASK-* 2>/dev/null || true)
   [[ "$pruned" -gt 0 ]] && info "Pruned $pruned session(s) older than ${keep_days}d"
+}
+
+# ── Approval gates ────────────────────────────────────────────────────────────
+# Resolves a yes/no/edit decision for a pipeline checkpoint.
+# Resolver chain (first match wins):
+#   1) DEVLOOP_AUTO=1                                         → approve
+#   2) pre-written <session>/approvals/<gate>.json            → honor it
+#   2.5) DEVLOOP_APPROVAL_WAIT=N  poll for decision file up to N seconds
+#        (used by devloop-tui: the TUI writes the file; the engine picks it up)
+#   3) gum choose                              (if gum installed and TTY)
+#   4) read from /dev/tty                       (DEVLOOP_APPROVAL_TIMEOUT, default 120s)
+#   5) no surface available                                    → reject (safe default)
+#
+# Always emits approval.request before, approval.decision after, and persists
+# the final decision to <session>/approvals/<gate>.json so any concurrent
+# watcher (future TUI) sees the same final state.
+#
+# Exit codes: 0 = approve, 1 = reject, 2 = edit (caller re-runs upstream phase)
+
+_approval_resolve() {
+  # _approval_resolve <gate> <decision> <source> [decision_file_to_write]
+  local gate="$1"; local decision="$2"; local source="$3"; local decision_file="${4:-}"
+  emit_event "approval.decision" gate="$gate" decision="$decision" source="$source"
+  if [[ -n "$decision_file" ]]; then
+    local ts; ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if command -v jq >/dev/null 2>&1; then
+      jq -nc --arg ts "$ts" --arg gate "$gate" --arg decision "$decision" --arg source "$source" \
+        '{ts:$ts, gate:$gate, decision:$decision, source:$source}' > "$decision_file" 2>/dev/null || true
+    else
+      printf '{"ts":"%s","gate":"%s","decision":"%s","source":"%s"}\n' \
+        "$ts" "$gate" "$decision" "$source" > "$decision_file" 2>/dev/null || true
+    fi
+  fi
+}
+
+# _approval_read_decision <file>
+# Extracts the "decision" value from a JSON decision file.
+# Prints one of: approve | reject | edit — or nothing if absent/invalid.
+# Shared by the pre-written step (2) and the TUI-poll step (2.5).
+_approval_read_decision() {
+  local file="$1"
+  [[ -f "$file" ]] || return
+  local val=""
+  if command -v jq >/dev/null 2>&1; then
+    val="$(jq -r '.decision // empty' "$file" 2>/dev/null || true)"
+  else
+    val="$(grep -o '"decision"[[:space:]]*:[[:space:]]*"[^"]*"' "$file" 2>/dev/null \
+             | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+  fi
+  echo "$val"
+}
+
+_approval_gate() {
+  # _approval_gate <gate> <summary> [detail_file]
+  # DEVLOOP_APPROVAL_WAIT=N  — if set and > 0, poll decision_file for up to N
+  #   seconds (200 ms interval) before falling through to the gum/tty prompts.
+  #   devloop-tui sets this so the engine waits for the TUI's interactive choice.
+  local gate="$1"; local summary="$2"; local detail_file="${3:-}"
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"
+  local sdir="" decision_file=""
+  if [[ -n "$run_id" ]]; then
+    sdir="$(_session_dir "$run_id")"
+    mkdir -p "$sdir/approvals" 2>/dev/null || true
+    decision_file="$sdir/approvals/$gate.json"
+  fi
+
+  local detail_size=0
+  [[ -n "$detail_file" && -f "$detail_file" ]] && \
+    detail_size="$(wc -c < "$detail_file" 2>/dev/null | tr -d ' ' || echo 0)"
+
+  emit_event "approval.request" \
+    gate="$gate" \
+    summary="$summary" \
+    detail_path="${detail_file:-}" \
+    detail_size="$detail_size" \
+    decision_file="${decision_file:-}"
+
+  # 1) Auto mode
+  if [[ "${DEVLOOP_AUTO:-}" == "1" || "${DEVLOOP_AUTO:-}" == "true" ]]; then
+    _approval_resolve "$gate" "approve" "auto" "$decision_file"
+    return 0
+  fi
+
+  # 2) Pre-written decision file (CI / scripted / TUI-pre-write)
+  if [[ -n "$decision_file" && -f "$decision_file" ]]; then
+    local pre_decision=""
+    pre_decision="$(_approval_read_decision "$decision_file")"
+    if [[ "$pre_decision" =~ ^(approve|reject|edit)$ ]]; then
+      _approval_resolve "$gate" "$pre_decision" "pre-written" ""
+      case "$pre_decision" in
+        approve) return 0 ;;
+        reject)  return 1 ;;
+        edit)    return 2 ;;
+      esac
+    fi
+  fi
+
+  # 2.5) TUI poll — wait up to DEVLOOP_APPROVAL_WAIT seconds for decision file.
+  # devloop-tui writes the file; this loop picks it up without requiring a TTY.
+  local tui_wait="${DEVLOOP_APPROVAL_WAIT:-0}"
+  if [[ "$tui_wait" -gt 0 && -n "$decision_file" ]]; then
+    info "⏳ Waiting up to ${tui_wait}s for TUI / external decision on gate '${gate}'..."
+    local t0; t0="$(date +%s)"
+    while true; do
+      local now; now="$(date +%s)"
+      if (( now - t0 >= tui_wait )); then
+        break
+      fi
+      if [[ -f "$decision_file" ]]; then
+        local tui_decision=""
+        tui_decision="$(_approval_read_decision "$decision_file")"
+        if [[ "$tui_decision" =~ ^(approve|reject|edit)$ ]]; then
+          _approval_resolve "$gate" "$tui_decision" "tui-poll" ""
+          case "$tui_decision" in
+            approve) return 0 ;;
+            reject)  return 1 ;;
+            edit)    return 2 ;;
+          esac
+        fi
+      fi
+      sleep 0.2
+    done
+    info "TUI poll timed out after ${tui_wait}s — falling through to interactive prompt."
+  fi
+
+  # Render summary block for human prompts
+  divider
+  step "🚦 Approval gate: ${BOLD}$gate${RESET}"
+  echo "$summary"
+  if [[ -n "$detail_file" && -f "$detail_file" ]]; then
+    info "Details: $detail_file (${detail_size} bytes)"
+  fi
+  divider
+
+  # 3) gum choose (preferred when installed + TTY)
+  if command -v gum >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
+    local choice
+    choice="$(gum choose --header "Decision:" "approve" "reject" "edit" 2>/dev/null || echo "")"
+    case "$choice" in
+      approve) _approval_resolve "$gate" "approve" "gum"        "$decision_file"; return 0 ;;
+      reject)  _approval_resolve "$gate" "reject"  "gum"        "$decision_file"; return 1 ;;
+      edit)    _approval_resolve "$gate" "edit"    "gum"        "$decision_file"; return 2 ;;
+      *)       _approval_resolve "$gate" "reject"  "gum-cancel" "$decision_file"; return 1 ;;
+    esac
+  fi
+
+  # 4) Read from /dev/tty (mirrors permission-prompt pattern elsewhere in this script)
+  if [[ -r /dev/tty ]]; then
+    local timeout="${DEVLOOP_APPROVAL_TIMEOUT:-120}"
+    local ans=""
+    info "[y]es / [n]o / [e]dit  (${timeout}s timeout, default = reject)"
+    if read -r -t "$timeout" -p "  decision> " ans </dev/tty; then
+      case "${ans:-}" in
+        y|yes|a|approve) _approval_resolve "$gate" "approve" "tty"     "$decision_file"; return 0 ;;
+        e|edit)          _approval_resolve "$gate" "edit"    "tty"     "$decision_file"; return 2 ;;
+        n|no|r|reject)   _approval_resolve "$gate" "reject"  "tty"     "$decision_file"; return 1 ;;
+        *)               _approval_resolve "$gate" "reject"  "tty-bad" "$decision_file"; return 1 ;;
+      esac
+    else
+      warn "Approval timed out after ${timeout}s — rejecting."
+      _approval_resolve "$gate" "reject" "timeout" "$decision_file"
+      return 1
+    fi
+  fi
+
+  # 5) No interactive surface
+  warn "No interactive surface for approval gate '$gate' — set DEVLOOP_AUTO=1 to bypass."
+  _approval_resolve "$gate" "reject" "no-tty" "$decision_file"
+  return 1
+}
+
+approve_plan() {
+  # approve_plan <summary> [spec_file]
+  _approval_gate "plan" "$1" "${2:-}"
+}
+
+approve_diff() {
+  # approve_diff <summary> [diff_file]
+  _approval_gate "diff" "$1" "${2:-}"
+}
+
+# Extract a human-readable plan summary from an architect spec file.
+# Pulls the Summary section (if present) and a Files-to-Touch list.
+_extract_plan_summary() {
+  local spec="$1"
+  [[ -f "$spec" ]] || { echo "(no spec found at $spec)"; return; }
+  local out=""
+  if grep -qiE '^#+[[:space:]]*Summary' "$spec" 2>/dev/null; then
+    out="$(awk '
+      BEGIN { in_section=0 }
+      /^#+[[:space:]]*[Ss]ummary/ { in_section=1; next }
+      in_section && /^#+[[:space:]]/ { exit }
+      in_section { print }
+    ' "$spec" | sed '/^$/d' | head -12)"
+  fi
+  if [[ -z "$out" ]]; then
+    out="$(head -c 600 "$spec" 2>/dev/null)"
+  fi
+  echo "$out"
+  if grep -qiE '^#+[[:space:]]*Files[[:space:]]*(to[[:space:]]+Touch)?' "$spec" 2>/dev/null; then
+    echo
+    echo "Files to touch:"
+    awk '
+      BEGIN { in_section=0 }
+      /^#+[[:space:]]*[Ff]iles/ { in_section=1; next }
+      in_section && /^#+[[:space:]]/ { exit }
+      in_section { print }
+    ' "$spec" | sed '/^$/d' | head -25
+  fi
+}
+
+# Extract a diff summary (stat) from the worker's commit against the baseline.
+_extract_diff_summary() {
+  local id="$1"
+  local pre_commit_file="$SPECS_PATH/$id.pre-commit"
+  local base_hash=""
+  [[ -f "$pre_commit_file" ]] && base_hash="$(cat "$pre_commit_file" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  if [[ -n "$base_hash" ]]; then
+    git diff --stat "${base_hash}..HEAD" 2>/dev/null | head -40
+  else
+    git diff --stat HEAD 2>/dev/null | head -40
+  fi
+}
+
+# Write the full diff for the worker's commit to a session-local file.
+# Returns the path on stdout (empty if no diff captured).
+_capture_worker_diff() {
+  local id="$1"
+  local run_id="${DEVLOOP_CURRENT_SESSION_ID:-}"
+  [[ -z "$run_id" ]] && return 0
+  local sdir; sdir="$(_session_dir "$run_id")"
+  [[ -d "$sdir" ]] || return 0
+  local pre_commit_file="$SPECS_PATH/$id.pre-commit"
+  local base_hash=""
+  [[ -f "$pre_commit_file" ]] && base_hash="$(cat "$pre_commit_file" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  local out="$sdir/worker.diff"
+  if [[ -n "$base_hash" ]]; then
+    git diff "${base_hash}..HEAD" > "$out" 2>/dev/null || true
+  else
+    git diff HEAD > "$out" 2>/dev/null || true
+  fi
+  echo "$out"
+}
+
+# Builds a markdown template the user fills in to describe what to fix.
+# The diff is appended at the bottom as read-only context.
+_build_diff_feedback_template() {
+  local id="$1"; local diff_path="$2"
+  echo "# Diff feedback — Task $id"
+  echo ""
+  echo "Describe what to change. Leave this file with at least one non-comment, non-header line"
+  echo "under \"Feedback\" to apply the fix; close with the file unchanged to skip this edit round."
+  echo ""
+  echo "## Feedback"
+  echo ""
+  echo "(your instructions here)"
+  echo ""
+  echo "## Context: current diff"
+  if [[ -n "$diff_path" && -f "$diff_path" ]]; then
+    echo ""
+    echo '```diff'
+    cat "$diff_path"
+    echo '```'
+  fi
+}
+
+# Returns 0 if the feedback file has content under "## Feedback" beyond the placeholder.
+_diff_feedback_has_content() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  awk '
+    /^## Feedback/        { in_section=1; next }
+    /^## /                { if (in_section) exit; }
+    in_section {
+      line=$0
+      # strip leading whitespace
+      gsub(/^[[:space:]]+/, "", line)
+      # ignore blank lines and the placeholder "(your instructions here)"
+      if (line == "" || line ~ /^\(your instructions here\)$/) next
+      print "HAS_CONTENT"; exit
+    }
+  ' "$file" | grep -q HAS_CONTENT
+}
+
+# ── cmd: dashboard — launch the Go/Bubble Tea TUI ────────────────────────────
+
+cmd_dashboard() {
+  load_config 2>/dev/null || true
+  local tui
+  if ! tui="$(_find_tui)"; then
+    error "devloop-tui binary not found."
+    echo -e "  ${GRAY}Build it with: ${CYAN}make tui-install${RESET}"
+    echo -e "  ${GRAY}Or from source: ${CYAN}make tui-dev${RESET}"
+    exit 1
+  fi
+  # exec replaces the bash process so signals, terminal modes, and exit codes
+  # propagate cleanly to the TUI.
+  exec "$tui" dashboard "$@"
+}
+
+# ── cmd: chat — launch the Go/Bubble Tea chat REPL ───────────────────────────
+
+cmd_chat() {
+  load_config 2>/dev/null || true
+  local tui
+  if ! tui="$(_find_tui)"; then
+    error "devloop-tui binary not found."
+    echo -e "  ${GRAY}Build it with: ${CYAN}make tui-install${RESET}"
+    exit 1
+  fi
+  exec "$tui" chat "$@"
 }
 
 # ── cmd: view — live tmux dashboard (requires tmux) ──────────────────────────
@@ -5461,6 +5867,18 @@ feat($id): fix review issues — <one-line summary of what was fixed>
 Summarize the changes made."
   fi
 
+  # Phase 3: opt-in extra instructions from the diff-gate edit-on-reject flow.
+  if [[ -n "${DEVLOOP_FIX_EXTRA_INSTRUCTIONS:-}" && -f "$DEVLOOP_FIX_EXTRA_INSTRUCTIONS" ]]; then
+    local _extra
+    _extra="$(cat "$DEVLOOP_FIX_EXTRA_INSTRUCTIONS")"
+    fix_prompt+="
+
+## Additional human feedback
+
+$_extra
+"
+  fi
+
   local attempt_fix_provider="$provider"
   while true; do
     local tmp_fix_out; tmp_fix_out="/tmp/devloop_fix_out_$$_${RANDOM}"
@@ -5543,6 +5961,13 @@ cmd_tasks() {
 # ── cmd: status ───────────────────────────────────────────────────────────────
 
 cmd_status() {
+  # Phase 3: if TTY + TUI binary + DEVLOOP_STATUS_VIEW != "text", delegate to live view.
+  if [[ -t 1 ]] && [[ "${DEVLOOP_STATUS_VIEW:-tui}" != "text" ]]; then
+    local _tui
+    if _tui="$(_find_tui 2>/dev/null)"; then
+      exec "$_tui" status "$@"
+    fi
+  fi
   # FIX (load_config order): load config before latest_task()
   load_config
 
@@ -6899,14 +7324,16 @@ cmd_run() {
       --max-retries|-n) max_retries="${2:-3}";     shift 2 ;;
       --no-learn)       skip_learn=true;           shift   ;;
       --no-respec)      no_respec=true;            shift   ;;
+      --auto|-y)        export DEVLOOP_AUTO=1;     shift   ;;
       *)                shift ;;
     esac
   done
 
   if [[ -z "$feature" ]]; then
-    error "Usage: devloop run \"<description>\" [--type TYPE] [--files hints] [--max-retries N] [--no-learn] [--no-respec]"
+    error "Usage: devloop run \"<description>\" [--type TYPE] [--files hints] [--max-retries N] [--auto] [--no-learn] [--no-respec]"
     echo -e "  ${GRAY}Example: devloop run \"add dark mode toggle\"${RESET}"
     echo -e "  ${GRAY}Example: devloop run \"fix login redirect\" --type bug${RESET}"
+    echo -e "  ${GRAY}--auto / -y skips plan + diff approval gates${RESET}"
     exit 1
   fi
 
@@ -7070,12 +7497,112 @@ done'" 2>/dev/null || true
   success "Spec: ${CYAN}$id${RESET}"
   echo ""
 
+  # ── Gate: Plan approval ──────────────────────────────────────────────────────
+  # Pause between architect and worker so the operator can review the spec.
+  # Bypass with --auto / DEVLOOP_AUTO=1, or pre-write approvals/plan.json.
+  if [[ "${DEVLOOP_PLAN_GATE:-on}" != "off" ]]; then
+    local _spec_path="$SPECS_PATH/$id.md"
+    local _plan_summary
+    _plan_summary="$(_extract_plan_summary "$_spec_path")"
+    set +e
+    approve_plan "$_plan_summary" "$_spec_path"
+    local _plan_rc=$?
+    set -e
+    case "$_plan_rc" in
+      0) success "Plan approved" ;;
+      2)
+        info "Plan edit requested — opening spec in \$EDITOR..."
+        "${EDITOR:-vi}" "$_spec_path" </dev/tty >/dev/tty 2>/dev/tty || true
+        info "Spec edited — continuing pipeline."
+        ;;
+      *)
+        _inbox_write "$(find_project_root)" "blocked" \
+          "Pipeline halted at plan-approval gate for task $id." "$id" 2>/dev/null || true
+        _session_finish "rejected-at-plan"
+        error "❌ Plan rejected at approval gate — pipeline stopped"
+        echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Edit: ${CYAN}devloop open $id${RESET}"
+        exit 1
+        ;;
+    esac
+    echo ""
+  fi
+
   # ── Stage 2: Work ────────────────────────────────────────────────────────────
   step "🔨 [2] Implementing..."
   _session_phase_start "worker"
   cmd_work "$id"
   _session_phase_end "worker" "done"
   echo ""
+
+  # ── Gate: Diff approval ──────────────────────────────────────────────────────
+  # Pause between worker and reviewer so the operator can review the changes.
+  if [[ "${DEVLOOP_DIFF_GATE:-on}" != "off" ]]; then
+    local _diff_summary _diff_full
+    _diff_summary="$(_extract_diff_summary "$id")"
+    _diff_full="$(_capture_worker_diff "$id")"
+    if [[ -z "$_diff_summary" ]]; then
+      info "No changes detected by worker — skipping diff gate."
+    else
+      local diff_edit_round=0
+      local diff_max_edits="${DEVLOOP_DIFF_MAX_EDITS:-2}"
+      while :; do
+        set +e
+        approve_diff "$_diff_summary" "$_diff_full"
+        local _diff_rc=$?
+        set -e
+        case "$_diff_rc" in
+          0)
+            success "Diff approved"
+            break
+            ;;
+          2)
+            if (( diff_edit_round >= diff_max_edits )); then
+              warn "⚠  Diff edit limit reached ($diff_max_edits rounds) — proceeding as-is."
+              break
+            fi
+            diff_edit_round=$(( diff_edit_round + 1 ))
+
+            # Build feedback file pre-populated with the current diff for context
+            local _feedback_file
+            _feedback_file="$(_session_dir "${DEVLOOP_CURRENT_SESSION_ID:-$id}")/diff-feedback-$diff_edit_round.md"
+            _build_diff_feedback_template "$id" "$_diff_full" > "$_feedback_file"
+
+            info "📝 Opening \$EDITOR for diff feedback (round $diff_edit_round/$diff_max_edits)..."
+            "${EDITOR:-vi}" "$_feedback_file" </dev/tty >/dev/tty 2>/dev/tty || true
+
+            # If user left the template body unmodified or empty, abort the loop
+            if ! _diff_feedback_has_content "$_feedback_file"; then
+              warn "No feedback content found in $_feedback_file — skipping fix round."
+              break
+            fi
+
+            step "🔧 Applying fix from diff feedback (round $diff_edit_round)..."
+            _session_phase_start "fix-edit-$diff_edit_round"
+            DEVLOOP_FIX_EXTRA_INSTRUCTIONS="$_feedback_file" cmd_fix "$id"
+            _session_phase_end "fix-edit-$diff_edit_round" "done"
+
+            # Re-capture for the next gate iteration
+            _diff_summary="$(_extract_diff_summary "$id")"
+            _diff_full="$(_capture_worker_diff "$id")"
+            if [[ -z "$_diff_summary" ]]; then
+              info "No further changes after fix — accepting."
+              break
+            fi
+            # Loop back to approve_diff
+            ;;
+          *)
+            _inbox_write "$(find_project_root)" "blocked" \
+              "Pipeline halted at diff-approval gate for task $id." "$id" 2>/dev/null || true
+            _session_finish "rejected-at-diff"
+            error "❌ Diff rejected at approval gate — pipeline stopped"
+            echo -e "  ${GRAY}Task: ${CYAN}$id${RESET}   Inspect: ${CYAN}git diff HEAD${RESET}"
+            exit 1
+            ;;
+        esac
+      done
+      echo ""
+    fi
+  fi
 
   # ── Stage 3: Review + fix loop (3-phase escalation) ─────────────────────────
   local verdict="NEEDS_WORK"
@@ -7443,6 +7970,9 @@ cmd_help() {
   echo -e "    Show phase timeline and logs for a specific run\n"
   echo -e "  ${CYAN}devloop replay <task-id> [--phase PHASE]${RESET}"
   echo -e "    Replay recorded phase logs. PHASE: architect|worker|reviewer|fix-N|respec\n"
+  echo -e "  ${CYAN}devloop${RESET}${GRAY}                                 — launch the live dashboard (TUI)${RESET}"
+  echo -e "  ${CYAN}devloop dashboard${RESET}${GRAY}                       — same, explicit${RESET}"
+  echo -e "    Go/Bubble Tea session dashboard. Build: ${GRAY}make tui-install${RESET}${GRAY} | env: DEVLOOP_DEFAULT_VIEW=help to disable${RESET}\n"
   echo -e "  ${CYAN}devloop view [task-id]${RESET}"
   echo -e "    Open live tmux dashboard: Architect | Worker | Reviewer | Fix/Decisions+Permissions"
   echo -e "    Falls back to inline log tail if tmux not installed\n"
@@ -7479,8 +8009,9 @@ cmd_help() {
   echo -e "    Launch configured worker provider with review fix instructions\n"
   echo -e "  ${CYAN}devloop tasks${RESET}  ${GRAY}alias: t${RESET}"
   echo -e "    List all task specs with status\n"
-  echo -e "  ${CYAN}devloop status [TASK-ID]${RESET}"
+  echo -e "  ${CYAN}devloop status [TASK-ID]${RESET}${GRAY}                — live single-session view (TUI; falls back to text when piped / env=text)${RESET}"
   echo -e "    Show full spec and latest review\n"
+  echo -e "  ${CYAN}devloop chat${RESET}${GRAY}                            — slash-command REPL (TUI)${RESET}\n"
   echo -e "  ${CYAN}devloop open [TASK-ID]${RESET}  ${GRAY}alias: o${RESET}"
   echo -e "    Open spec in \$EDITOR (defaults to vi)\n"
   echo -e "  ${CYAN}devloop block [TASK-ID]${RESET}  ${GRAY}alias: b${RESET}"
@@ -7664,6 +8195,18 @@ main() {
     --help|-h) header; cmd_help; exit 0 ;;
   esac
 
+  # ── Auto-launch dashboard when truly no-args + interactive + TUI present ──
+  # Gated by DEVLOOP_DEFAULT_VIEW (dashboard|help, default dashboard).
+  # Skipped when piped/redirected (no TTY) or when the binary isn't built.
+  if [[ "$cmd" == "help" ]] && [[ $# -eq 0 ]] && [[ -t 1 ]]; then
+    if [[ "${DEVLOOP_DEFAULT_VIEW:-dashboard}" == "dashboard" ]]; then
+      if _find_tui >/dev/null 2>&1; then
+        cmd_dashboard
+        # cmd_dashboard execs; control does not return.
+      fi
+    fi
+  fi
+
   # Bootstrap global ~/.devloop/ structure silently on every run
   _ensure_global_dirs
 
@@ -7696,6 +8239,8 @@ main() {
     sessions)         cmd_sessions "$@" ;;
     session)          cmd_session  "$@" ;;
     replay)           cmd_replay   "$@" ;;
+    dashboard|dash)   cmd_dashboard "$@" ;;
+    chat)             cmd_chat "$@" ;;
     view)             cmd_view     "$@" ;;
     projects)         cmd_projects "$@" ;;
     inbox)            cmd_inbox    "$@" ;;
