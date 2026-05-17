@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.4] — 2026-05-17
+
+### Fixed
+
+- **Live View shows stale status after `devloop resume`**: when a session timed out
+  (`timed-out-at-plan` / `timed-out-at-diff`) and was resumed, the `status` file in
+  the session directory was never reset — so Live View kept showing the old status
+  even while the resumed pipeline was running. Now `cmd_resume` immediately resets
+  `status` to `"running"` and removes `finished_at` before re-launching the pipeline.
+
+---
+
 ## [5.1.3] — 2026-05-17
 
 ### Fixed

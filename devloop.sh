@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.3"
+VERSION="5.1.4"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -8484,6 +8484,10 @@ cmd_resume() {
   fi
 
   emit_event "session.resume" from_phase="$from_phase" next_phase="$next_phase"
+
+  # Reset status file to "running" so Live View reflects the resumed state
+  echo "running" > "$session_dir/status"
+  rm -f "$session_dir/finished_at"
 
   local feature; feature="$(cat "$session_dir/feature.txt" 2>/dev/null | head -1 || echo "(unknown)")"
   step "▶ Resuming ${BOLD}$id${RESET}"
