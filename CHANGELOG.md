@@ -5,6 +5,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.6] — 2026-05-17
+
+### Fixed — reviewer chokes on huge diffs / provider error replies
+
+- **`cmd_review` pathspec exclusion**: build/dependency directories are now
+  dropped from the review diff by default. Was triggered by a real failure:
+  Electron project with untracked `out/` directory produced a 734 KB diff, Claude
+  replied `Prompt is too long`, engine couldn't parse a verdict and aborted with
+  `Unknown verdict repeated — stopping.`
+  - Default excludes: `out dist build .next .turbo coverage node_modules *.min.js *.bundle.js *.map`
+  - Override via `DEVLOOP_REVIEW_EXCLUDE="<space-separated pathspecs>"`
+  - `DEVLOOP_REVIEW_EXCLUDE=none` restores legacy behaviour (full diff)
+  - Applied to both the baseline diff (`base..HEAD`) and the uncommitted-diff fallback.
+- **`cmd_review` byte-size cap**: the assembled diff is now bounded by
+  `DEVLOOP_REVIEW_MAX_BYTES` (default `150000`). Oversized diffs are truncated
+  with a clear marker line; review still runs. Set to `0` to disable.
+- **Provider-error detector**: `cmd_review` now scans the first 1 KB of the
+  review file for known failure strings (`Prompt is too long`, `rate_limit`,
+  `context length exceeded`, `overloaded_error`, `Request timed out`, etc.)
+  and surfaces them as a distinct error (exit code 4, session status
+  `provider-error`) with actionable next-step hints, instead of letting them
+  fall through to the generic `Unknown verdict` retry loop.
+
+### Added — env vars
+
+- `DEVLOOP_REVIEW_EXCLUDE` — space-separated pathspecs to exclude from the
+  review diff (or `none` to disable).
+- `DEVLOOP_REVIEW_MAX_BYTES` — byte cap for the diff sent to the reviewer
+  (default `150000`; `0` disables).
+
+---
+
 ## [5.1.5] — 2026-05-17
 
 ### Fixed

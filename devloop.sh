@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.5"
+VERSION="5.1.6"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -5910,6 +5910,74 @@ After planning, implement all steps. Run tests if possible. Stage ALL changed fi
 
 # ── cmd: review ──────────────────────────────────────────────────────────────
 
+# ── Review guards (v5.1.6) ──────────────────────────────────────────────────
+# _review_pathspec_args — emit git pathspec exclusion args, one per line.
+# Controlled by DEVLOOP_REVIEW_EXCLUDE (space-separated). Default list drops
+# common build / dependency directories that explode review prompts.
+# Set DEVLOOP_REVIEW_EXCLUDE="none" to disable (legacy behaviour).
+_review_pathspec_args() {
+  local excludes
+  if [[ -n "${DEVLOOP_REVIEW_EXCLUDE+x}" ]]; then
+    excludes="$DEVLOOP_REVIEW_EXCLUDE"
+  else
+    excludes="out dist build .next .turbo coverage node_modules *.min.js *.bundle.js *.map"
+  fi
+  [[ "$excludes" == "none" || -z "$excludes" ]] && return 0
+  printf -- '--\n'
+  local p
+  for p in $excludes; do
+    printf -- ':!%s\n' "$p"
+  done
+}
+
+# _truncate_diff_if_oversized — bound the diff string by DEVLOOP_REVIEW_MAX_BYTES.
+# Stdin: raw diff; Stdout: possibly-truncated diff with marker line appended.
+# Default cap: 150_000 bytes. Set to 0 to disable.
+_truncate_diff_if_oversized() {
+  local max="${DEVLOOP_REVIEW_MAX_BYTES:-150000}"
+  local data; data="$(cat)"
+  local size=${#data}
+  if (( max <= 0 )) || (( size <= max )); then
+    printf '%s' "$data"
+    return 0
+  fi
+  local omitted=$(( size - max ))
+  warn "Review diff is large (${size} bytes > cap ${max}) — truncating" >&2
+  echo -e "  ${GRAY}Raise the cap:${RESET} ${CYAN}DEVLOOP_REVIEW_MAX_BYTES=$((size + 10000)) devloop review${RESET}" >&2
+  printf '%s\n... [diff truncated: %d bytes omitted of %d total — set DEVLOOP_REVIEW_MAX_BYTES to raise the cap]\n' \
+    "${data:0:$max}" "$omitted" "$size"
+}
+
+# _provider_error_in_file — scan the first 1 KB of a review file for known
+# provider failure strings (Claude rate-limit / context overflow / etc.).
+# Echoes the matched pattern and returns 0 on hit; returns 1 otherwise.
+_provider_error_in_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  local head; head="$(head -c 1024 "$f" 2>/dev/null)"
+  [[ -z "$head" ]] && return 1
+  local pattern
+  for pattern in \
+    "Prompt is too long" \
+    "prompt is too long" \
+    "context length exceeded" \
+    "context_length_exceeded" \
+    "maximum context" \
+    "rate_limit" \
+    "rate limit exceeded" \
+    "overloaded_error" \
+    "Request timed out" \
+    "upstream connect error" \
+    "API Error: 4" \
+    "API Error: 5"; do
+    if [[ "$head" == *"$pattern"* ]]; then
+      printf '%s' "$pattern"
+      return 0
+    fi
+  done
+  return 1
+}
+
 cmd_review() {
   # FIX (load_config order): must run before latest_task() and file checks
   load_config
@@ -5930,16 +5998,31 @@ cmd_review() {
 
   # FIX #1: Use the pre-commit baseline saved by `devloop work` so we see
   #         exactly what Copilot changed — including committed changes.
+  # v5.1.6: apply pathspec exclusions to drop build/dep dirs from the diff.
   info "Reading git changes..."
   local impl=""
   local diff=""
   local staged=""
   local pre_commit_file="$SPECS_PATH/$id.pre-commit"
 
+  # Build pathspec exclusion args once (bash 3.2-safe: no mapfile).
+  local _ps_args=()
+  local _arg
+  while IFS= read -r _arg; do
+    [[ -n "$_arg" ]] && _ps_args+=("$_arg")
+  done < <(_review_pathspec_args)
+  if (( ${#_ps_args[@]} > 0 )); then
+    info "Excluding build dirs from diff: ${GRAY}${_ps_args[*]:1}${RESET}  ${GRAY}(override: DEVLOOP_REVIEW_EXCLUDE)${RESET}"
+  fi
+
   if [[ -f "$pre_commit_file" ]]; then
     local base_hash; base_hash="$(cat "$pre_commit_file")"
     if git rev-parse "$base_hash" &>/dev/null 2>&1; then
-      diff="$(git diff "${base_hash}..HEAD" 2>/dev/null || echo "")"
+      if (( ${#_ps_args[@]} > 0 )); then
+        diff="$(git diff "${base_hash}..HEAD" "${_ps_args[@]}" 2>/dev/null || echo "")"
+      else
+        diff="$(git diff "${base_hash}..HEAD" 2>/dev/null || echo "")"
+      fi
       info "Diffing from baseline: ${GRAY}${base_hash:0:12}...${RESET}"
     fi
   fi
@@ -5947,13 +6030,26 @@ cmd_review() {
   # Fallback: uncommitted changes (covers manual runs without a baseline)
   if [[ -z "$diff" ]]; then
     warn "No pre-commit baseline found — falling back to uncommitted diff"
-    diff="$(git diff HEAD 2>/dev/null || git diff 2>/dev/null || echo "")"
-    staged="$(git diff --cached 2>/dev/null || echo "")"
+    if (( ${#_ps_args[@]} > 0 )); then
+      diff="$(git diff HEAD "${_ps_args[@]}" 2>/dev/null || git diff "${_ps_args[@]}" 2>/dev/null || echo "")"
+      staged="$(git diff --cached "${_ps_args[@]}" 2>/dev/null || echo "")"
+    else
+      diff="$(git diff HEAD 2>/dev/null || git diff 2>/dev/null || echo "")"
+      staged="$(git diff --cached 2>/dev/null || echo "")"
+    fi
 
     local new_files; new_files="$(git ls-files --others --exclude-standard 2>/dev/null | head -8 || echo "")"
     while IFS= read -r file; do
       [[ -n "$file" && -f "$file" ]] && impl+="## New file: $file\n\`\`\`\n$(cat "$file")\n\`\`\`\n\n"
     done <<< "$new_files"
+  fi
+
+  # v5.1.6: cap diff + staged sizes before they hit the prompt.
+  if [[ -n "$diff" ]]; then
+    diff="$(printf '%s' "$diff" | _truncate_diff_if_oversized)"
+  fi
+  if [[ -n "$staged" ]]; then
+    staged="$(printf '%s' "$staged" | _truncate_diff_if_oversized)"
   fi
 
   [[ -n "$diff"   ]] && impl+="## Changes\n\`\`\`diff\n$diff\n\`\`\`\n\n"
@@ -6035,6 +6131,24 @@ cmd_review() {
   cat "$review_file"
 
   divider
+
+  # v5.1.6: detect provider error replies BEFORE verdict parsing so they don't
+  # masquerade as "Unknown verdict" and waste retry budget.
+  local _perr
+  if _perr="$(_provider_error_in_file "$review_file")"; then
+    echo ""
+    error "Provider returned an error instead of a review: ${YELLOW}${_perr}${RESET}"
+    echo -e "  ${GRAY}This usually means the diff is too large or the provider is throttled / overloaded.${RESET}"
+    echo -e "  ${GRAY}Try one of:${RESET}"
+    echo -e "    ${CYAN}DEVLOOP_REVIEW_MAX_BYTES=80000 devloop review $id${RESET}    ${GRAY}# tighter prompt cap${RESET}"
+    echo -e "    ${CYAN}DEVLOOP_REVIEW_EXCLUDE=\"out dist build node_modules\" devloop review $id${RESET}"
+    echo -e "    ${GRAY}or add build dirs (out/, dist/, build/) to .gitignore and re-run${RESET}"
+    echo ""
+    if [[ -n "${DEVLOOP_CURRENT_SESSION_ID:-}" ]] && declare -f _session_finish >/dev/null 2>&1; then
+      _session_finish "provider-error" 2>/dev/null || true
+    fi
+    exit 4
+  fi
 
   local verdict
   verdict="$(parse_review_verdict "$review_file")"
