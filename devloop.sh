@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.2"
+VERSION="5.1.3"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -6454,9 +6454,19 @@ cmd_update() {
     fi
   fi
 
-  # Basic sanity check — must look like a devloop script
-  if ! grep -q 'devloop' "$tmp_file" 2>/dev/null; then
-    error "Downloaded file does not appear to be a devloop script — aborting"
+  # Sanity checks — validate the download before installing
+  local tmp_size; tmp_size="$(wc -c < "$tmp_file" 2>/dev/null || echo 0)"
+  if [[ "$tmp_size" -lt 50000 ]]; then
+    error "Downloaded file is too small (${tmp_size} bytes) — likely truncated download, aborting"
+    rm -f "$tmp_file"; exit 1
+  fi
+  if ! grep -q '^VERSION=' "$tmp_file" 2>/dev/null; then
+    error "Downloaded file does not appear to be a devloop script (missing VERSION) — aborting"
+    rm -f "$tmp_file"; exit 1
+  fi
+  if ! bash -n "$tmp_file" 2>/dev/null; then
+    error "Downloaded file has a syntax error — aborting to protect your installation"
+    bash -n "$tmp_file" 2>&1 | head -5 >&2
     rm -f "$tmp_file"; exit 1
   fi
 

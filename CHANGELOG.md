@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.3] — 2026-05-17
+
+### Fixed
+
+- **`devloop update` truncation guard**: the previous sanity check only verified the
+  downloaded file contained the word "devloop" — a partially downloaded file would pass
+  and get installed, causing `unexpected EOF while looking for matching '"'` errors.
+  Now validates three things before installing:
+  1. File size must be > 50 KB (truncated downloads are rejected)
+  2. `VERSION=` line must be present (confirms it's a devloop script)
+  3. `bash -n` syntax check must pass (catches corrupted downloads)
+
+---
+
 ## [5.1.2] — 2026-05-17
 
 ### Fixed
