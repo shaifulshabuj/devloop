@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.7"
+VERSION="5.1.8"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -8108,7 +8108,7 @@ $(cat "$review_file")
             echo ""
             local combined_history=""
             local h
-            for h in "${fix_history_parts[@]}"; do
+            for h in "${fix_history_parts[@]+"${fix_history_parts[@]}"}"; do
               combined_history+="$h"$'\n'
             done
             if _run_respec_phase "$id" "$combined_history"; then
@@ -8149,7 +8149,7 @@ $(cat "$review_file")
           step "🔧 Fixing (attempt $fix_round/$max_retries — deep: injecting review history)..."
           local combined_history=""
           local h
-          for h in "${fix_history_parts[@]}"; do
+          for h in "${fix_history_parts[@]+"${fix_history_parts[@]}"}"; do
             combined_history+="$h"$'\n'
           done
           # ── Issue-delta: flag issues persisting from previous round ──────────
@@ -8872,7 +8872,7 @@ cmd_resume() {
             echo ""
             local combined_history=""
             local h
-            for h in "${fix_history_parts[@]}"; do
+            for h in "${fix_history_parts[@]+"${fix_history_parts[@]}"}"; do
               combined_history+="$h"$'\n'
             done
             if _run_respec_phase "$id" "$combined_history"; then
@@ -8909,7 +8909,7 @@ cmd_resume() {
         else
           step "🔧 Fixing (attempt $fix_round/$max_retries — deep)..."
           local combined_history=""; local h
-          for h in "${fix_history_parts[@]}"; do combined_history+="$h"$'\n'; done
+          for h in "${fix_history_parts[@]+"${fix_history_parts[@]}"}"; do combined_history+="$h"$'\n'; done
           cmd_fix --history "$combined_history" "$id"
         fi
         _session_phase_end "$fix_phase_name" "done"
