@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.6"
+VERSION="5.1.7"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -8445,17 +8445,19 @@ cmd_resume() {
   local do_list=false
   local target_id=""
   local do_approve_diff=false
+  local no_respec=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help|-h)
-        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list] [--approve-diff]"
+        echo -e "Usage: ${BOLD}devloop resume${RESET} [TASK-ID] [--dry-run] [--list] [--approve-diff] [--no-respec]"
         echo ""
         echo -e "  ${CYAN}devloop resume${RESET}                          Resume the newest unfinished session"
         echo -e "  ${CYAN}devloop resume TASK-ID${RESET}                  Resume the specified session"
         echo -e "  ${CYAN}devloop resume --dry-run${RESET}                Print would-resume info without executing"
         echo -e "  ${CYAN}devloop resume --list${RESET}                   List resumable sessions and exit"
         echo -e "  ${CYAN}devloop resume [TASK-ID] --approve-diff${RESET}  Force-approve the diff gate and continue to review"
+        echo -e "  ${CYAN}devloop resume [TASK-ID] --no-respec${RESET}     Skip re-architect phase if max retries are hit"
         echo ""
         echo -e "  Resumable statuses: ${GRAY}running, needs-work, timed-out-at-plan, timed-out-at-diff, rejected-at-plan, rejected-at-diff, (absent)${RESET}"
         echo -e "  Skips sessions already ${GRAY}approved${RESET} or ${GRAY}rejected${RESET} (reviewer-rejected, no retries left)."
@@ -8464,6 +8466,7 @@ cmd_resume() {
       --dry-run)      dry_run=true;          shift ;;
       --list)         do_list=true;          shift ;;
       --approve-diff) do_approve_diff=true;  shift ;;
+      --no-respec)    no_respec=true;        shift ;;
       TASK-*)         target_id="$1";        shift ;;
       *)              shift ;;
     esac
@@ -8852,14 +8855,49 @@ cmd_resume() {
           fix_history_parts+=("=== Review after fix round $fix_round ===$(printf '\n')$(cat "$review_file")")
         fi
         fix_round=$(( fix_round + 1 ))
+
+        # ── Human checkpoint on last fix round before escalation ──────────────
+        if (( fix_round == max_retries )); then
+          warn "⚠  Fix round $fix_round/$max_retries — last attempt before re-architect"
+          _inbox_write "$(find_project_root)" "needs-work" \
+            "Task $id: fix round $fix_round of $max_retries. If this fails, re-architect phase will start. Check: devloop status $id" \
+            "$id" || true
+        fi
+
         if (( fix_round > max_retries )); then
-          if [[ "$fix_strategy" == "escalate" ]]; then
-            warn "Max fix retries reached — task left as NEEDS_WORK"
+          # ── Escalate to re-architect (escalate strategy only) ──────────────
+          if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
+            warn "⚠  Max fix retries ($max_retries) reached — escalating to re-architect phase"
+            _session_phase_start "respec"
+            echo ""
+            local combined_history=""
+            local h
+            for h in "${fix_history_parts[@]}"; do
+              combined_history+="$h"$'\n'
+            done
+            if _run_respec_phase "$id" "$combined_history"; then
+              _session_phase_end "respec" "approved"
+              review_state="approved"; fix_state=""
+              _render_status_header "$arch_state" "$work_state" "$review_state" "$fix_state" "$id" "$feature"
+              verdict="APPROVED"
+            else
+              _session_phase_end "respec" "needs-work"
+              _session_finish "needs-work"
+              warn "Re-architect phase also could not get APPROVED"
+              echo -e "  ${GRAY}Task needs manual review: ${CYAN}devloop status $id${RESET}"
+              echo -e "  ${GRAY}Options:"
+              echo -e "    ${CYAN}devloop fix $id${RESET}    — try another fix manually"
+              echo -e "    ${CYAN}devloop status $id${RESET} — read full review"
+              exit 2
+            fi
+            break
+          else
+            _session_finish "needs-work"
+            _inbox_write "$(find_project_root)" "needs-work" "Max fix retries ($max_retries) reached for task $id. Manual review needed." "$id" || true
+            warn "⚠  Max fix retries ($max_retries) reached — task left as NEEDS_WORK"
+            echo -e "  ${GRAY}Continue manually:  ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
+            exit 2
           fi
-          _session_finish "needs-work"
-          warn "Max fix retries ($max_retries) reached"
-          echo -e "  ${GRAY}Continue: ${CYAN}devloop fix $id${RESET}  then  ${CYAN}devloop review $id${RESET}"
-          exit 2
         fi
         local fix_phase_name="fix-$fix_round"
         fix_state="fix-${fix_round}:running"
