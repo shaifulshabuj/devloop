@@ -19,3 +19,4 @@ cmd/devloop-tui/devloop-tui
 .agents/
 .codex/
 .vscode/
+.devloop/
