@@ -5,6 +5,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.1] — 2026-05-17
+
+### Fixed — pipeline stuck-state recovery
+
+- **Approval gate timeout** no longer hard-rejects the pipeline. `_approval_gate` now
+  returns exit code 3 (stalled) vs 1 (active rejection). Callers set
+  `timed-out-at-plan` / `timed-out-at-diff` status and show a
+  `devloop resume <id>` recovery hint instead of leaving the session stranded.
+- **`devloop resume`** re-presents only the correct gate when resuming a
+  timed-out or user-rejected session:
+  - `timed-out-at-diff` / `rejected-at-diff` → re-shows diff gate, skips re-running the worker.
+  - `timed-out-at-plan` / `rejected-at-plan` → re-shows plan gate, re-runs from plan approval.
+  - `rejected-at-plan` and `rejected-at-diff` are now resumable (were previously treated as terminal).
+  - `--approve-diff` flag force-approves the diff gate when resuming a `timed-out-at-diff` session.
+- **`devloop continue <id>`** now works as an alias for `devloop resume <id>` — no longer
+  misrouted to the natural-language router as a new task.
+- **Incomplete spec validation** in `cmd_architect`: if the LLM omits the
+  `## Copilot Instructions Block`, the architect retries up to 2 times before
+  failing with an actionable error message.
+- **Auto-re-architect in `devloop run`**: if `cmd_architect` exits non-zero (e.g. spec
+  truncated), the pipeline automatically retries architect once before giving up.
+- **Plan-gate warning**: `_extract_plan_summary` now appends a `⚠ WARNING` when
+  `## Copilot Instructions Block` is missing from the spec, so the user can catch
+  it before approving the plan and sending an incomplete spec to the worker.
+- **`cmd_work` error improved**: missing Instructions Block now shows exact
+  `devloop architect "<feature>"` and `devloop work <id>` commands for recovery.
+
+---
+
 ## [5.1.0] — 2026-05-16
 
 ### Added — TUI dashboard, chat REPL, approval gates, resume
