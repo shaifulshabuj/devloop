@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.5] — 2026-05-17
+
+### Fixed
+
+- **`((: 0\n0: syntax error in expression`** crash during reviewer/fix loop: with
+  `set -o pipefail` active, a `grep | grep | wc -l | tr -d ' ' || echo 0` pipeline
+  produces **double output** when the inner grep finds no matches — grep exits 1
+  (causing pipefail), `wc -l` still outputs `"0"`, then `|| echo 0` also fires,
+  yielding `"0\n0"`. Using `"0\n0"` in `(( fix_round == 0 ))` triggers the syntax
+  error. Fixed by switching to `grep -c || true` which avoids the fallback echo:
+  `grep -c` outputs the count (`0` or `N`) and `|| true` adds no output.
+- Same `|| echo 0` pattern also fixed in the fix-round issue-count comparison
+  (`prev_count`/`curr_count`).
+
+---
+
 ## [5.1.4] — 2026-05-17
 
 ### Fixed

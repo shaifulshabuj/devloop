@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.4"
+VERSION="5.1.5"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -8043,9 +8043,9 @@ $(cat "$review_file")
             local prev_tmp; prev_tmp="$(mktemp /tmp/devloop-prev-XXXXXX)"
             local prev_idx=$(( ${#fix_history_parts[@]} - 2 ))
             printf '%s' "${fix_history_parts[$prev_idx]}" > "$prev_tmp"
-            local prev_count; prev_count="$(_parse_issues_table "$prev_tmp" | grep -c '[^[:space:]]' 2>/dev/null || echo 0)"
+            local prev_count; prev_count="$(_parse_issues_table "$prev_tmp" | grep -c '[^[:space:]]' || true)"
             rm -f "$prev_tmp"
-            local curr_count; curr_count="$(_parse_issues_table "$review_file" | grep -c '[^[:space:]]' 2>/dev/null || echo 0)"
+            local curr_count; curr_count="$(_parse_issues_table "$review_file" | grep -c '[^[:space:]]' || true)"
             combined_history+="
 PERSISTING CONTEXT: Previous fix round had $prev_count tracked issues; this round has $curr_count. Focus specifically on the issues that were NOT resolved from the previous attempt."
           fi
@@ -8506,8 +8506,11 @@ cmd_resume() {
   # Count how many fix rounds have already completed (for correct numbering)
   local existing_fix_rounds=0
   if [[ -f "$session_dir/events.ndjson" ]]; then
+    # Use grep -c to get a count; `|| true` prevents set -o pipefail from
+    # triggering `|| echo N` fallbacks that produce double output ("0\n0").
     existing_fix_rounds="$(grep '"kind":"phase.end"' "$session_dir/events.ndjson" 2>/dev/null \
-      | grep '"phase":"fix-' | wc -l | tr -d ' ' || echo 0)"
+      | grep -c '"phase":"fix-' || true)"
+    existing_fix_rounds="${existing_fix_rounds:-0}"
   fi
   local fix_round="$existing_fix_rounds"
 
