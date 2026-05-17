@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.1.2] — 2026-05-17
+
+### Fixed
+
+- **`devloop doctor` bash version check**: warns when running on macOS system bash (3.2.x)
+  and suggests `brew install bash` to upgrade. macOS ships bash 3.2 for licensing reasons;
+  bash 4+ is recommended but not required.
+
+---
+
 ## [5.1.1] — 2026-05-17
 
 ### Fixed — pipeline stuck-state recovery

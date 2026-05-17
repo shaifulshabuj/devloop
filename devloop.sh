@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.1.1"
+VERSION="5.1.2"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -2054,6 +2054,17 @@ cmd_doctor() {
   }
 
   local root; root="$(find_project_root)"
+
+  # Bash version check (bash 3.2 on macOS works but warn; bash 4+ recommended)
+  local bash_ver; bash_ver="${BASH_VERSION%%.*}"
+  ok="false"; [[ "$bash_ver" -ge 4 ]] 2>/dev/null && ok="true"
+  if [[ "$ok" == "true" ]]; then
+    echo -e "  ${GREEN}✔${RESET}  bash ${BASH_VERSION} (recommended 4+)"
+  else
+    echo -e "  ${YELLOW}⚠${RESET}  bash ${BASH_VERSION} — macOS system bash (3.2) works but upgrade recommended"
+    echo -e "     ${GRAY}→ brew install bash   then add /opt/homebrew/bin to PATH${RESET}"
+  fi
+  echo ""
 
   # Tools
   local ok
