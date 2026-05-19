@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shaifulshabuj/devloop/internal/agent"
 	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/internal/orchestrator"
 	"github.com/shaifulshabuj/devloop/internal/storage"
 	"github.com/shaifulshabuj/devloop/internal/tui"
 	"github.com/spf13/cobra"
@@ -50,6 +51,9 @@ func main() {
 	root.AddCommand(projectsCmd())
 	root.AddCommand(runCmd())
 	root.AddCommand(statusCmd())
+	root.AddCommand(planCmd())
+	root.AddCommand(resumeCmd())
+	root.AddCommand(resumableCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -439,6 +443,146 @@ func statusCmd() *cobra.Command {
 					shortID = shortID[:8]
 				}
 				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, t.Status, created, t.Title); err != nil {
+					return fmt.Errorf("writing row: %w", err)
+				}
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func planCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "plan <task>",
+		Short: "Generate an execution plan for a task without running it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			task := args[0]
+
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			runner := agent.NewRunner()
+			runner.Detect()
+
+			orch := orchestrator.New(store, runner)
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			plan, err := orch.Plan(ctx, task)
+			if err != nil {
+				return fmt.Errorf("planning task: %w", err)
+			}
+
+			fmt.Printf("Plan: %s\n", plan.Title)
+			fmt.Printf("Estimated time: %s\n", plan.EstimatedTime)
+			fmt.Printf("Steps (%d):\n", len(plan.Steps))
+			for _, s := range plan.Steps {
+				fmt.Printf("  %d. %s\n", s.Number, s.Description)
+			}
+			return nil
+		},
+	}
+}
+
+func resumeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <task-id>",
+		Short: "Resume a pending or failed task by re-running its steps",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			taskID := args[0]
+
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			runner := agent.NewRunner()
+			runner.Detect()
+
+			dispatcher := orchestrator.NewDispatcher(store, runner)
+			resumer := orchestrator.NewResumer(store, dispatcher)
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			result, err := resumer.Resume(ctx, taskID)
+			if result != nil {
+				for _, sr := range result.Results {
+					status := "ok"
+					if sr.Error != nil {
+						status = "failed"
+					}
+					fmt.Printf("  Step %d [%s]: %s\n", sr.Step.Number, status, sr.Step.Description)
+					if sr.Output != "" {
+						fmt.Printf("    %s\n", sr.Output)
+					}
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("resume: %w", err)
+			}
+			fmt.Printf("\nTask %s resumed successfully.\n", taskID)
+			return nil
+		},
+	}
+}
+
+func resumableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resumable",
+		Short: "List tasks that can be resumed (pending, running, or failed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			// Dispatcher and runner are not used by Resumable(), but NewResumer
+			// requires them to satisfy the interface for Resume().
+			runner := agent.NewRunner()
+			dispatcher := orchestrator.NewDispatcher(store, runner)
+			resumer := orchestrator.NewResumer(store, dispatcher)
+
+			tasks, err := resumer.Resumable()
+			if err != nil {
+				return fmt.Errorf("listing resumable tasks: %w", err)
+			}
+
+			if len(tasks) == 0 {
+				fmt.Println("No resumable tasks found.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			if _, err := fmt.Fprintln(w, "ID\tSTATUS\tTITLE"); err != nil {
+				return fmt.Errorf("writing header: %w", err)
+			}
+			for _, t := range tasks {
+				shortID := t.ID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", shortID, t.Status, t.Title); err != nil {
 					return fmt.Errorf("writing row: %w", err)
 				}
 			}
