@@ -21,3 +21,4 @@ cmd/devloop-tui/devloop-tui
 .vscode/*
 !.vscode/mcp.json
 .devloop/
+.claude/
