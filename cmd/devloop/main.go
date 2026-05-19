@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/shaifulshabuj/devloop/internal/agent"
 	"github.com/shaifulshabuj/devloop/internal/config"
 	"github.com/shaifulshabuj/devloop/internal/tui"
 	"github.com/spf13/cobra"
@@ -27,6 +28,7 @@ func main() {
 
 	root.AddCommand(versionCmd())
 	root.AddCommand(configCmd())
+	root.AddCommand(contextCmd())
 	root.AddCommand(startCmd())
 	root.AddCommand(initCmd())
 	root.AddCommand(projectsCmd())
@@ -84,6 +86,44 @@ func configShowCmd() *cobra.Command {
 			}
 
 			fmt.Print(out)
+			return nil
+		},
+	}
+}
+
+func contextCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "context",
+		Short: "Manage DevLoop agent context",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
+	}
+
+	cmd.AddCommand(contextShowCmd())
+	return cmd
+}
+
+func contextShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show",
+		Short: "Print the system prompt that would be injected at agent startup",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolving home directory: %w", err)
+			}
+
+			globalPath := filepath.Join(home, ".devloop", "config.toml")
+			projectPath := filepath.Join(".devloop", "config.toml")
+
+			cfg, err := config.Load(globalPath, projectPath)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+
+			prompt := agent.BuildSystemPrompt(cfg, "", ".devloop")
+			fmt.Print(prompt)
 			return nil
 		},
 	}
