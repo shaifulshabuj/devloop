@@ -54,6 +54,9 @@ func main() {
 	root.AddCommand(planCmd())
 	root.AddCommand(resumeCmd())
 	root.AddCommand(resumableCmd())
+	root.AddCommand(skillsCmd())
+	root.AddCommand(personasCmd())
+	root.AddCommand(learnCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -587,6 +590,114 @@ func resumableCmd() *cobra.Command {
 				}
 			}
 			return w.Flush()
+		},
+	}
+}
+
+func skillsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "skills",
+		Short: "Manage DevLoop skills",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := agent.NewSkillLoader(".devloop/skills")
+			names, err := loader.Names()
+			if err != nil {
+				return fmt.Errorf("loading skills: %w", err)
+			}
+			if len(names) == 0 {
+				fmt.Println("No skills found. Add .md files to .devloop/skills/")
+				return nil
+			}
+			for _, name := range names {
+				fmt.Println(name)
+			}
+			return nil
+		},
+	}
+	cmd.AddCommand(skillsShowCmd())
+	return cmd
+}
+
+func skillsShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show the content of a named skill",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := agent.NewSkillLoader(".devloop/skills")
+			skill, err := loader.Get(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Print(skill.Content)
+			return nil
+		},
+	}
+}
+
+func personasCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "personas",
+		Short: "List registered agent personas",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			registry := agent.NewPersonaRegistry()
+			personas := registry.List()
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			if _, err := fmt.Fprintln(w, "NAME\tDESCRIPTION"); err != nil {
+				return fmt.Errorf("writing header: %w", err)
+			}
+			for _, p := range personas {
+				if _, err := fmt.Fprintf(w, "%s\t%s\n", p.Name, p.Description); err != nil {
+					return fmt.Errorf("writing row: %w", err)
+				}
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func learnCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "learn <task-id>",
+		Short: "Extract lessons from a task's context and append to .devloop/lessons.md",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			taskID := args[0]
+
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			task, err := store.GetTask(taskID)
+			if err != nil {
+				return fmt.Errorf("getting task %q: %w", taskID, err)
+			}
+
+			entries, err := store.GetContext(taskID)
+			if err != nil {
+				return fmt.Errorf("getting context for task %q: %w", taskID, err)
+			}
+
+			inputs := make([]agent.LessonInput, len(entries))
+			for i, e := range entries {
+				inputs[i] = agent.LessonInput{Output: e.Content}
+			}
+
+			loop := agent.NewLearningLoop(".devloop/lessons.md")
+			lessons := loop.Extract(task.ID, task.Title, inputs)
+			if err := loop.Persist(task.Title, task.ID, lessons); err != nil {
+				return fmt.Errorf("persisting lessons: %w", err)
+			}
+
+			fmt.Printf("Extracted %d lesson(s) from task %q.\n", len(lessons), task.Title)
+			return nil
 		},
 	}
 }
