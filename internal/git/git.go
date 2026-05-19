@@ -2,6 +2,7 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -79,29 +80,11 @@ func (c *Client) run(args ...string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if ok := isExitError(err, &exitErr); ok {
+		if errors.As(err, &exitErr) {
 			return "", fmt.Errorf("git %s: exit %d: %s",
 				strings.Join(args, " "), exitErr.ExitCode(), string(exitErr.Stderr))
 		}
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return string(out), nil
-}
-
-// isExitError is a helper to type-assert *exec.ExitError.
-func isExitError(err error, target **exec.ExitError) bool {
-	var e *exec.ExitError
-	if ok := asExitError(err, &e); ok {
-		*target = e
-		return true
-	}
-	return false
-}
-
-func asExitError(err error, target **exec.ExitError) bool {
-	e, ok := err.(*exec.ExitError)
-	if ok {
-		*target = e
-	}
-	return ok
 }
