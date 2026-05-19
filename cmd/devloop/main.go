@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,7 @@ func main() {
 
 	root.AddCommand(versionCmd())
 	root.AddCommand(configCmd())
+	root.AddCommand(startCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -81,4 +83,29 @@ func configShowCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func startCmd() *cobra.Command {
+	var noTUI bool
+
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start DevLoop (launches the interactive TUI by default)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if noTUI {
+				fmt.Println("DevLoop v6 started (no TUI)")
+				return nil
+			}
+			// Use the current directory name as the project name for Phase 1.
+			cwd, err := os.Getwd()
+			if err != nil {
+				cwd = "."
+			}
+			projectName := filepath.Base(cwd)
+			return tui.Run(projectName)
+		},
+	}
+
+	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Run in non-interactive mode without the TUI")
+	return cmd
 }
