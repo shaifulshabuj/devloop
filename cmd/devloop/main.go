@@ -1,19 +1,31 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shaifulshabuj/devloop/internal/agent"
 	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/internal/storage"
 	"github.com/shaifulshabuj/devloop/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 var version = "v6.0.0-dev"
+
+// Global flags, populated by PersistentPreRunE on the root command.
+var (
+	globalProject string
+	globalBackend string
+	globalNoColor bool
+)
 
 func main() {
 	root := &cobra.Command{
@@ -26,12 +38,18 @@ func main() {
 		},
 	}
 
+	root.PersistentFlags().StringVar(&globalProject, "project", "", "Path to project directory (defaults to cwd)")
+	root.PersistentFlags().StringVar(&globalBackend, "backend", "", "Agent backend to use (claude|copilot|opencode|pi)")
+	root.PersistentFlags().BoolVar(&globalNoColor, "no-color", false, "Disable color output")
+
 	root.AddCommand(versionCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(contextCmd())
 	root.AddCommand(startCmd())
 	root.AddCommand(initCmd())
 	root.AddCommand(projectsCmd())
+	root.AddCommand(runCmd())
+	root.AddCommand(statusCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -140,7 +158,6 @@ func startCmd() *cobra.Command {
 				fmt.Println("DevLoop v6 started (no TUI)")
 				return nil
 			}
-			// Use the current directory name as the project name for Phase 1.
 			cwd, err := os.Getwd()
 			if err != nil {
 				cwd = "."
@@ -175,19 +192,16 @@ func initCmd() *cobra.Command {
 				return fmt.Errorf("resolving current directory: %w", err)
 			}
 
-			// Derive project name from flag or directory name.
 			projectName := name
 			if projectName == "" {
 				projectName = filepath.Base(cwd)
 			}
 
-			// Create .devloop/ directory.
 			devloopDir := filepath.Join(cwd, ".devloop")
 			if err := os.MkdirAll(devloopDir, 0o755); err != nil {
 				return fmt.Errorf("creating .devloop directory: %w", err)
 			}
 
-			// Write .devloop/config.toml with sensible defaults.
 			cfgPath := filepath.Join(devloopDir, "config.toml")
 			cfgContent := fmt.Sprintf(`[project]
 name = %q
@@ -213,7 +227,6 @@ keep_days = 30
 				return fmt.Errorf("writing config.toml: %w", err)
 			}
 
-			// Register project in the global registry (idempotent).
 			regPath, err := registryPath()
 			if err != nil {
 				return err
@@ -273,6 +286,159 @@ func projectsCmd() *cobra.Command {
 					lastUsed = "never"
 				}
 				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", p.Name, p.Path, lastUsed); err != nil {
+					return fmt.Errorf("writing row: %w", err)
+				}
+			}
+			return w.Flush()
+		},
+	}
+}
+
+// openStore resolves the storage DB path from config and opens a Store.
+func openStore() (*storage.Store, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolving home directory: %w", err)
+	}
+
+	globalPath := filepath.Join(home, ".devloop", "config.toml")
+	projectPath := filepath.Join(".devloop", "config.toml")
+
+	cfg, err := config.Load(globalPath, projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+
+	dbPath := cfg.Storage.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(home, ".devloop", "devloop.db")
+	} else if len(dbPath) >= 2 && dbPath[:2] == "~/" {
+		dbPath = filepath.Join(home, dbPath[2:])
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return nil, fmt.Errorf("creating storage directory: %w", err)
+	}
+
+	return storage.Open(dbPath)
+}
+
+func runCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "run <task>",
+		Short: "Run an agent task non-interactively",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			taskTitle := args[0]
+
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			taskID := uuid.New().String()
+			if err := store.CreateTask(taskID, taskTitle); err != nil {
+				return fmt.Errorf("creating task: %w", err)
+			}
+
+			runner := agent.NewRunner()
+			runner.Detect()
+
+			backendID := globalBackend
+			if backendID == "" {
+				home, _ := os.UserHomeDir()
+				cfg, cfgErr := config.Load(
+					filepath.Join(home, ".devloop", "config.toml"),
+					filepath.Join(".devloop", "config.toml"),
+				)
+				if cfgErr == nil && cfg.Agents.DefaultBackend != "" {
+					backendID = cfg.Agents.DefaultBackend
+				}
+			}
+			if backendID == "" {
+				backendID = "claude"
+			}
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			outputCh := make(chan string, 64)
+			go func() {
+				for line := range outputCh {
+					fmt.Println(line)
+				}
+			}()
+
+			if err := store.UpdateTaskStatus(taskID, "running"); err != nil {
+				return fmt.Errorf("updating task status: %w", err)
+			}
+
+			_, spawnErr := runner.Spawn(ctx, backendID, agent.SpawnOpts{
+				OutputCh:  outputCh,
+				InputText: taskTitle,
+			})
+			close(outputCh)
+
+			finalStatus := "done"
+			if spawnErr != nil {
+				finalStatus = "failed"
+			}
+
+			if err := store.UpdateTaskStatus(taskID, finalStatus); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: updating task status: %v\n", err)
+			}
+
+			if spawnErr != nil {
+				return fmt.Errorf("agent: %w", spawnErr)
+			}
+
+			fmt.Printf("\nTask %s completed.\n", taskID[:8])
+			return nil
+		},
+	}
+}
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "List recent DevLoop tasks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			tasks, err := store.ListTasks(10)
+			if err != nil {
+				return fmt.Errorf("listing tasks: %w", err)
+			}
+
+			if len(tasks) == 0 {
+				fmt.Println("No tasks found. Run `devloop run <task>` to create one.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			if _, err := fmt.Fprintln(w, "ID\tSTATUS\tCREATED\tTITLE"); err != nil {
+				return fmt.Errorf("writing header: %w", err)
+			}
+			for _, t := range tasks {
+				created := time.Unix(t.CreatedAt, 0).Format("2006-01-02 15:04")
+				shortID := t.ID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, t.Status, created, t.Title); err != nil {
 					return fmt.Errorf("writing row: %w", err)
 				}
 			}
