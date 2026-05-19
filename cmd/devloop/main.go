@@ -10,7 +10,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/shaifulshabuj/devloop/internal/agent"
 	"github.com/shaifulshabuj/devloop/internal/config"
 	"github.com/shaifulshabuj/devloop/internal/orchestrator"
@@ -57,6 +56,7 @@ func main() {
 	root.AddCommand(skillsCmd())
 	root.AddCommand(personasCmd())
 	root.AddCommand(learnCmd())
+	root.AddCommand(sessionsCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -348,63 +348,41 @@ func runCmd() *cobra.Command {
 				}
 			}()
 
-			taskID := uuid.New().String()
-			if err := store.CreateTask(taskID, taskTitle); err != nil {
-				return fmt.Errorf("creating task: %w", err)
-			}
-
 			runner := agent.NewRunner()
 			runner.Detect()
-
-			backendID := globalBackend
-			if backendID == "" {
-				home, _ := os.UserHomeDir()
-				cfg, cfgErr := config.Load(
-					filepath.Join(home, ".devloop", "config.toml"),
-					filepath.Join(".devloop", "config.toml"),
-				)
-				if cfgErr == nil && cfg.Agents.DefaultBackend != "" {
-					backendID = cfg.Agents.DefaultBackend
-				}
-			}
-			if backendID == "" {
-				backendID = "claude"
-			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			outputCh := make(chan string, 64)
-			go func() {
-				for line := range outputCh {
-					fmt.Println(line)
+			// Route through orchestrator: plan → classify → dispatch → commit.
+			orch := orchestrator.New(store, runner)
+			plan, err := orch.Plan(ctx, taskTitle)
+			if err != nil {
+				return fmt.Errorf("planning task: %w", err)
+			}
+
+			fmt.Printf("Plan: %s  (%d step(s))\n", plan.Title, len(plan.Steps))
+			for _, s := range plan.Steps {
+				fmt.Printf("  %d. %s\n", s.Number, s.Description)
+			}
+			fmt.Println()
+
+			dispatcher := orchestrator.NewDispatcher(store, runner)
+			result, dispErr := dispatcher.Dispatch(ctx, plan)
+
+			if result != nil {
+				for _, sr := range result.Results {
+					if sr.Output != "" {
+						fmt.Println(sr.Output)
+					}
 				}
-			}()
-
-			if err := store.UpdateTaskStatus(taskID, "running"); err != nil {
-				return fmt.Errorf("updating task status: %w", err)
 			}
 
-			_, spawnErr := runner.Spawn(ctx, backendID, agent.SpawnOpts{
-				OutputCh:  outputCh,
-				InputText: taskTitle,
-			})
-			close(outputCh)
-
-			finalStatus := "done"
-			if spawnErr != nil {
-				finalStatus = "failed"
+			if dispErr != nil {
+				return fmt.Errorf("dispatch: %w", dispErr)
 			}
 
-			if err := store.UpdateTaskStatus(taskID, finalStatus); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: updating task status: %v\n", err)
-			}
-
-			if spawnErr != nil {
-				return fmt.Errorf("agent: %w", spawnErr)
-			}
-
-			fmt.Printf("\nTask %s completed.\n", taskID[:8])
+			fmt.Printf("\nTask %s completed.\n", plan.ID[:8])
 			return nil
 		},
 	}
@@ -697,6 +675,135 @@ func learnCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Extracted %d lesson(s) from task %q.\n", len(lessons), task.Title)
+			return nil
+		},
+	}
+}
+
+// sessionsCmd returns the top-level `devloop sessions` command with subcommands.
+func sessionsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sessions",
+		Short: "Manage agent session pool",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return sessionListCmd().RunE(cmd, args)
+		},
+	}
+	cmd.AddCommand(sessionListCmd())
+	cmd.AddCommand(sessionShowCmd())
+	cmd.AddCommand(sessionResetCmd())
+	cmd.AddCommand(sessionSummarizeCmd())
+	return cmd
+}
+
+func sessionListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List all persisted sessions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			sessions, err := store.ListSessions("")
+			if err != nil {
+				return fmt.Errorf("listing sessions: %w", err)
+			}
+			if len(sessions) == 0 {
+				fmt.Println("No sessions found.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "ID\tROLE\tBACKEND\tSTATUS\tUSED")
+			for _, s := range sessions {
+				used := time.Unix(s.LastUsedAt, 0).Format("2006-01-02 15:04")
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+					s.ID[:8], s.Role, s.Backend, s.Status, used)
+			}
+			return w.Flush()
+		},
+	}
+}
+
+func sessionShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <session-id>",
+		Short: "Show details of a session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			s, err := store.GetSession(args[0])
+			if err != nil {
+				return fmt.Errorf("getting session %q: %w", args[0], err)
+			}
+
+			fmt.Printf("ID:          %s\n", s.ID)
+			fmt.Printf("Project:     %s\n", s.ProjectID)
+			fmt.Printf("Role:        %s\n", s.Role)
+			fmt.Printf("Backend:     %s\n", s.Backend)
+			fmt.Printf("Status:      %s\n", s.Status)
+			fmt.Printf("PID:         %d\n", s.ProcessPID)
+			fmt.Printf("Messages:    %d\n", s.MessageCount)
+			fmt.Printf("Last used:   %s\n", time.Unix(s.LastUsedAt, 0).Format(time.RFC3339))
+			fmt.Printf("Created:     %s\n", time.Unix(s.CreatedAt, 0).Format(time.RFC3339))
+			if s.ContextSummary != "" {
+				fmt.Printf("Summary:\n%s\n", s.ContextSummary)
+			}
+			return nil
+		},
+	}
+}
+
+func sessionResetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset <session-id>",
+		Short: "Remove a session from the pool and database",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			if err := store.DeleteSession(args[0]); err != nil {
+				return fmt.Errorf("deleting session %q: %w", args[0], err)
+			}
+			fmt.Printf("Session %s reset.\n", args[0][:8])
+			return nil
+		},
+	}
+}
+
+func sessionSummarizeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "summarize <session-id>",
+		Short: "Print the context summary for a session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() { _ = store.Close() }()
+
+			s, err := store.GetSession(args[0])
+			if err != nil {
+				return fmt.Errorf("getting session %q: %w", args[0], err)
+			}
+			if s.ContextSummary == "" {
+				fmt.Println("No context summary available for this session.")
+				return nil
+			}
+			fmt.Println(s.ContextSummary)
 			return nil
 		},
 	}

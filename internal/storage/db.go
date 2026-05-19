@@ -228,6 +228,112 @@ func (s *Store) AppendContext(id, taskID, role, content string) error {
 	return err
 }
 
+// SessionRecord represents a persisted agent session.
+type SessionRecord struct {
+	ID             string
+	ProjectID      string
+	Role           string
+	Backend        string
+	Status         string // idle | warm | archived | dead
+	ProcessPID     int
+	ContextSummary string
+	MessageCount   int
+	LastUsedAt     int64
+	CreatedAt      int64
+}
+
+// UpsertSession inserts or replaces a session record.
+func (s *Store) UpsertSession(r *SessionRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO sessions
+			(id, project_id, role, backend, status, process_pid, context_summary, message_count, last_used_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			status          = excluded.status,
+			process_pid     = excluded.process_pid,
+			context_summary = excluded.context_summary,
+			message_count   = excluded.message_count,
+			last_used_at    = excluded.last_used_at`,
+		r.ID, r.ProjectID, r.Role, r.Backend, r.Status, r.ProcessPID,
+		r.ContextSummary, r.MessageCount, r.LastUsedAt, r.CreatedAt,
+	)
+	return err
+}
+
+// GetSession retrieves a session by ID. Returns sql.ErrNoRows if not found.
+func (s *Store) GetSession(id string) (*SessionRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, project_id, role, backend, status, process_pid,
+		       context_summary, message_count, last_used_at, created_at
+		FROM sessions WHERE id = ?`, id)
+	return scanSession(row)
+}
+
+// ListSessions returns all sessions for a project (all projects if projectID is empty).
+func (s *Store) ListSessions(projectID string) ([]*SessionRecord, error) {
+	var rows *sql.Rows
+	var err error
+	if projectID == "" {
+		rows, err = s.db.Query(`
+			SELECT id, project_id, role, backend, status, process_pid,
+			       context_summary, message_count, last_used_at, created_at
+			FROM sessions ORDER BY last_used_at DESC`)
+	} else {
+		rows, err = s.db.Query(`
+			SELECT id, project_id, role, backend, status, process_pid,
+			       context_summary, message_count, last_used_at, created_at
+			FROM sessions WHERE project_id = ? ORDER BY last_used_at DESC`, projectID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*SessionRecord
+	for rows.Next() {
+		r, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSession removes a session (and its copilot_history via CASCADE).
+func (s *Store) DeleteSession(id string) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE id = ?", id)
+	return err
+}
+
+// PurgeStaleSessions deletes sessions whose last_used_at is older than cutoff (unix seconds).
+func (s *Store) PurgeStaleSessions(cutoff int64) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE last_used_at < ?", cutoff)
+	return err
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSession(r scanner) (*SessionRecord, error) {
+	s := &SessionRecord{}
+	var pid sql.NullInt64
+	var summary sql.NullString
+	err := r.Scan(&s.ID, &s.ProjectID, &s.Role, &s.Backend, &s.Status,
+		&pid, &summary, &s.MessageCount, &s.LastUsedAt, &s.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if pid.Valid {
+		s.ProcessPID = int(pid.Int64)
+	}
+	if summary.Valid {
+		s.ContextSummary = summary.String
+	}
+	return s, nil
+}
+
 // GetContext retrieves all context entries for taskID ordered by creation time.
 func (s *Store) GetContext(taskID string) ([]*ContextEntry, error) {
 	rows, err := s.db.Query(
