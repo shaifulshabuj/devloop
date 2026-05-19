@@ -22,7 +22,7 @@
 ╠══════════════════╦════════════════════════════════════════════════╣
 ║  PROJECTS        ║  RECENT TASKS                                  ║
 ║  ──────────────  ║  ──────────────────────────────────────────    ║
-║  ▶ myapp         ║  myapp        add social login     2h ago  ✓   ║
+║  ▶ myapp         ║  myapp        add CSV export     2h ago  ✓   ║
 ║    devloop       ║  devloop      fix empty-array bug  1d ago  ✓   ║
 ║    api-service   ║  myapp        add dark mode        3d ago  ✓   ║
 ║    frontend      ║                                               ║
@@ -43,13 +43,13 @@
 ╠══════════════════╦════════════════════════════════════════════════╣
 ║  PROJECTS        ║  myapp — No active task                        ║
 ║  ──────────────  ║                                               ║
-║  ▶ myapp         ║  Last task: add social login button  (done ✓)  ║
+║  ▶ myapp         ║  Last task: add CSV export to reports  (done ✓)  ║
 ║    devloop       ║                                               ║
 ║    api-service   ║  Stack: React, Node.js, PostgreSQL             ║
 ║                  ║  Branch: main (clean)                         ║
 ║  TASKS           ║                                               ║
 ║  ──────────────  ║                                               ║
-║    add social ✓  ║                                               ║
+║    CSV export ✓  ║                                               ║
 ║    dark mode  ✓  ║                                               ║
 ║    [h] history   ║                                               ║
 ╠══════════════════╩════════════════════════════════════════════════╣
@@ -66,14 +66,14 @@ After user types a task, DevLoop analyzes and presents the plan:
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  devloop  myapp  ·  TASK-20260519-2341                            ║
 ╠══════════════════╦════════════════════════════════════════════════╣
-║  PROJECTS        ║  Plan: "add social login button"               ║
+║  PROJECTS        ║  Plan: "add CSV export to reports"               ║
 ║                  ║  ─────────────────────────────────────────     ║
 ║  ▶ myapp         ║  Complexity: medium  Type: feature             ║
-║    devloop       ║  Affected: frontend, auth, backend             ║
+║    devloop       ║  Affected: frontend, api, backend             ║
 ║                  ║                                               ║
 ║  THIS TASK       ║  Steps:                                        ║
-║  ──────────────  ║  1. [claude/haiku]   Analyze auth codebase     ║
-║    PLAN REVIEW   ║  2. [claude/opus]    Design OAuth spec         ║
+║  ──────────────  ║  1. [claude/haiku]   Analyze data model     ║
+║    PLAN REVIEW   ║  2. [claude/opus]    Design CSV API spec         ║
 ║                  ║  3. [copilot]        Implement UI + handler    ║
 ║                  ║  4. [claude/sonnet]  Review diff               ║
 ║                  ║                                               ║
@@ -91,18 +91,16 @@ After user types a task, DevLoop analyzes and presents the plan:
 ╠══════════════════╦════════════════════════════════════════════════╣
 ║  PROJECTS        ║  [arch ✓] [analyst ✓] [design ⠙] [code ·]    ║
 ║                  ║  ─────────────────────────────────────────     ║
-║  ▶ myapp         ║  claude/opus — Designing OAuth spec...         ║
+║  ▶ myapp         ║  claude/opus — Designing CSV API spec...         ║
 ║                  ║                                               ║
-║  STEPS           ║  I'll analyze the existing auth patterns       ║
-║  ─────────────   ║  before designing the OAuth flow.             ║
+║  STEPS           ║  I'll analyze the data model and reports       ║
+║  ─────────────   ║  module before designing the export API.       ║
 ║  ✓ 1. Analyze    ║                                               ║
-║  ⠙ 2. Design     ║  Looking at src/auth/... I can see you're      ║
-║  · 3. Code       ║  using JWT with refresh tokens. The social     ║
-║  · 4. Review     ║  login should integrate with the existing      ║
-║                  ║  token pipeline rather than creating a         ║
-║  [s] skip step   ║  separate auth path.                          ║
-║  [p] pause       ║                                               ║
-║  [i] intervene   ║  Designing: GitHub OAuth → JWT bridge...       ║
+║  ⠙ 2. Design     ║  Looking at src/reports/... I can see you're   ║
+║  · 3. Code       ║  using cursor-based pagination. The export     ║
+║  · 4. Review     ║  should stream rows to avoid memory issues.    ║
+║                  ║                                               ║
+║  [s] skip step   ║  Designing: streaming CSV → download handler...║
 ╠══════════════════╩════════════════════════════════════════════════╣
 ║  [i] Send message to agent  [p] Pause  [s] Skip  [Esc] Abort     ║
 ╚═══════════════════════════════════════════════════════════════════╝
@@ -119,12 +117,12 @@ After user types a task, DevLoop analyzes and presents the plan:
 ║  ▶ myapp         ║  claude/opus is waiting for your input:        ║
 ║                  ║                                               ║
 ║  STEPS           ║  ┌─────────────────────────────────────────┐  ║
-║  ─────────────   ║  │  Which OAuth provider(s) should be      │  ║
-║  ✓ 1. Analyze    ║  │  supported for social login?            │  ║
+║  ─────────────   ║  │  Which columns should be included       │  ║
+║  ✓ 1. Analyze    ║  │  in the CSV export?                     │  ║
 ║  ⏸ 2. Design     ║  │                                         │  ║
-║  · 3. Code       ║  │  [1] GitHub only                        │  ║
-║  · 4. Review     ║  │  [2] Google only                        │  ║
-║                  ║  │  [3] Both GitHub and Google             │  ║
+║  · 3. Code       ║  │  [1] All columns                        │  ║
+║  · 4. Review     ║  │  [2] Visible columns only               │  ║
+║                  ║  │  [3] Custom selection                   │  ║
 ║                  ║  │  [4] Type custom answer...              │  ║
 ║                  ║  └─────────────────────────────────────────┘  ║
 ╠══════════════════╩════════════════════════════════════════════════╣
@@ -143,14 +141,14 @@ When two steps run concurrently:
 ║ PROJECTS ║ copilot — Writing code  ║ claude/haiku — Writing tests ║
 ║          ║ ─────────────────────── ║ ─────────────────────────── ║
 ║ ▶ myapp  ║ Creating                ║ Writing test cases for       ║
-║   devloop║ src/components/         ║ OAuth callback handler...    ║
-║          ║   SocialLogin.tsx...    ║                             ║
-║ STEPS    ║                         ║ test('GitHub OAuth          ║
-║ ───────  ║ import { useState }     ║ callback', async () => {    ║
+║   devloop║ src/components/         ║ CSV download handler...      ║
+║          ║   ExportButton.tsx...   ║                             ║
+║ STEPS    ║                         ║ test('CSV export             ║
+║ ───────  ║ import { useState }     ║ streams rows', async () => { ║
 ║ ✓ Analyze║ from 'react';           ║   const result = await      ║
-║ ✓ Design ║                         ║   handleOAuthCallback(...)  ║
-║ ⠙ Code   ║ export function         ║   expect(result.token)...  ║
-║ ⠙ Test   ║ SocialLogin() {         ║                             ║
+║ ✓ Design ║                         ║   handleExportDownload(...)  ║
+║ ⠙ Code   ║ export function         ║   expect(result.rows)...    ║
+║ ⠙ Test   ║ ExportButton() {        ║                             ║
 ║ · Review ║   ...                   ║ [Tab] focus this pane       ║
 ╠═════════╩═════════════════════════╩═════════════════════════════╣
 ║  [Tab] Switch focus  [i] Message focused agent  [p] Pause all    ║
@@ -161,9 +159,9 @@ When two steps run concurrently:
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
-║  devloop  myapp  [Task 1: social login ⠙][Task 2: dark mode ·]  ║
+║  devloop  myapp  [Task 1: CSV export ⠙][Task 2: dark mode ·]  ║
 ╠═════════╦════════════════════════════════════════════════════════╣
-║         ║  Task 1: add social login button                       ║
+║         ║  Task 1: add CSV export to reports                       ║
 ║  ...    ║  (active task view as above)                           ║
 ╚═════════╩════════════════════════════════════════════════════════╝
 ```
@@ -225,7 +223,7 @@ Using ANSI 256 colors with graceful degradation to 16 colors:
 When stdout is not a TTY (piped, CI, scripted):
 
 ```bash
-devloop run "add social login button" --auto
+devloop run "add CSV export to reports" --auto
 ```
 
 Falls back to the v5-style text output: no TUI, sequential progress lines,

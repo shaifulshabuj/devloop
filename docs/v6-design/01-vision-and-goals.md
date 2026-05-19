@@ -115,9 +115,9 @@ globals for this project). Skills are versioned and improvable.
 DevLoop v6.0 is successful when:
 
 1. A developer can type `devloop` and have a TUI open within 200ms.
-2. "Add social login button" → plan appears → approved → agents work → PR-ready
-   commit, with no manual copy-pasting between CLI tools.
+2. "Add CSV export to the reports page" → plan appears → approved → agents work
+   → PR-ready commit, with no manual copy-pasting between CLI tools.
 3. Two agents can work in parallel on separate sub-tasks, visible simultaneously.
-4. An agent can ask "which OAuth provider?" mid-task and wait for the answer.
+4. An agent can ask "which columns to include?" mid-task and wait for the answer.
 5. All task history is queryable: "what did we build last week?" returns results.
 6. `claude` and `gh copilot` continue working exactly as before (no breakage).

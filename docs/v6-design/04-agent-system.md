@@ -29,9 +29,21 @@ flags    = ["--permission-mode", "acceptEdits"]
 
 [[backend]]
 id       = "copilot"
-binary   = "gh"
-args     = ["copilot", "suggest"]
+binary   = "copilot"
 type     = "interactive-cli"
+flags    = ["--allow-all"]
+
+[[backend]]
+id       = "opencode"
+binary   = "opencode"
+type     = "interactive-cli"
+flags    = []
+
+[[backend]]
+id       = "pi"
+binary   = "pi"
+type     = "interactive-cli"
+flags    = []
 
 [[backend]]
 id       = "claude-api"
@@ -40,8 +52,24 @@ provider = "anthropic"
 # API key from keychain or env ANTHROPIC_API_KEY
 ```
 
-DevLoop ships with `claude` and `copilot` backends built-in. New backends can
-be added via config without code changes.
+DevLoop ships with `claude`, `copilot`, `opencode`, and `pi` backends built-in.
+Any backend binary that isn't installed is automatically skipped during model
+routing — DevLoop uses whatever is available. New backends can be added via
+config without code changes.
+
+### 2.1 Backend Detection
+
+On startup, DevLoop probes each configured backend:
+
+```
+claude   → which claude   → found v1.x   ✓
+copilot  → which copilot  → found v2.x   ✓
+opencode → which opencode → found v0.x   ✓
+pi       → which pi       → not found    ✗ (skipped silently)
+```
+
+If no backend is installed, DevLoop prints a friendly setup guide and exits.
+At least one backend is required.
 
 ---
 
@@ -175,8 +203,8 @@ Configured per persona in `preferred_models` list.
 Always overridable:
 
 ```
-devloop run "add social login" --agent claude/opus   # force specific model
-devloop run "add social login" --persona architect   # force persona
+devloop run "add CSV export" --agent claude/opus   # force specific model
+devloop run "add CSV export" --persona architect   # force persona
 ```
 
 ---
@@ -248,10 +276,10 @@ When an agent is running, DevLoop monitors its output stream for structured
 signals using lightweight pattern matching:
 
 ```
-DEVLOOP_QUESTION: Which OAuth provider? [GitHub|Google|Both]
-DEVLOOP_DECISION: I'll implement the GitHub flow first
+DEVLOOP_QUESTION: Which columns should be included in the export? [all|visible|custom]
+DEVLOOP_DECISION: I'll implement streaming CSV generation for large datasets
 DEVLOOP_DONE: Spec written to context
-DEVLOOP_ERROR: Cannot find auth module — need more context
+DEVLOOP_ERROR: Cannot find the reports module — need more context
 ```
 
 These are injected into the agent's system prompt as a convention. Agents
@@ -261,7 +289,7 @@ DevLoop falls back to watching for natural-language completion signals.
 Agents can also ask DevLoop to run a tool on their behalf:
 
 ```
-DEVLOOP_TOOL: read_file src/auth/handler.ts
+DEVLOOP_TOOL: read_file src/reports/handler.ts
 DEVLOOP_TOOL: run_tests npm test
 DEVLOOP_TOOL: get_git_diff HEAD~1
 ```

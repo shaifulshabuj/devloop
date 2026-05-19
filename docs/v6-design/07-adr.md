@@ -75,28 +75,42 @@ Bubble Tea + Lip Gloss (Option 1).
 **Status:** Accepted
 
 **Context:**  
-DevLoop needs to communicate with Claude and Copilot. Two models exist:
+DevLoop needs to communicate with AI coding agents. Two models exist:
 
 1. **Subprocess streaming**: spawn the CLI as a child process, write to stdin,
    read stdout. This is how v5 works with `claude -p`.
-2. **MCP (Model Context Protocol)**: Claude exposes tools via MCP; DevLoop acts
-   as an MCP client or server.
+2. **MCP (Model Context Protocol)**: some agents expose tools via MCP; DevLoop
+   acts as an MCP client or server.
 
 **Decision:**  
 Subprocess streaming for v6.0, with MCP as a future option for specific use cases.
 
 **Rationale:**
-- Subprocess streaming works with any CLI tool — Claude, Copilot, OpenCode, Pi.
-  MCP is Claude-specific (in practice).
-- The interactive mode we want (bidirectional streaming with a running Claude
-  session) is exactly what `claude` without `--print` provides.
-- MCP is valuable for Claude acting as a tool caller back into DevLoop (e.g.,
-  "Claude calls `devloop.write_spec` as a tool"). This is captured as a Phase 4
+- Subprocess streaming works with **any** CLI tool — Claude, Copilot, OpenCode,
+  Pi, or any future agent. It requires only a binary in `$PATH`.
+- No API keys, no accounts, no authentication required by DevLoop itself.
+  Users bring their own installed agents.
+- The interactive mode we want (bidirectional streaming with a persistent
+  session) is exactly what the agent CLIs provide in interactive mode.
+- MCP is valuable for an agent acting as a tool caller back into DevLoop (e.g.,
+  Claude calls `devloop.write_spec` as a tool). Captured as a Phase 4
   enhancement, not a Phase 1 requirement.
-- MCP server implementation adds significant complexity to Phase 1 scope.
+
+**Supported backends (built-in, all optional):**
+
+| Backend   | Binary     | Notes |
+|-----------|------------|-------|
+| Claude    | `claude`   | Anthropic's CLI; any model |
+| Copilot   | `copilot`  | GitHub Copilot CLI |
+| OpenCode  | `opencode` | Open-source alternative |
+| Pi        | `pi`       | Pi coding agent |
+| API-direct| —          | Any OpenAI-compatible API (Phase 2) |
+
+DevLoop detects which are installed at startup and routes to available ones.
+Users with none installed see a setup guide.
 
 **Future:** In Phase 4, DevLoop may also expose itself as an MCP server so that
-a Claude session can call DevLoop tools natively. This complements (not replaces)
+an agent session can call DevLoop tools natively. This complements (not replaces)
 the subprocess model.
 
 ---
@@ -244,7 +258,7 @@ or `DEVLOOP_AUTO=1` env var.
 - The primary complaint about v5 is that it's *too* non-interactive. Making v6
   autonomous by default would repeat the same mistake.
 - An agent that can ask mid-task questions produces significantly better output.
-  Forcing it to guess (e.g., "which OAuth provider?") leads to rework.
+  Forcing it to guess (e.g., "which columns to include?") leads to rework.
 - Autonomous mode has its place: CI, overnight batch runs, low-stakes tasks.
   But it should be the exception, not the default.
 - Users who always want autonomous can set `DEVLOOP_AUTO=1` in their shell profile.

@@ -29,7 +29,7 @@
     │  │ (any model) │  │ (gh copilot)    │  │
     │  └─────────────┘  └─────────────────┘  │
     │  ┌─────────────────────────────────┐   │
-    │  │ Future: OpenCode, Pi, API-direct│   │
+    │  │ OpenCode · Pi · API-direct      │   │
     │  └─────────────────────────────────┘   │
     └────────────────────────────────────────┘
 ```
@@ -84,17 +84,17 @@ The decision engine. Receives task descriptions, builds plans, routes to agents.
 **Plan structure:**
 ```json
 {
-  "task": "add social login button",
+  "task": "add CSV export to the reports page",
   "analysis": {
     "complexity": "medium",
     "type": "feature",
-    "affected_areas": ["frontend", "auth", "backend"]
+    "affected_areas": ["frontend", "api", "backend"]
   },
   "steps": [
-    {"id": "s1", "role": "analyst",    "agent": "claude/sonnet", "desc": "analyze existing auth code"},
-    {"id": "s2", "role": "architect",  "agent": "claude/opus",   "desc": "design OAuth flow + spec", "depends_on": ["s1"]},
-    {"id": "s3", "role": "coder",      "agent": "copilot",       "desc": "implement button + handler", "depends_on": ["s2"]},
-    {"id": "s4", "role": "reviewer",   "agent": "claude/sonnet", "desc": "review diff", "depends_on": ["s3"]}
+    {"id": "s1", "role": "analyst",   "agent": "claude/sonnet", "desc": "analyze data model and report structure"},
+    {"id": "s2", "role": "architect", "agent": "claude/opus",   "desc": "design CSV generation API + download endpoint", "depends_on": ["s1"]},
+    {"id": "s3", "role": "coder",     "agent": "copilot",       "desc": "implement ExportButton component + backend handler", "depends_on": ["s2"]},
+    {"id": "s4", "role": "reviewer",  "agent": "claude/sonnet", "desc": "review diff", "depends_on": ["s3"]}
   ]
 }
 ```
@@ -172,12 +172,12 @@ DevLoop owns its configuration. Does not touch Claude or Copilot native configs.
 
 ---
 
-## 3. Data Flow — "Add social login button"
+## 3. Data Flow — "Add CSV export to the reports page"
 
 ```
-1. User types "add social login button" in TUI input box
+1. User types "add CSV export to the reports page" in TUI input box
          │
-2. TUI → Orchestrator: TaskRequest{description: "add social login button"}
+2. TUI → Orchestrator: TaskRequest{description: "add CSV export to the reports page"}
          │
 3. Orchestrator spawns quick analysis agent (claude/haiku):
    "Given this project context, classify this task and identify affected areas"
@@ -191,22 +191,22 @@ DevLoop owns its configuration. Does not touch Claude or Copilot native configs.
          │
 7. Orchestrator dispatches Step 1 (analyst) to Agent Pool
    Agent Pool spawns/reuses claude/sonnet session
-   Agent reads auth code, streams output to TUI
+   Agent reads data model and report code, streams output to TUI
          │
 8. Step 1 done → result stored in Context Store
          │
 9. Orchestrator dispatches Step 2 (architect) with full context
-   Agent designs OAuth spec, streams to TUI
-   Agent asks: "Which OAuth provider? (Google/GitHub/both)"
+   Agent designs CSV API, streams to TUI
+   Agent asks: "Which columns should the export include?"
          │
 10. Agent Pool detects question → Orchestrator → TUI: AgentQuestion{...}
-    TUI shows question in input box, user types "GitHub"
+    TUI shows question in input box, user types "all visible columns + row ID"
     TUI → Orchestrator → Agent Pool: answer relayed to agent stdin
          │
 11. Agent continues, produces spec → Context Store
          │
 12. Orchestrator dispatches Step 3 (coder) to Copilot session
-    Copilot implements, streams to TUI
+    Copilot implements ExportButton + /api/reports/export endpoint, streams to TUI
          │
 13. Step 3 done → Orchestrator dispatches Step 4 (reviewer)
          │

@@ -34,7 +34,7 @@ CREATE TABLE projects (
 CREATE TABLE tasks (
   id          TEXT PRIMARY KEY,    -- "TASK-20260519-2341"
   project_id  TEXT NOT NULL REFERENCES projects(id),
-  description TEXT NOT NULL,       -- "add social login button"
+  description TEXT NOT NULL,       -- "add CSV export to the reports page"
   status      TEXT NOT NULL,       -- pending|running|complete|failed|interrupted
   complexity  TEXT,                -- low|medium|high
   task_type   TEXT,                -- feature|bugfix|refactor|analysis|docs
@@ -135,7 +135,7 @@ ORDER BY t.created_at DESC;
 -- "Have we solved this kind of problem before?"
 SELECT content, source_type, source_id
 FROM search_index
-WHERE search_index MATCH 'OAuth login social'
+WHERE search_index MATCH 'CSV export reports pagination'
 LIMIT 10;
 
 -- Cost breakdown by project
@@ -196,15 +196,15 @@ GROUP BY p.id ORDER BY total_cost DESC;
 When a task reaches `complete` status, DevLoop creates a git commit:
 
 ```
-feat: add social login button
+feat: add CSV export to the reports page
 
 Implemented via DevLoop TASK-20260519-2341.
 Agents: claude/opus (design), copilot (implementation), claude/sonnet (review)
 
-- Added SocialLogin component with GitHub OAuth flow
-- Integrated with existing JWT token pipeline
-- Added callback handler at /auth/github/callback
-- 14 tests added (all passing)
+- Added ExportButton component with streaming CSV download
+- Implemented /api/reports/export endpoint with column selection
+- Supports all visible columns + row ID per user request
+- 11 tests added (all passing)
 
 Co-authored-by: claude/opus <claude@anthropic.com>
 Co-authored-by: copilot <copilot@github.com>
@@ -284,7 +284,7 @@ auto_push    = true
 
 [context]
 # Files always included in context (relative to project root)
-always_include = ["README.md", "ARCHITECTURE.md", "src/auth/"]
+always_include = ["README.md", "ARCHITECTURE.md", "src/"]
 # Files never included
 exclude = ["node_modules/", "dist/", ".env*"]
 ```

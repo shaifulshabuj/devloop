@@ -5,7 +5,7 @@
 In DevLoop v5 (and naive v6 without this design), every agent call starts cold:
 
 ```
-Task 1: "add social login"
+Task 1: "add CSV export"
   → spawn Claude (cold start, 3s)
   → Claude reads codebase from scratch
   → Claude designs spec
@@ -14,7 +14,7 @@ Task 1: "add social login"
 Task 2: "add dark mode"
   → spawn Claude (cold start, 3s)   ← starts completely fresh
   → Claude reads codebase from scratch again ← wasted work
-  → Claude has no memory of the OAuth decisions from Task 1
+  → Claude has no memory of the design decisions from Task 1
 ```
 
 The agent never accumulates knowledge about your project. Every task starts
@@ -265,19 +265,19 @@ Sessions for: myapp
 
 **Without persistent sessions (v5 / naive v6):**
 ```
-Task: "fix the OAuth token expiry bug"
-  Architect: "What OAuth flow are you using?" ← has to ask
+Task: "fix the pagination bug on the reports page"
+  Architect: "What data layer are you using?" ← has to ask
   Coder: "What test framework do you use?" ← has to ask
   Reviewer: "You have a no-CASCADE-DELETE rule?" ← has to ask
 ```
 
 **With persistent sessions (v6 with this design):**
 ```
-Task: "fix the OAuth token expiry bug"
-  Architect: "I see the GitHub OAuth flow I designed last week.
-              The token expiry is handled in auth/handler.ts.
-              Let me check the refresh token logic..." ← already knows
-  Coder: "Writing fix in auth/handler.ts using vitest as usual..." ← already knows
+Task: "fix the pagination bug on the reports page"
+  Architect: "I see the cursor-based pagination I designed last week.
+              The bug is in reports/handler.ts line 47.
+              Let me check the query limit logic..." ← already knows
+  Coder: "Writing fix in reports/handler.ts using vitest as usual..." ← already knows
   Reviewer: "Checking no-CASCADE-DELETE compliance (as always)..." ← already knows
 ```
 

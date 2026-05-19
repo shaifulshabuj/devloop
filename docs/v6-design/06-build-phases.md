@@ -80,7 +80,7 @@ devloop task <task-id>     → show task detail
 
 ### Success criteria
 
-"Add social login button" → plan with 4 steps appears → user approves →
+"Add CSV export to the reports page" → plan with 4 steps appears → user approves →
 steps execute with correct model routing → agent asks mid-task question →
 user answers → task completes → git commit created with attribution.
 
