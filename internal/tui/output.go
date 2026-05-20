@@ -12,14 +12,16 @@ var outputStyle = lipgloss.NewStyle().
 
 // Output wraps the bubbles viewport for streaming agent output.
 type Output struct {
-	vp viewport.Model
+	vp      viewport.Model
+	content string
 }
 
 // NewOutput creates an Output with placeholder text.
 func NewOutput() Output {
 	vp := viewport.New(0, 0)
-	vp.SetContent("Waiting for input...")
-	return Output{vp: vp}
+	const placeholder = "Waiting for input…"
+	vp.SetContent(placeholder)
+	return Output{vp: vp, content: placeholder}
 }
 
 // SetSize updates the viewport dimensions, accounting for the surrounding border.
@@ -51,6 +53,18 @@ func (o Output) View() string {
 
 // SetContent replaces the viewport content and scrolls to the bottom.
 func (o *Output) SetContent(s string) {
+	o.content = s
 	o.vp.SetContent(s)
+	o.vp.GotoBottom()
+}
+
+// AppendLine adds a line to the viewport content and scrolls to the bottom.
+func (o *Output) AppendLine(line string) {
+	if o.content == "" {
+		o.content = line
+	} else {
+		o.content += "\n" + line
+	}
+	o.vp.SetContent(o.content)
 	o.vp.GotoBottom()
 }

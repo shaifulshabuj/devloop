@@ -175,7 +175,18 @@ func startCmd() *cobra.Command {
 				cwd = "."
 			}
 			projectName := filepath.Base(cwd)
-			return tui.Run(projectName)
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+			runner := agent.NewRunner()
+			runner.Detect()
+			return tui.Run(projectName, store, runner)
 		},
 	}
 

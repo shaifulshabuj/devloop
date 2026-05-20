@@ -2,8 +2,16 @@
 package tui
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/orchestrator"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 const (
@@ -27,22 +35,29 @@ const (
 
 // Model is the root Bubble Tea application model.
 type Model struct {
-	width   int
-	height  int
-	ready   bool
-	focus   focusArea
-	sidebar Sidebar
-	output  Output
-	input   Input
+	width        int
+	height       int
+	ready        bool
+	focus        focusArea
+	sidebar      Sidebar
+	output       Output
+	input        Input
+	orch         *orchestrator.Orchestrator
+	disp         *orchestrator.Dispatcher
+	outputCh     <-chan string
+	running      bool
+	runningTitle string
 }
 
 // New creates a root Model for the given project name.
-func New(projectName string) Model {
+func New(projectName string, store *storage.Store, runner *agent.Runner) Model {
 	return Model{
 		sidebar: NewSidebar(projectName),
 		output:  NewOutput(),
 		input:   NewInput(),
 		focus:   focusInput,
+		orch:    orchestrator.New(store, runner),
+		disp:    orchestrator.NewDispatcher(store, runner),
 	}
 }
 
@@ -69,6 +84,69 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.toggleFocus()
 			return m, cmd
 		}
+
+	case SubmitMsg:
+		if m.running {
+			// Ignore new submissions while a task is in flight.
+			return m, nil
+		}
+		text := msg.Text
+		ch := make(chan string, 256)
+		m.outputCh = ch
+		m.running = true
+		m.runningTitle = text
+		m.sidebar.SetRunningTask(text)
+		m.output.AppendLine("▶ " + text)
+
+		orch := m.orch
+		disp := m.disp
+		go func() {
+			defer close(ch)
+			ctx := context.Background()
+
+			plan, err := orch.Plan(ctx, text)
+			if err != nil {
+				ch <- "Error planning: " + err.Error()
+				return
+			}
+			for _, step := range plan.Steps {
+				ch <- fmt.Sprintf("[%d/%d] %s", step.Number, len(plan.Steps), step.Description)
+			}
+
+			result, err := disp.Dispatch(ctx, plan)
+			if err != nil {
+				ch <- "Error: " + err.Error()
+			}
+			if result != nil {
+				for _, sr := range result.Results {
+					if sr.Output != "" {
+						for _, line := range strings.Split(sr.Output, "\n") {
+							if line != "" {
+								ch <- line
+							}
+						}
+					}
+				}
+			}
+		}()
+		return m, waitForLine(ch)
+
+	case OutputLineMsg:
+		m.output.AppendLine(msg.Line)
+		if m.outputCh != nil {
+			return m, waitForLine(m.outputCh)
+		}
+		return m, nil
+
+	case taskResultMsg:
+		m.running = false
+		m.runningTitle = ""
+		m.outputCh = nil
+		m.sidebar.SetRunningTask("")
+		if msg.err != nil {
+			m.output.AppendLine("Error: " + msg.err.Error())
+		}
+		return m, nil
 	}
 
 	// Delegate remaining messages to the focused component.
@@ -90,7 +168,11 @@ func (m Model) View() string {
 		return "Initializing…"
 	}
 
-	statusBar := statusBarStyle.Width(m.width).Render("  devloop v6.0.0-dev")
+	statusText := "  devloop v6"
+	if m.running {
+		statusText = "  ● " + m.runningTitle
+	}
+	statusBar := statusBarStyle.Width(m.width).Render(statusText)
 
 	middle := lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -133,11 +215,21 @@ func (m *Model) toggleFocus() tea.Cmd {
 	return m.input.Focus()
 }
 
+// waitForLine returns a Cmd that reads one line from ch.
+// When ch is closed it returns taskResultMsg signalling completion.
+func waitForLine(ch <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return taskResultMsg{}
+		}
+		return OutputLineMsg{Line: line}
+	}
+}
+
 // Run starts the Bubble Tea program in alternate-screen mode.
-//
-// projectName is shown in the sidebar for Phase 1.
-func Run(projectName string) error {
-	m := New(projectName)
+func Run(projectName string, store *storage.Store, runner *agent.Runner) error {
+	m := New(projectName, store, runner)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err

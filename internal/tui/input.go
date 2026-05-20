@@ -31,7 +31,14 @@ func (i Input) Init() tea.Cmd {
 }
 
 // Update forwards messages to the underlying text-input.
+// On Enter with non-empty content, emits SubmitMsg and clears the field.
 func (i Input) Update(msg tea.Msg) (Input, tea.Cmd) {
+	if km, ok := msg.(tea.KeyMsg); ok && km.Type == tea.KeyEnter {
+		if text := i.ti.Value(); text != "" {
+			i.ti.Reset()
+			return i, func() tea.Msg { return SubmitMsg{Text: text} }
+		}
+	}
 	var cmd tea.Cmd
 	i.ti, cmd = i.ti.Update(msg)
 	return i, cmd
