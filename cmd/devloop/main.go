@@ -61,6 +61,7 @@ func main() {
 	root.AddCommand(updateCmd())
 	root.AddCommand(learnCmd())
 	root.AddCommand(sessionsCmd())
+	root.AddCommand(historyCmd())
 
 	// Background version-check hint: once per 24h, non-blocking.
 	go backgroundVersionHint()
@@ -480,6 +481,64 @@ func statusCmd() *cobra.Command {
 			return w.Flush()
 		},
 	}
+}
+
+func historyCmd() *cobra.Command {
+	var limit int
+	var statusFilter string
+
+	cmd := &cobra.Command{
+		Use:   "history",
+		Short: "Show task history",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			filter := statusFilter
+			if filter == "all" {
+				filter = ""
+			}
+
+			tasks, err := store.ListTasksFiltered(limit, filter)
+			if err != nil {
+				return fmt.Errorf("listing tasks: %w", err)
+			}
+
+			if len(tasks) == 0 {
+				fmt.Println("No tasks found.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			if _, err := fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tCREATED"); err != nil {
+				return fmt.Errorf("writing header: %w", err)
+			}
+			for _, t := range tasks {
+				shortID := t.ID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				title := t.Title
+				if len(title) > 50 {
+					title = title[:47] + "..."
+				}
+				created := time.Unix(t.CreatedAt, 0).Format("2006-01-02 15:04")
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, title, t.Status, created)
+			}
+			return w.Flush()
+		},
+	}
+
+	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of tasks to show")
+	cmd.Flags().StringVar(&statusFilter, "status", "all", "Filter by status: done|failed|interrupted|running|pending|all")
+	return cmd
 }
 
 func planCmd() *cobra.Command {

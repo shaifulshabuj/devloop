@@ -201,6 +201,44 @@ func (s *Store) ListTasks(limit int) ([]*Task, error) {
 	return tasks, rows.Err()
 }
 
+// ListTasksFiltered returns up to limit tasks ordered by creation time descending.
+// If status is non-empty, only tasks with that status are returned.
+func (s *Store) ListTasksFiltered(limit int, status string) ([]*Task, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if status == "" {
+		rows, err = s.db.Query(
+			"SELECT id, title, status, created_at, updated_at, config FROM tasks ORDER BY created_at DESC LIMIT ?",
+			limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, title, status, created_at, updated_at, config FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+			status, limit,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var tasks []*Task
+	for rows.Next() {
+		t := &Task{}
+		var config sql.NullString
+		if err = rows.Scan(&t.ID, &t.Title, &t.Status, &t.CreatedAt, &t.UpdatedAt, &config); err != nil {
+			return nil, err
+		}
+		if config.Valid {
+			t.Config = config.String
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // CreateStep inserts a new step with status "pending" linked to taskID.
 func (s *Store) CreateStep(id, taskID, description string) error {
 	_, err := s.db.Exec(
