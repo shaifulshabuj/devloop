@@ -36,7 +36,7 @@ func fetchLatestRelease() (*githubRelease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
@@ -155,18 +155,20 @@ By default it installs to /usr/local/bin (may require sudo). Use
 			if err != nil {
 				return fmt.Errorf("download install.sh: %w", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			tmp, err := os.CreateTemp("", "devloop-install-*.sh")
 			if err != nil {
 				return fmt.Errorf("create temp file: %w", err)
 			}
-			defer os.Remove(tmp.Name())
+			defer func() { _ = os.Remove(tmp.Name()) }()
 
 			if _, err := io.Copy(tmp, resp.Body); err != nil {
 				return fmt.Errorf("write install.sh: %w", err)
 			}
-			tmp.Close()
+			if err := tmp.Close(); err != nil {
+				return fmt.Errorf("close install.sh: %w", err)
+			}
 
 			if err := os.Chmod(tmp.Name(), 0700); err != nil {
 				return fmt.Errorf("chmod install.sh: %w", err)

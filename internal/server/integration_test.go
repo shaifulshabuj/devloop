@@ -55,7 +55,7 @@ func TestIntegration_SubmitAndPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /task: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", resp.StatusCode)

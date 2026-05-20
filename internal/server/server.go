@@ -349,14 +349,14 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 	// Replay persisted lines.
 	entries, _ := s.store.GetContext(id)
 	for _, e := range entries {
-		fmt.Fprintf(w, "data: %s\n\n", e.Content)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", e.Content)
 	}
 	flush()
 
 	// Subscribe for in-flight lines.
 	val, running := s.tasks.Load(id)
 	if !running {
-		fmt.Fprintf(w, "event: done\ndata: done\n\n")
+		_, _ = fmt.Fprintf(w, "event: done\ndata: done\n\n")
 		flush()
 		return
 	}
@@ -368,11 +368,11 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case line, ok := <-ch:
 			if !ok {
-				fmt.Fprintf(w, "event: done\ndata: done\n\n")
+				_, _ = fmt.Fprintf(w, "event: done\ndata: done\n\n")
 				flush()
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", line)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", line)
 			flush()
 		case <-r.Context().Done():
 			return

@@ -530,7 +530,7 @@ func historyCmd() *cobra.Command {
 					title = title[:47] + "..."
 				}
 				created := time.Unix(t.CreatedAt, 0).Format("2006-01-02 15:04")
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, title, t.Status, created)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, title, t.Status, created)
 			}
 			return w.Flush()
 		},
