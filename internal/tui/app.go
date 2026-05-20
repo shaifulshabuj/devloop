@@ -32,6 +32,7 @@ const (
 	focusInput focusArea = iota
 	focusViewport
 	focusPlanReview
+	focusSkills
 )
 
 // Model is the root Bubble Tea application model.
@@ -40,10 +41,13 @@ type Model struct {
 	height       int
 	ready        bool
 	focus        focusArea
+	prevFocus    focusArea
 	sidebar      Sidebar
 	output       Output
 	input        Input
 	planView     *PlanView
+	skillView    *SkillView
+	showSkills   bool
 	orch         *orchestrator.Orchestrator
 	disp         *orchestrator.Dispatcher
 	outputCh     <-chan string
@@ -65,7 +69,16 @@ func New(projectName string, store *storage.Store, runner *agent.Runner) Model {
 
 // Init implements tea.Model. Focuses the input and starts the cursor blink.
 func (m Model) Init() tea.Cmd {
-	return m.input.Init()
+	return tea.Batch(m.input.Init(), loadSkills())
+}
+
+// loadSkills reads skill files asynchronously and emits SkillsLoadedMsg.
+func loadSkills() tea.Cmd {
+	return func() tea.Msg {
+		loader := agent.NewSkillLoader(".devloop/skills")
+		skills, _ := loader.Load()
+		return SkillsLoadedMsg{Skills: skills}
+	}
 }
 
 // Update implements tea.Model.
@@ -77,8 +90,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.planView != nil {
 			m.planView.SetSize(msg.Width, msg.Height-statusBarHeight-inputBarHeight)
 		}
+		if m.skillView != nil {
+			m.skillView.SetSize(msg.Width, msg.Height-statusBarHeight-inputBarHeight)
+		}
 		// Focus input on first resize so the cursor blink is active.
-		if m.focus != focusPlanReview {
+		if m.focus != focusPlanReview && m.focus != focusSkills {
 			return m, m.input.Focus()
 		}
 		return m, nil
@@ -88,11 +104,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 
+		case tea.KeyEsc:
+			if m.focus == focusSkills {
+				return m, m.toggleSkills()
+			}
+
 		case tea.KeyTab:
-			if m.focus != focusPlanReview {
+			if m.focus != focusPlanReview && m.focus != focusSkills {
 				cmd := m.toggleFocus()
 				return m, cmd
 			}
+		}
+		if msg.String() == "s" && m.focus != focusPlanReview {
+			return m, m.toggleSkills()
 		}
 
 	case SubmitMsg:
@@ -175,12 +199,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.output.AppendLine("Error: " + msg.err.Error())
 		}
 		return m, nil
+
+	case SkillsLoadedMsg:
+		sv := NewSkillView(msg.Skills)
+		sv.SetSize(m.width, m.height-statusBarHeight-inputBarHeight)
+		m.skillView = sv
+		return m, nil
 	}
 
 	// Delegate remaining messages to the focused component.
 	if m.focus == focusPlanReview && m.planView != nil {
 		var cmd tea.Cmd
 		_, cmd = m.planView.Update(msg)
+		return m, cmd
+	}
+	if m.focus == focusSkills && m.skillView != nil {
+		var cmd tea.Cmd
+		_, cmd = m.skillView.Update(msg)
 		return m, cmd
 	}
 	if m.focus == focusInput {
@@ -205,15 +240,20 @@ func (m Model) View() string {
 	switch {
 	case m.focus == focusPlanReview:
 		statusText = "  Plan Review  [Enter approve  q cancel]"
+	case m.focus == focusSkills:
+		statusText = "  Skills  [↑/↓ navigate  s/Esc close]"
 	case m.running:
 		statusText = "  ● " + m.runningTitle
 	}
 	statusBar := statusBarStyle.Width(m.width).Render(statusText)
 
 	var middle string
-	if m.focus == focusPlanReview && m.planView != nil {
+	switch {
+	case m.focus == focusPlanReview && m.planView != nil:
 		middle = m.planView.View()
-	} else {
+	case m.showSkills && m.skillView != nil:
+		middle = m.skillView.View()
+	default:
 		middle = lipgloss.JoinHorizontal(
 			lipgloss.Top,
 			m.sidebar.View(),
@@ -243,6 +283,9 @@ func (m *Model) setSize(w, h int) {
 	m.sidebar.SetSize(sidebarW, contentH)
 	m.output.SetSize(outputW, contentH)
 	m.input.SetWidth(w)
+	if m.skillView != nil {
+		m.skillView.SetSize(w, contentH)
+	}
 }
 
 // toggleFocus switches keyboard focus between input and viewport.
@@ -254,6 +297,26 @@ func (m *Model) toggleFocus() tea.Cmd {
 	}
 	m.focus = focusInput
 	return m.input.Focus()
+}
+
+// toggleSkills opens or closes the skill management panel.
+func (m *Model) toggleSkills() tea.Cmd {
+	if m.showSkills {
+		m.showSkills = false
+		m.focus = m.prevFocus
+		if m.focus == focusInput {
+			return m.input.Focus()
+		}
+		return nil
+	}
+	m.showSkills = true
+	m.prevFocus = m.focus
+	m.focus = focusSkills
+	m.input.Blur()
+	if m.skillView != nil {
+		m.skillView.SetSize(m.width, m.height-statusBarHeight-inputBarHeight)
+	}
+	return nil
 }
 
 // waitForLine returns a Cmd that reads one line from ch.

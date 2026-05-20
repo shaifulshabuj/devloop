@@ -48,6 +48,12 @@ func NewSkillView(skills []agent.Skill) *SkillView {
 	return &SkillView{skills: skills}
 }
 
+// SetSize updates the display dimensions.
+func (s *SkillView) SetSize(w, h int) {
+	s.width = w
+	s.height = h
+}
+
 // Init implements tea.Model.
 func (s *SkillView) Init() tea.Cmd { return nil }
 
