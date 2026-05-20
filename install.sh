@@ -90,7 +90,11 @@ _download "$CHECKSUM_URL" "$TMP_DIR/checksums.txt" || error "Download failed: $C
 # ── verify checksum ───────────────────────────────────────────────────────────
 info "Verifying checksum..."
 pushd "$TMP_DIR" > /dev/null
-if command -v sha256sum &>/dev/null; then
+# macOS ships a BSD sha256sum that lacks --check; prefer shasum (Perl) on Darwin
+if [[ "$(uname -s)" == "Darwin" ]] && command -v shasum &>/dev/null; then
+  grep "$ARCHIVE" checksums.txt | shasum -a 256 --check --status \
+    || error "Checksum verification failed — download may be corrupt or tampered"
+elif command -v sha256sum &>/dev/null; then
   grep "$ARCHIVE" checksums.txt | sha256sum --check --status \
     || error "Checksum verification failed — download may be corrupt or tampered"
 elif command -v shasum &>/dev/null; then
