@@ -49,6 +49,12 @@ func NewCostView(costs []storage.TaskCost) *CostView {
 	return &CostView{costs: costs, total: total}
 }
 
+// SetSize updates the display dimensions.
+func (c *CostView) SetSize(w, h int) {
+	c.width = w
+	c.height = h
+}
+
 // Init implements tea.Model.
 func (c *CostView) Init() tea.Cmd { return nil }
 

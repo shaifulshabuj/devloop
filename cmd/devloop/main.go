@@ -13,6 +13,7 @@ import (
 	"github.com/shaifulshabuj/devloop/v6/internal/agent"
 	"github.com/shaifulshabuj/devloop/v6/internal/config"
 	"github.com/shaifulshabuj/devloop/v6/internal/orchestrator"
+	"github.com/shaifulshabuj/devloop/v6/internal/server"
 	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 	"github.com/shaifulshabuj/devloop/v6/internal/tui"
 	"github.com/spf13/cobra"
@@ -46,6 +47,7 @@ func main() {
 	root.AddCommand(configCmd())
 	root.AddCommand(contextCmd())
 	root.AddCommand(startCmd())
+	root.AddCommand(serveCmd())
 	root.AddCommand(initCmd())
 	root.AddCommand(projectsCmd())
 	root.AddCommand(runCmd())
@@ -59,6 +61,7 @@ func main() {
 	root.AddCommand(updateCmd())
 	root.AddCommand(learnCmd())
 	root.AddCommand(sessionsCmd())
+	root.AddCommand(historyCmd())
 
 	// Background version-check hint: once per 24h, non-blocking.
 	go backgroundVersionHint()
@@ -175,11 +178,54 @@ func startCmd() *cobra.Command {
 				cwd = "."
 			}
 			projectName := filepath.Base(cwd)
-			return tui.Run(projectName)
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+			runner := agent.NewRunner()
+			runner.Detect()
+			return tui.Run(projectName, store, runner)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Run in non-interactive mode without the TUI")
+	return cmd
+}
+
+func serveCmd() *cobra.Command {
+	var addr string
+
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the DevLoop HTTP API server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			runner := agent.NewRunner()
+			runner.Detect()
+
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+
+			fmt.Fprintf(os.Stderr, "devloop serve: listening on %s\n", addr)
+			return server.New(addr, store, runner).Start(ctx)
+		},
+	}
+
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:7331", "Address to listen on")
 	return cmd
 }
 
@@ -435,6 +481,64 @@ func statusCmd() *cobra.Command {
 			return w.Flush()
 		},
 	}
+}
+
+func historyCmd() *cobra.Command {
+	var limit int
+	var statusFilter string
+
+	cmd := &cobra.Command{
+		Use:   "history",
+		Short: "Show task history",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			filter := statusFilter
+			if filter == "all" {
+				filter = ""
+			}
+
+			tasks, err := store.ListTasksFiltered(limit, filter)
+			if err != nil {
+				return fmt.Errorf("listing tasks: %w", err)
+			}
+
+			if len(tasks) == 0 {
+				fmt.Println("No tasks found.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			if _, err := fmt.Fprintln(w, "ID\tTITLE\tSTATUS\tCREATED"); err != nil {
+				return fmt.Errorf("writing header: %w", err)
+			}
+			for _, t := range tasks {
+				shortID := t.ID
+				if len(shortID) > 8 {
+					shortID = shortID[:8]
+				}
+				title := t.Title
+				if len(title) > 50 {
+					title = title[:47] + "..."
+				}
+				created := time.Unix(t.CreatedAt, 0).Format("2006-01-02 15:04")
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", shortID, title, t.Status, created)
+			}
+			return w.Flush()
+		},
+	}
+
+	cmd.Flags().IntVar(&limit, "limit", 20, "Maximum number of tasks to show")
+	cmd.Flags().StringVar(&statusFilter, "status", "all", "Filter by status: done|failed|interrupted|running|pending|all")
+	return cmd
 }
 
 func planCmd() *cobra.Command {
