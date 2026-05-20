@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -67,6 +67,8 @@ type Model struct {
 	store        *storage.Store
 	runner       *agent.Runner
 	outputCh     <-chan string
+	taggedOutputCh <-chan PaneOutputMsg // parallel dispatch: per-pane live lines
+	taggedErrCh    <-chan error         // receives dispatch error when taggedOutputCh closes
 	running      bool
 	runningTitle string
 }
@@ -272,62 +274,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sidebar.SetRunningTask(msg.Plan.Title)
 		m.output.AppendLine("▶ Dispatching: " + msg.Plan.Title)
 
-		ch := make(chan string, 256)
-		m.outputCh = ch
 		plan := msg.Plan
 
 		if len(plan.Steps) > 1 && m.runner != nil {
-			// Parallel dispatch — show split pane view.
+			// Parallel dispatch — show split pane view with live per-step streaming.
 			m.splitActive = true
 			m.splitFocIdx = 0
 			m.splitPanes = make([]string, len(plan.Steps))
-			for i, step := range plan.Steps {
-				m.splitPanes[i] = step.Description
+			m.outputCh = nil // not used for parallel dispatch
+
+			// Tagged channel multiplexes all per-step lines with their pane index.
+			taggedCh := make(chan PaneOutputMsg, 512)
+			errCh := make(chan error, 1)
+			m.taggedOutputCh = taggedCh
+			m.taggedErrCh = errCh
+
+			// Per-step bidirectional channels; send-only ends passed to dispatcher.
+			stepChans := make([]chan string, len(plan.Steps))
+			stepSendChans := make([]chan<- string, len(plan.Steps))
+			for i := range stepChans {
+				stepChans[i] = make(chan string, 256)
+				stepSendChans[i] = stepChans[i]
 			}
+
+			// Forwarder goroutines relay each step channel into the tagged channel.
+			var fwdWg sync.WaitGroup
+			fwdWg.Add(len(stepChans))
+			for i, sc := range stepChans {
+				i, sc := i, sc
+				go func() {
+					defer fwdWg.Done()
+					for line := range sc {
+						taggedCh <- PaneOutputMsg{PaneIndex: i, Line: line}
+					}
+				}()
+			}
+
 			parDisp := orchestrator.NewParallelDispatcher(m.store, m.runner, 0)
 			go func() {
-				defer close(ch)
-				result, err := parDisp.Dispatch(context.Background(), plan)
-				if err != nil {
-					ch <- "Error: " + err.Error()
-				}
-				if result != nil {
-					for i, sr := range result.Results {
-						// Update pane content with actual output.
-						line := fmt.Sprintf("[step %d] %s", i+1, sr.Output)
-						if sr.Error != nil {
-							line = fmt.Sprintf("[step %d error] %s", i+1, sr.Error)
-						}
-						ch <- line
-					}
-				}
+				// DispatchOpts closes each stepSendChans[i] when its step finishes.
+				_, err := parDisp.DispatchOpts(context.Background(), plan, orchestrator.ParallelOpts{
+					StepOutput: stepSendChans,
+				})
+				// Drain forwarders then signal the TUI that dispatch is complete.
+				fwdWg.Wait()
+				close(taggedCh)
+				errCh <- err
 			}()
-		} else {
-			// Sequential dispatch.
-			disp := m.disp
-			go func() {
-				defer close(ch)
-				for _, step := range plan.Steps {
-					ch <- fmt.Sprintf("[%d/%d] %s", step.Number, len(plan.Steps), step.Description)
-				}
-				result, err := disp.Dispatch(context.Background(), plan)
-				if err != nil {
-					ch <- "Error: " + err.Error()
-				}
-				if result != nil {
-					for _, sr := range result.Results {
-						if sr.Output != "" {
-							for _, line := range strings.Split(sr.Output, "\n") {
-								if line != "" {
-									ch <- line
-								}
-							}
-						}
-					}
-				}
-			}()
+			return m, tea.Batch(waitForPaneOutput(taggedCh, errCh), m.input.Focus())
 		}
-		return m, waitForLine(ch)
+
+		// Sequential dispatch — stream output into the main viewport.
+		ch := make(chan string, 256)
+		m.outputCh = ch
+		disp := m.disp
+		go func() {
+			defer close(ch)
+			for _, step := range plan.Steps {
+				ch <- fmt.Sprintf("[%d/%d] %s", step.Number, len(plan.Steps), step.Description)
+			}
+			_, err := disp.DispatchOpts(context.Background(), plan, orchestrator.DispatcherOpts{OutputCh: ch})
+			if err != nil {
+				ch <- "Error: " + err.Error()
+			}
+		}()
+		return m, tea.Batch(waitForLine(ch), m.input.Focus())
 
 	case PlanRejectedMsg:
 		m.planView = nil
@@ -346,6 +357,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.runningTitle = ""
 		m.outputCh = nil
+		m.taggedOutputCh = nil
+		m.taggedErrCh = nil
 		m.splitActive = false
 		m.splitPanes = nil
 		m.sidebar.SetRunningTask("")
@@ -395,8 +408,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PaneOutputMsg:
 		if msg.PaneIndex >= 0 && msg.PaneIndex < len(m.splitPanes) {
 			m.splitPanes[msg.PaneIndex] += "\n" + msg.Line
+			// Mirror to main viewport so output is preserved after split clears.
+			m.output.AppendLine(fmt.Sprintf("[%d] %s", msg.PaneIndex+1, msg.Line))
 		}
-		return m, nil
+		return m, waitForPaneOutput(m.taggedOutputCh, m.taggedErrCh)
 	}
 
 	// Delegate remaining messages to the focused component.
@@ -501,7 +516,10 @@ func (m Model) renderSplitPanes() string {
 	panes := make([]string, n)
 	for i, content := range m.splitPanes {
 		header := fmt.Sprintf("▸ Step %d", i+1)
-		body := "Running…\n\n" + content
+		body := content
+		if body == "" {
+			body = "Running…"
+		}
 		style := lipgloss.NewStyle().Width(paneW).Height(contentH)
 		if i == m.splitFocIdx {
 			style = style.BorderStyle(lipgloss.NormalBorder()).
@@ -599,6 +617,27 @@ func (m *Model) toggleOverlay(which focusArea) tea.Cmd {
 	}
 	m.focus = which
 	return nil
+}
+
+// waitForPaneOutput returns a Cmd that reads one PaneOutputMsg from ch.
+// When ch is closed it reads the dispatch error from errCh and returns taskResultMsg.
+// A nil ch is a no-op (returns nil Cmd) as a safety guard.
+func waitForPaneOutput(ch <-chan PaneOutputMsg, errCh <-chan error) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			// Drain the error (blocks briefly until dispatch goroutine sends).
+			var err error
+			if e, ok2 := <-errCh; ok2 {
+				err = e
+			}
+			return taskResultMsg{err: err}
+		}
+		return msg
+	}
 }
 
 // waitForLine returns a Cmd that reads one line from ch.

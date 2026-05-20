@@ -31,15 +31,17 @@ func NewParallelDispatcher(store *storage.Store, runner *agent.Runner, maxWorker
 	}
 }
 
-// Dispatch executes all steps in plan.Steps concurrently (up to maxWorkers at a
-// time). Each step receives only its own Description as input — since steps run
-// in parallel, there is no prior-context accumulation.
-//
-// Results are collected and returned in step order (not completion order). If ctx
-// is cancelled, in-flight goroutines are stopped via the shared context. Returns
-// DispatchResult with all results (partial on cancellation), plus the first
-// non-nil error in step order.
-func (p *ParallelDispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult, error) {
+// ParallelOpts configures optional behaviour for DispatchOpts.
+type ParallelOpts struct {
+	// StepOutput, when provided, receives live stdout lines from each running step.
+	// Each element corresponds to plan.Steps[i].  Channels are closed by
+	// DispatchOpts when the corresponding step finishes so that consumers can
+	// range over them.  Length must be >= len(plan.Steps).
+	StepOutput []chan<- string
+}
+
+// DispatchOpts is like Dispatch but accepts optional opts for live output streaming.
+func (p *ParallelDispatcher) DispatchOpts(ctx context.Context, plan *Plan, opts ParallelOpts) (*DispatchResult, error) {
 	n := len(plan.Steps)
 	results := make([]StepResult, n)
 
@@ -54,6 +56,16 @@ func (p *ParallelDispatcher) Dispatch(ctx context.Context, plan *Plan) (*Dispatc
 		go func() {
 			defer wg.Done()
 
+			// Resolve and defer-close the per-step output channel immediately so
+			// forwarder goroutines always drain, even on early cancellation exits.
+			var out chan<- string
+			if i < len(opts.StepOutput) {
+				out = opts.StepOutput[i]
+			}
+			if out != nil {
+				defer close(out)
+			}
+
 			// Acquire semaphore slot before running.
 			select {
 			case sem <- struct{}{}:
@@ -64,7 +76,10 @@ func (p *ParallelDispatcher) Dispatch(ctx context.Context, plan *Plan) (*Dispatc
 				return
 			}
 
-			sess, err := p.runner.Spawn(ctx, step.Backend, agent.SpawnOpts{InputText: step.Description})
+			sess, err := p.runner.Spawn(ctx, step.Backend, agent.SpawnOpts{
+				InputText: step.Description,
+				OutputCh:  out,
+			})
 
 			var output string
 			if sess != nil && len(sess.Lines) > 0 {
@@ -89,4 +104,16 @@ func (p *ParallelDispatcher) Dispatch(ctx context.Context, plan *Plan) (*Dispatc
 	}
 
 	return dr, firstErr
+}
+
+// Dispatch executes all steps in plan.Steps concurrently (up to maxWorkers at a
+// time). Each step receives only its own Description as input — since steps run
+// in parallel, there is no prior-context accumulation.
+//
+// Results are collected and returned in step order (not completion order). If ctx
+// is cancelled, in-flight goroutines are stopped via the shared context. Returns
+// DispatchResult with all results (partial on cancellation), plus the first
+// non-nil error in step order.
+func (p *ParallelDispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult, error) {
+	return p.DispatchOpts(ctx, plan, ParallelOpts{})
 }

@@ -32,18 +32,15 @@ func NewDispatcher(store *storage.Store, runner *agent.Runner) *Dispatcher {
 	return &Dispatcher{store: store, runner: runner}
 }
 
-// Dispatch executes each step in plan.Steps sequentially.
-//
-// For each step:
-//  1. Build input: step.Description + "\n\nContext:\n" + accumulated prior outputs
-//  2. Call runner.Spawn(ctx, step.Backend, SpawnOpts{InputText: input})
-//  3. Collect all Session.Lines as the step output
-//  4. Update store task status to "running" for first step, "done" or "failed" at end
-//  5. On ctx cancellation, stop and return partial DispatchResult + ctx error
-//
-// Returns DispatchResult with all results (partial on error), plus the first
-// non-nil error encountered (or nil on full success).
-func (d *Dispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult, error) {
+// DispatcherOpts configures optional behaviour for DispatchOpts.
+type DispatcherOpts struct {
+	// OutputCh, when non-nil, receives each stdout line from every step as it
+	// arrives.  The caller must drain this channel; it is NOT closed by Dispatch.
+	OutputCh chan<- string
+}
+
+// DispatchOpts is like Dispatch but accepts optional opts for live output streaming.
+func (d *Dispatcher) DispatchOpts(ctx context.Context, plan *Plan, opts DispatcherOpts) (*DispatchResult, error) {
 	result := &DispatchResult{PlanID: plan.ID}
 
 	var firstErr error
@@ -62,7 +59,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult,
 		}
 
 		// Spawn the backend for this step, with automatic failover on limit errors.
-		sess, usedBackend, err := d.runner.SpawnWithFailover(ctx, step.Backend, agent.SpawnOpts{InputText: input})
+		sess, usedBackend, err := d.runner.SpawnWithFailover(ctx, step.Backend, agent.SpawnOpts{
+			InputText: input,
+			OutputCh:  opts.OutputCh,
+		})
 		if usedBackend != step.Backend {
 			step.Backend = usedBackend // record which backend actually ran
 		}
@@ -103,4 +103,19 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult,
 	_ = d.store.UpdateTaskStatus(plan.ID, finalStatus)
 
 	return result, firstErr
+}
+
+// Dispatch executes each step in plan.Steps sequentially.
+//
+// For each step:
+//  1. Build input: step.Description + "\n\nContext:\n" + accumulated prior outputs
+//  2. Call runner.Spawn(ctx, step.Backend, SpawnOpts{InputText: input})
+//  3. Collect all Session.Lines as the step output
+//  4. Update store task status to "running" for first step, "done" or "failed" at end
+//  5. On ctx cancellation, stop and return partial DispatchResult + ctx error
+//
+// Returns DispatchResult with all results (partial on error), plus the first
+// non-nil error encountered (or nil on full success).
+func (d *Dispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult, error) {
+	return d.DispatchOpts(ctx, plan, DispatcherOpts{})
 }
