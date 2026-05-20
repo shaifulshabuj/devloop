@@ -5,7 +5,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [6.0.0] — 2026-05-20
+## [6.0.1] — 2026-05-20
+
+### Fixed
+- Switch SQLite driver from `go-sqlite3` (CGO) to `modernc.org/sqlite` (pure Go) — enables cross-platform binary distribution without a C compiler
+- Update Go module path to `github.com/shaifulshabuj/devloop/v6` — enables proper `go install github.com/shaifulshabuj/devloop/v6/cmd/devloop@latest`
+- Version string now injected via GoReleaser ldflags (`-X main.version={{.Tag}}`) instead of hardcoded
+
+### Added
+- `.goreleaser.yml` — cross-platform builds: darwin/linux × amd64/arm64, windows/amd64
+- `.github/workflows/release.yml` — automated release workflow triggered on `v*` tags
+- `install.sh` — one-line curl installer with checksum verification, OS/arch detection, version pinning
+- `devloop update` (v5 bash) now shows v6 migration hint after upgrading
+
+### Install (new)
+```bash
+# One-line install (any platform)
+curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/install.sh | bash
+
+# Go install
+go install github.com/shaifulshabuj/devloop/v6/cmd/devloop@latest
+
+# Homebrew (coming soon)
+brew tap shaifulshabuj/tap && brew install devloop
+```
+
+---
+
+
 
 ### 🚀 Major Release — DevLoop v6: Go-native AI Orchestration Platform
 

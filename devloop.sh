@@ -6615,6 +6615,31 @@ cmd_update() {
 
   # ── Propagate new config keys to all registered projects ───────────────────
   _propagate_update_to_registered_projects "${new_version:-$current_version}"
+
+  # ── Offer v6 Go binary migration ────────────────────────────────────────────
+  _offer_v6_migration
+}
+
+# Offer to install the DevLoop v6 Go binary alongside the v5 bash script.
+# The v6 binary provides: persistent sessions, TUI, 4 AI backends, parallel dispatch.
+# Safe: backs up current devloop before replacing, installs to ~/.local/bin/devloop-v6
+# first so the user can evaluate before opting in to full replacement.
+_offer_v6_migration() {
+  # Skip if already running v6 binary or if v6 is already installed
+  if command -v devloop-v6 &>/dev/null 2>/dev/null || [[ -f "${HOME}/.local/bin/devloop-v6" ]]; then
+    return
+  fi
+
+  echo ""
+  info "🚀 ${BOLD}DevLoop v6${RESET} (Go binary) is available!"
+  echo "     v6 adds: persistent sessions, TUI, 4 AI backends, parallel dispatch"
+  echo ""
+  echo "     To install v6 now, run:"
+  echo -e "     ${CYAN}curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/install.sh | bash -s -- --install-dir ~/.local/bin${RESET}"
+  echo ""
+  echo "     Or use go install (requires Go 1.22+):"
+  echo -e "     ${CYAN}go install github.com/shaifulshabuj/devloop/v6/cmd/devloop@latest${RESET}"
+  echo ""
 }
 
 # Refresh project-level devloop config files after a version upgrade.

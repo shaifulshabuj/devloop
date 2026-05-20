@@ -1,0 +1,76 @@
+version: 2
+
+project_name: devloop
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: devloop
+    main: ./cmd/devloop
+    binary: devloop
+    # Pure-Go SQLite (modernc.org/sqlite) — no CGO required
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Tag}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: devloop
+    builds: [devloop]
+    name_template: "devloop_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - install.sh
+
+checksum:
+  name_template: "devloop_{{ .Tag }}_checksums.txt"
+
+release:
+  github:
+    owner: shaifulshabuj
+    name: devloop
+  name_template: "DevLoop {{ .Tag }}"
+  draft: false
+  prerelease: auto
+  extra_files:
+    - glob: install.sh
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "^Merge"
+  groups:
+    - title: "🚀 Features"
+      regexp: "^feat"
+      order: 0
+    - title: "🐛 Bug Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "⚡ Performance"
+      regexp: "^perf"
+      order: 2
+    - title: "Other Changes"
+      order: 99

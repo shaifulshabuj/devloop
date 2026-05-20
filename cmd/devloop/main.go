@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "v6.0.0"
+var version = "v6.0.1"
 
 // Global flags, populated by PersistentPreRunE on the root command.
 var (

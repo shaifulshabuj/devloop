@@ -8,8 +8,8 @@ require (
 	github.com/charmbracelet/bubbletea v0.26.0
 	github.com/charmbracelet/lipgloss v0.10.0
 	github.com/google/uuid v1.6.0
-	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/spf13/cobra v1.8.0
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -37,5 +37,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.50.1 // indirect
 )
