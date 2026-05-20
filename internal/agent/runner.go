@@ -183,8 +183,6 @@ func (r *Runner) SpawnWithFailover(ctx context.Context, preferredBackend string,
 			return sess, id, nil
 		}
 
-		lastSess, lastErr = sess, err
-
 		if ctx.Err() != nil {
 			return sess, id, ctx.Err()
 		}
