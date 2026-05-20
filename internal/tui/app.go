@@ -228,15 +228,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "s":
-			if m.focus != focusPlanReview {
+			if m.focus != focusPlanReview && m.focus != focusInput {
 				return m, m.toggleOverlay(focusSkills)
 			}
 		case "p":
-			if m.focus != focusPlanReview {
+			if m.focus != focusPlanReview && m.focus != focusInput {
 				return m, m.toggleOverlay(focusPersonas)
 			}
 		case "$":
-			if m.focus != focusPlanReview {
+			if m.focus != focusPlanReview && m.focus != focusInput {
 				return m, m.toggleOverlay(focusCost)
 			}
 		}
