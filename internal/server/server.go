@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 
@@ -106,10 +107,21 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:    s.addr,
 		Handler: s.mux,
 	}
+	return s.serve(ctx, srv, func() error { return srv.ListenAndServe() })
+}
 
+// Serve is like Start but accepts an already-open listener, avoiding the
+// TOCTOU race between binding a free port and starting the server.
+// Useful for tests and callers that need to know the bound address upfront.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	srv := &http.Server{Handler: s.mux}
+	return s.serve(ctx, srv, func() error { return srv.Serve(ln) })
+}
+
+func (s *Server) serve(ctx context.Context, srv *http.Server, listenFn func() error) error {
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		if err := listenFn(); !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 		close(errCh)

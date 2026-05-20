@@ -20,17 +20,16 @@ func startTestServer(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	// Pick a free port.
+	// Bind a free port before starting the server to avoid TOCTOU races.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	srv := server.New(addr, store, nil) // nil runner: tasks will end "failed"
 	ctx := t.Context()
-	go func() { _ = srv.Start(ctx) }()
+	go func() { _ = srv.Serve(ctx, ln) }()
 
 	// Wait for the server to be ready.
 	deadline := time.Now().Add(3 * time.Second)
