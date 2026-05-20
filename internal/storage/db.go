@@ -59,6 +59,10 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
+	// SQLite only supports one writer at a time, and in-memory databases are
+	// per-connection, so pin the pool to a single connection.
+	db.SetMaxOpenConns(1)
+
 	if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
