@@ -1,10 +1,411 @@
 # DevLoop — Usage & Data Flow Graphs
 
-Provider routing is configurable in `devloop.config.sh`: the launcher stays Claude in v1, while the main roles and worker roles can be routed to Claude or Copilot.
+> **Two-track project.** v5 is the battle-tested Bash script (`devloop.sh`).
+> v6 is a standalone Go binary with a session pool, SQLite persistence, parallel dispatch, and 4 AI backends.
+> Both ship from the same repo and co-exist on disk.
+
+| | **v5 (devloop.sh)** | **v6 (Go binary)** |
+|---|---|---|
+| Entry point | `devloop.sh` / `devloop` symlink | `devloop` binary (GoReleaser) |
+| Install | `devloop update` / `curl raw.githubusercontent.com/…/devloop.sh` | `curl … install.sh` / `go install github.com/shaifulshabuj/devloop/v6/cmd/devloop@latest` |
+| AI backends | Claude + Copilot (configurable in `devloop.config.sh`) | claude · copilot · opencode · pi (all 4 auto-detected at startup) |
+| Persistence | Files in `.devloop/specs/` | SQLite `~/.devloop/devloop.db` |
+| Session reuse | Cold-start each run | Session pool — warm sessions reused across tasks |
+| Config | `devloop.config.sh` | `~/.devloop/config.toml` + `.devloop/config.toml` |
+| Orchestration | Shell script pipeline | Go: Plan → Router → Dispatcher / ParallelDispatcher / AutonomousRunner |
+| Module path | — | `github.com/shaifulshabuj/devloop/v6` |
+| SQLite driver | — | `modernc.org/sqlite` (pure Go, CGO_ENABLED=0) |
 
 ---
 
-## 1. Full Pipeline — End to End
+## 1. v6 Architecture Overview
+
+```mermaid
+flowchart TD
+    USER("👤 User")
+    CLI("devloop binary\nCobra CLI")
+    ORCH("orchestrator.Orchestrator\nPlan() — heuristic step gen")
+    ROUTER("orchestrator.Router\nClassify() → backend + model\ncode · review · test · doc · general")
+    DISP("orchestrator.Dispatcher\nDispatch() — sequential")
+    PARDISP("orchestrator.ParallelDispatcher\nDispatch() — up to 4 concurrent")
+    AUTO("orchestrator.AutonomousRunner\nPlan → Dispatch → AutoCommit → Learn")
+    POOL("agent.SessionPool\nidle/warm/archived/dead\nUUID v5 keyed by project+role")
+    RUNNER("agent.Runner\nDetect() + Spawn()")
+    STORE("storage.Store\nSQLite modernc.org/sqlite")
+    SERVER("server.Server\nHTTP :7777\nGET /tasks · POST /tasks · GET /health")
+    GIT("internal/git.Client\nAutoCommit")
+    LEARN("agent.LearningLoop\n.devloop/lessons.md")
+
+    BACKENDS("Backends:\nclaude --permission-mode acceptEdits\ncopilot\nopencode\npi")
+
+    DB[("~/.devloop/devloop.db\ntasks · steps · context_entries\nsessions · copilot_history")]
+    CONTEXT_STORE("storage.ContextStore\nbuffered writer\n.devloop/context/")]
+
+    USER --> CLI
+    CLI --> ORCH
+    ORCH --> ROUTER
+    ROUTER --> DISP & PARDISP
+    DISP & PARDISP --> POOL
+    POOL --> RUNNER
+    RUNNER -->|"exec subprocess"| BACKENDS
+    ORCH --> STORE
+    POOL --> STORE
+    AUTO --> ORCH & DISP & GIT & LEARN
+    CLI --> SERVER
+    SERVER --> STORE
+    STORE --> DB
+    STORE --> CONTEXT_STORE
+
+    style DB fill:#1a3a5a,color:#fff
+    style BACKENDS fill:#1a4a2a,color:#fff
+    style AUTO fill:#3a1a5a,color:#fff
+```
+
+---
+
+## 2. v6 Command Reference
+
+```mermaid
+flowchart LR
+    subgraph SETUP["⚙️  Setup"]
+        INIT("devloop init\n[--name NAME]\n→ .devloop/config.toml\n→ ~/.devloop/projects.toml")
+        PROJ("devloop projects\nlist registered projects")
+        CFG("devloop config show\ndump merged TOML")
+        CTX("devloop context show\nprint agent system prompt")
+    end
+
+    subgraph SESSION["🖥️  Session"]
+        START("devloop start\n[--no-tui]\nlaunches TUI")
+    end
+
+    subgraph TASK_FLOW["🔁  Task Flow"]
+        PLAN("devloop plan <task>\ngenerate plan (dry-run)")
+        RUN("devloop run <task>\nPlan → Dispatch → commit")
+        STATUS("devloop status\nlist last 10 tasks")
+        RESUME("devloop resume <task-id>\nresume pending/failed task")
+        RESUMABLE("devloop resumable\nlist resumable tasks")
+    end
+
+    subgraph KNOWLEDGE["🧠  Knowledge"]
+        SKILLS("devloop skills\nlist .devloop/skills/")
+        SKILLS_SHOW("devloop skills show <name>")
+        PERSONAS("devloop personas\nlist agent personas")
+        LEARN("devloop learn <task-id>\nextract lessons → .devloop/lessons.md")
+    end
+
+    subgraph SESSIONS_MGT["🗂️  Session Pool"]
+        SESS_LIST("devloop sessions [list]\nID · role · backend · status · used")
+        SESS_SHOW("devloop sessions show <id>\nfull session details + summary")
+        SESS_RESET("devloop sessions reset <id>\nremove from pool + DB")
+        SESS_SUM("devloop sessions summarize <id>\nprint context summary")
+    end
+
+    subgraph GLOBAL_FLAGS["🔧  Global Flags"]
+        GF1("--project PATH")
+        GF2("--backend claude|copilot|opencode|pi")
+        GF3("--no-color")
+    end
+
+    PLAN --> RUN
+    RUN --> STATUS
+    RESUME --> RESUMABLE
+    SKILLS --> SKILLS_SHOW
+```
+
+---
+
+## 3. v6 Orchestration — Plan → Route → Dispatch
+
+```mermaid
+flowchart TD
+    TASK("devloop run 'add login + write tests'")
+
+    subgraph PLAN_PHASE["Orchestrator.Plan()"]
+        CLASSIFY{"isComplex?\n>5 words OR\ncomplex keyword?"}
+        SPLIT("split on: and · then · also\n→ []Step")
+        SINGLE("single step")
+        PERSIST("store.CreateTask()\nstatus: pending")
+    end
+
+    subgraph ROUTE_PHASE["Router.Classify() per step"]
+        R1{"keyword match"}
+        RT("TaskTypeTest\ntest·spec·coverage")
+        RR("TaskTypeReview\nreview·analyse·check·audit")
+        RD("TaskTypeDoc\ndocument·readme·comment")
+        RC("TaskTypeCode\nimplement·add·create·fix·update")
+        RG("TaskTypeGeneral\n(default)")
+    end
+
+    subgraph DISPATCH_PHASE["Dispatcher.Dispatch()"]
+        PICK("Router.Route(step)\n→ backend + model")
+        SPAWN("Runner.Spawn(backend, step.Description)")
+        RESULT("collect output")
+        UPDATE("store.UpdateTaskStatus()\nstep status: completed")
+    end
+
+    subgraph PARALLEL["ParallelDispatcher (4 workers)"]
+        W1("goroutine 1")
+        W2("goroutine 2")
+        W3("goroutine 3")
+        W4("goroutine 4")
+    end
+
+    TASK --> CLASSIFY
+    CLASSIFY -->|"yes"| SPLIT
+    CLASSIFY -->|"no"| SINGLE
+    SPLIT & SINGLE --> PERSIST
+    PERSIST --> R1
+    R1 --> RT & RR & RD & RC & RG
+    RT & RR & RD & RC & RG --> PICK
+    PICK --> SPAWN
+    SPAWN --> RESULT --> UPDATE
+
+    style RT fill:#2a4a2a,color:#fff
+    style RR fill:#4a3a1a,color:#fff
+    style RC fill:#1a3a5a,color:#fff
+```
+
+---
+
+## 4. v6 Session Pool Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle : SessionPool.Get()\nnew session created
+
+    idle --> warm : first Spawn()\nsubprocess started\nPID recorded
+
+    warm --> warm : Load()\ncontext appended\nMessageCount++\nLastUsedAt updated
+
+    warm --> idle : Flush()\ncontext flushed\nprocess signals received
+
+    idle --> archived : PruneIdle()\nidle > 30 min
+
+    warm --> dead : process exits\nnon-zero PID check fails\nIsAlive() = false
+
+    archived --> [*] : store.DeleteSession()
+
+    dead --> [*] : store.DeleteSession()
+
+    note right of warm
+        UUID v5 keyed by
+        project_id + role
+        e.g. "myapp:orchestrator"
+    end note
+
+    note right of idle
+        StartIdlePruner()
+        background goroutine
+        ticks every minute
+    end note
+```
+
+---
+
+## 5. v6 Backend Detection & Routing
+
+```mermaid
+flowchart TD
+    DETECT("Runner.Detect()\nexec.LookPath for each binary")
+
+    subgraph BACKENDS["Built-in backends"]
+        C("claude\nArgs: --permission-mode acceptEdits")
+        CO("copilot\nArgs: (none)")
+        OC("opencode\nArgs: (none)")
+        PI("pi\nArgs: (none)")
+    end
+
+    DETECT -->|"found in PATH"| C & CO & OC & PI
+
+    subgraph ROUTE["Router.Route(step, cfg)"]
+        PREF("1. config override?\n[agents].default_backend")
+        AVAIL("2. backend available?\nFound == true")
+        FALLBACK("3. fallback: first\navailable backend")
+    end
+
+    subgraph MODELS["Model selection from config"]
+        M1("[models].orchestrator\ndefault: claude-opus-4-5")
+        M2("[models].worker\ndefault: claude-sonnet-4-5")
+        M3("[models].reviewer\ndefault: claude-sonnet-4-5")
+    end
+
+    DETECT --> ROUTE
+    ROUTE --> PREF --> AVAIL --> FALLBACK
+    ROUTE --> MODELS
+
+    style C fill:#1a4a2a,color:#fff
+    style CO fill:#2a4a1a,color:#fff
+    style OC fill:#1a2a4a,color:#fff
+    style PI fill:#4a2a1a,color:#fff
+```
+
+---
+
+## 6. v6 SQLite Storage Schema
+
+```mermaid
+erDiagram
+    tasks {
+        TEXT id PK
+        TEXT title
+        TEXT status "pending·running·completed·failed"
+        INTEGER created_at
+        INTEGER updated_at
+        TEXT config "optional TOML blob"
+    }
+
+    steps {
+        TEXT id PK
+        TEXT task_id FK
+        TEXT description
+        TEXT status "pending·running·completed·failed"
+        TEXT output
+        INTEGER created_at
+    }
+
+    context_entries {
+        TEXT id PK
+        TEXT task_id FK
+        TEXT role "user·assistant·system"
+        TEXT content
+        INTEGER created_at
+    }
+
+    sessions {
+        TEXT id PK "UUID v5 project+role"
+        TEXT project_id
+        TEXT role "orchestrator·worker·reviewer"
+        TEXT backend "claude·copilot·opencode·pi"
+        TEXT status "idle·warm·archived·dead"
+        INTEGER process_pid
+        TEXT context_summary
+        INTEGER message_count
+        INTEGER last_used_at
+        INTEGER created_at
+    }
+
+    copilot_history {
+        TEXT id PK
+        TEXT session_id FK
+        TEXT role
+        TEXT content
+        INTEGER created_at
+    }
+
+    tasks ||--o{ steps : "has"
+    tasks ||--o{ context_entries : "has"
+    sessions ||--o{ copilot_history : "has"
+```
+
+---
+
+## 7. v6 AutonomousRunner — Full Pipeline
+
+```mermaid
+flowchart TD
+    TRIGGER("AutonomousRunner.Run(ctx, task)")
+
+    subgraph PHASE1["Phase 1 — Plan"]
+        P("Orchestrator.Plan()\nclassify → split → persist\n→ []Step")
+    end
+
+    subgraph PHASE2["Phase 2 — Dispatch"]
+        D("Dispatcher.Dispatch()\nsequential step execution")
+        EACH("per step:\nRouter.Route()\nRunner.Spawn(backend, description)\ncollect output")
+    end
+
+    subgraph PHASE3["Phase 3 — AutoCommit (optional)"]
+        GIT_CHECK{"gitClient\n!= nil?"}
+        COMMIT("git.Client.AutoCommit()\ngit add -A\ngit commit -m 'devloop: task title [auto]'")
+        SKIP("skip commit")
+    end
+
+    subgraph PHASE4["Phase 4 — Learn"]
+        EXTRACT("LearningLoop.Extract()\nID + title + outputs → []Lesson")
+        PERSIST("LearningLoop.Persist()\nappend to .devloop/lessons.md")
+    end
+
+    TRIGGER --> P --> D
+    D --> EACH --> GIT_CHECK
+    GIT_CHECK -->|"yes"| COMMIT
+    GIT_CHECK -->|"no"| SKIP
+    COMMIT & SKIP --> EXTRACT --> PERSIST
+
+    style COMMIT fill:#1a5a1a,color:#fff
+    style TRIGGER fill:#1a3a5a,color:#fff
+```
+
+---
+
+## 8. v6 Install Methods
+
+```mermaid
+flowchart TD
+    subgraph CI["GoReleaser CI (.github/workflows/release.yml)"]
+        TAG("push v* tag")
+        TESTS("go test -race ./...")
+        BUILD("goreleaser release\nCGO_ENABLED=0")
+        ASSETS("GitHub Release assets:\ndarwin_arm64 · darwin_amd64\nlinux_arm64 · linux_amd64\nwindows_amd64\nchecksums.txt · install.sh")
+        TAG --> TESTS --> BUILD --> ASSETS
+    end
+
+    subgraph INSTALL1["curl installer (recommended)"]
+        CURL("curl -fsSL …/install.sh | bash")
+        DETECT_OS("detect OS + arch")
+        DOWNLOAD("download binary from\nGitHub Release")
+        VERIFY("sha256sum verify\nchecksums.txt")
+        MOVE("move to --install-dir\n(default: /usr/local/bin)")
+        CURL --> DETECT_OS --> DOWNLOAD --> VERIFY --> MOVE
+    end
+
+    subgraph INSTALL2["go install"]
+        GOCMD("go install\ngithub.com/shaifulshabuj/devloop/v6/\ncmd/devloop@latest")
+        GOBIN("→ $GOPATH/bin/devloop")
+        GOCMD --> GOBIN
+    end
+
+    subgraph INSTALL3["make install (dev)"]
+        MAKE("make install\nCGO_ENABLED=0")
+        MAKEBIN("→ /usr/local/bin/devloop")
+        MAKE --> MAKEBIN
+    end
+
+    ASSETS -.->|"source"| DOWNLOAD
+    ASSETS -.->|"source"| GOCMD
+```
+
+---
+
+## 9. v5 vs v6 — Dual Track Architecture
+
+```mermaid
+flowchart LR
+    subgraph V5["v5 — devloop.sh (Bash)"]
+        V5S("devloop.sh\n~380KB, 9700+ lines")
+        V5C("devloop.config.sh\nPROJECT_NAME, STACK,\nPATTERNS, TEST_FRAMEWORK\nCLAUDE_MODEL, COPILOT_MODEL")
+        V5A(".claude/agents/\norchestrator.md\narchitect.md\nreviewer.md")
+        V5F(".devloop/specs/\nTASK-*.md\nTASK-*.pre-commit\nTASK-*-review.md")
+        V5P(".devloop/prompts/\nTASK-*-copilot.txt")
+        V5U("devloop update\n← downloads from\nraw.githubusercontent.com/main")
+    end
+
+    subgraph V6["v6 — Go binary"]
+        V6B("devloop binary\nGo 1.26+, CGO_ENABLED=0\nmodule: .../devloop/v6")
+        V6C(".devloop/config.toml\n~/.devloop/config.toml\n[project] [agents] [models] [storage]")
+        V6DB("~/.devloop/devloop.db\nSQLite (modernc/sqlite)\ntasks·steps·sessions·context")
+        V6POOL("agent.SessionPool\nidle/warm reuse\n30m idle timeout")
+        V6U("go install @latest\ncurl install.sh\n← GoReleaser binary release")
+    end
+
+    V5 <-.->|"co-exist\nsame repo\ndifferent binaries"| V6
+
+    style V5 fill:#1a3a5a,color:#fff
+    style V6 fill:#1a4a1a,color:#fff
+```
+
+---
+
+## 10. Full Pipeline — v5 End to End (Bash orchestration)
 
 ```mermaid
 flowchart TD
@@ -49,7 +450,7 @@ flowchart TD
 
 ---
 
-## 2. Command Reference — All Commands & Aliases
+## 11. v5 Command Reference
 
 ```mermaid
 flowchart LR
@@ -92,7 +493,7 @@ flowchart LR
 
 ---
 
-## 3. `devloop init` — What Gets Created
+## 12. v5 `devloop init` — What Gets Created
 
 ```mermaid
 flowchart TD
@@ -131,7 +532,7 @@ flowchart TD
 
 ---
 
-## 4. File Lifecycle — Per Task
+## 13. v5 File Lifecycle — Per Task
 
 ```mermaid
 flowchart TD
@@ -183,7 +584,7 @@ flowchart TD
 
 ---
 
-## 5. Git Baseline Mechanism
+## 14. v5 Git Baseline Mechanism
 
 ```mermaid
 gitGraph
@@ -234,7 +635,7 @@ flowchart LR
 
 ---
 
-## 6. `devloop work` — What Gets Sent to Copilot
+## 15. v5 `devloop work` — What Gets Sent to Copilot
 
 ```mermaid
 flowchart TD
@@ -259,7 +660,7 @@ flowchart TD
 
 ---
 
-## 7. `devloop review` — What Gets Sent to Claude
+## 16. v5 `devloop review` — What Gets Sent to Claude
 
 ```mermaid
 flowchart TD
@@ -299,7 +700,7 @@ flowchart TD
 
 ---
 
-## 8. `devloop daemon` — Background Session & Auto-Restart
+## 17. v5 `devloop daemon` — Background Session & Auto-Restart
 
 ```mermaid
 flowchart TD
@@ -346,7 +747,7 @@ flowchart TD
 
 ---
 
-## 9. Status State Machine
+## 18. v5 Status State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -379,7 +780,7 @@ stateDiagram-v2
 
 ---
 
-## 10. Agent Collaboration Map
+## 19. v5 Agent Collaboration Map
 
 ```mermaid
 flowchart TD
@@ -420,7 +821,7 @@ flowchart TD
 
 ---
 
-## 11. `devloop clean` — What Gets Removed
+## 20. v5 `devloop clean` — What Gets Removed
 
 ```mermaid
 flowchart TD
@@ -455,3 +856,4 @@ flowchart TD
     style KEEP fill:#1a5a1a,color:#fff
     style DELETE fill:#5a1a1a,color:#fff
 ```
+
