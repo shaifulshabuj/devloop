@@ -113,10 +113,9 @@ var failoverOrder = []string{"claude", "copilot", "opencode", "pi"}
 
 // IsLimitError reports whether the session output or error message indicates
 // the backend has hit a rate/session limit and a failover should be attempted.
+// stdout is always checked regardless of exit code — some backends output their
+// limit message to stdout and exit with code 0 rather than a non-zero code.
 func IsLimitError(sess *Session, err error) bool {
-	if err == nil {
-		return false
-	}
 	check := func(s string) bool {
 		lower := strings.ToLower(s)
 		for _, p := range limitPatterns {
@@ -126,9 +125,10 @@ func IsLimitError(sess *Session, err error) bool {
 		}
 		return false
 	}
-	if check(err.Error()) {
+	if err != nil && check(err.Error()) {
 		return true
 	}
+	// Check stdout lines regardless of exit code.
 	if sess != nil {
 		for _, line := range sess.Lines {
 			if check(line) {
@@ -168,6 +168,17 @@ func (r *Runner) SpawnWithFailover(ctx context.Context, preferredBackend string,
 		}
 
 		sess, err := r.Spawn(ctx, id, opts)
+
+		// Check for limit in stdout even on clean exit (exit 0 + limit message).
+		if IsLimitError(sess, err) {
+			lastSess, lastErr = sess, err
+			if lastErr == nil {
+				lastErr = fmt.Errorf("agent: backend %q hit usage limit", id)
+			}
+			log.Printf("agent: backend %q hit limit, failing over to next backend", id)
+			continue
+		}
+
 		if err == nil {
 			return sess, id, nil
 		}
@@ -177,16 +188,24 @@ func (r *Runner) SpawnWithFailover(ctx context.Context, preferredBackend string,
 		if ctx.Err() != nil {
 			return sess, id, ctx.Err()
 		}
-		if !IsLimitError(sess, err) {
-			// Real error (not a limit) — stop immediately, don't try other backends.
-			return sess, id, err
-		}
-		log.Printf("agent: backend %q hit limit, failing over to next backend", id)
+		// Real error (not a limit) — stop immediately, don't try other backends.
+		return sess, id, err
 	}
 
 	if !anyTried {
 		return nil, preferredBackend, fmt.Errorf("agent: no available backend found in [%s]",
 			strings.Join(order, ", "))
+	}
+
+	// If all backends were exhausted by usage limits, surface the limit message
+	// from stdout (much more useful than "subprocess exited with code 1").
+	if IsLimitError(lastSess, lastErr) && lastSess != nil {
+		for _, line := range lastSess.Lines {
+			lower := strings.ToLower(line)
+			if strings.Contains(lower, "limit") || strings.Contains(lower, "resets") {
+				return lastSess, preferredBackend, fmt.Errorf("agent: %s", line)
+			}
+		}
 	}
 
 	return lastSess, preferredBackend, lastErr

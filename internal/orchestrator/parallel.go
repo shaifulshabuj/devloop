@@ -76,10 +76,13 @@ func (p *ParallelDispatcher) DispatchOpts(ctx context.Context, plan *Plan, opts 
 				return
 			}
 
-			sess, err := p.runner.Spawn(ctx, step.Backend, agent.SpawnOpts{
+			sess, usedBackend, err := p.runner.SpawnWithFailover(ctx, step.Backend, agent.SpawnOpts{
 				InputText: step.Description,
 				OutputCh:  out,
 			})
+			if usedBackend != step.Backend {
+				step.Backend = usedBackend
+			}
 
 			var output string
 			if sess != nil && len(sess.Lines) > 0 {
