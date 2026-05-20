@@ -55,8 +55,13 @@ func main() {
 	root.AddCommand(resumableCmd())
 	root.AddCommand(skillsCmd())
 	root.AddCommand(personasCmd())
+	root.AddCommand(checkCmd())
+	root.AddCommand(updateCmd())
 	root.AddCommand(learnCmd())
 	root.AddCommand(sessionsCmd())
+
+	// Background version-check hint: once per 24h, non-blocking.
+	go backgroundVersionHint()
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
