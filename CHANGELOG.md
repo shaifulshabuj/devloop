@@ -5,6 +5,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [6.0.0] — 2026-05-20
+
+### 🚀 Major Release — DevLoop v6: Go-native AI Orchestration Platform
+
+Complete rewrite from Bash to Go, delivering a production-grade multi-agent
+orchestration engine with persistent sessions, a rich TUI, and pluggable AI backends.
+
+#### New Features
+
+- **4 AI backends**: `claude`, `copilot`, `opencode`, `pi` — auto-detected at startup,
+  all implementing a unified `Adapter` interface (ADR-003: pure subprocess, no HTTP/MCP)
+- **Persistent named sessions**: SQLite-backed session pool with deterministic UUID-v5 IDs,
+  warm/resume/cold lifecycle, and 30-minute idle pruning
+- **Orchestrator → Planner → Dispatcher pipeline**: `devloop run` routes through
+  `Orchestrator.Plan() → Dispatcher.Dispatch()` for multi-step planning, context
+  accumulation, and auto-commit
+- **Parallel task dispatch**: semaphore-bounded `sync.WaitGroup` dispatch with
+  index-ordered result collection; configurable `maxWorkers`
+- **TUI server with SSE streaming**: live agent output, cost tracking, plan view,
+  skill view, question relay, split-pane layout
+- **Context store**: JSONL append log with `bufio.NewWriterSize` writer held open
+  for lifetime; `Flush()` on task completion
+- **Auto-learning**: background watcher extracts lessons from completed tasks
+- **Config registry**: layered config with project + global + env overrides
+- **v5 bridge**: `V5Bridge` wraps the existing `devloop.sh` so v6 binary can drive
+  v5 commands during the transition period
+- **Full CLI surface**: `run`, `sessions list|show|reset|summarize`, `config`,
+  `backends`, `version`
+- **CI workflow**: `.github/workflows/ci.yml` — `go build`, `go test -race ./...`,
+  `golangci-lint` on every push/PR
+
+#### Architecture (see `docs/v6-design/`)
+- ADR-001: Go + Cobra CLI
+- ADR-002: SQLite with WAL mode, no ORM
+- ADR-003: agent subprocess streaming — no HTTP client, no MCP imports in `internal/`
+- ADR-004: Bubble Tea TUI (optional, lazy-loaded)
+
+#### Open-source Ready
+- No auth layer — any of the 4 backends works independently
+- `docs/CONTRIBUTING.md` with development guide
+- All 36 GitHub issues (#14–#49) implemented and closed
+
+---
+
 ## [5.1.6] — 2026-05-17
 
 ### Fixed — reviewer chokes on huge diffs / provider error replies
