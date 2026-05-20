@@ -18,5 +18,7 @@ cmd/devloop-tui/devloop-tui
 # Tool and editor artifacts
 .agents/
 .codex/
-.vscode/
+.vscode/*
+!.vscode/mcp.json
 .devloop/
+.claude/
