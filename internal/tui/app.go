@@ -97,11 +97,23 @@ func (m Model) Init() tea.Cmd {
 }
 
 // loadSkills reads skill files asynchronously and emits SkillsLoadedMsg.
+// Paths are resolved eagerly before the closure so they are always absolute,
+// regardless of any working-directory change that might happen later.
 func loadSkills() tea.Cmd {
+	projectDir, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	dirs := []string{
+		filepath.Join(home, ".devloop", "skills"),
+		filepath.Join(projectDir, ".devloop", "skills"),
+	}
 	return func() tea.Msg {
-		loader := agent.NewSkillLoader(".devloop/skills")
-		skills, _ := loader.Load()
-		return SkillsLoadedMsg{Skills: skills}
+		var all []agent.Skill
+		for _, dir := range dirs {
+			loader := agent.NewSkillLoader(dir)
+			skills, _ := loader.Load()
+			all = append(all, skills...)
+		}
+		return SkillsLoadedMsg{Skills: all}
 	}
 }
 
@@ -591,7 +603,11 @@ func (m *Model) toggleOverlay(which focusArea) tea.Cmd {
 
 // waitForLine returns a Cmd that reads one line from ch.
 // When ch is closed it returns taskResultMsg signalling completion.
+// A nil ch is a no-op (returns nil Cmd) as a safety guard.
 func waitForLine(ch <-chan string) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		line, ok := <-ch
 		if !ok {
