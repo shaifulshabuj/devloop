@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 // Ensure *CostView satisfies tea.Model at compile time.

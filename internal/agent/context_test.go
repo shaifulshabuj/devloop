@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/v6/internal/config"
 )
 
 // TestBuildSystemPromptEmpty verifies that an empty Config does not panic and

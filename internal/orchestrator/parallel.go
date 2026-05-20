@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 const defaultMaxWorkers = 4

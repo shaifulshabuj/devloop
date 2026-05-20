@@ -3,7 +3,7 @@ package backends_test
 import (
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/agent/backends"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent/backends"
 )
 
 func TestAll(t *testing.T) {

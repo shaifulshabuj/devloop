@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 // resumableStatuses are the task statuses eligible for resume.

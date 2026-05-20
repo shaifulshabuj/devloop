@@ -3,8 +3,8 @@ package orchestrator
 import (
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
-	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/config"
 )
 
 func TestClassify(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 // StepResult holds the output of one executed step.

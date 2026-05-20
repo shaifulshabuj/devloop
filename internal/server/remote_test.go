@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 func TestTriggerQueue_EnqueueDequeue(t *testing.T) {

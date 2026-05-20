@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
-	"github.com/shaifulshabuj/devloop/internal/orchestrator"
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/orchestrator"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 func newTestStore(t *testing.T) *storage.Store {

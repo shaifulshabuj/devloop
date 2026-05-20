@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // register sqlite3 driver
+	_ "modernc.org/sqlite" // register pure-Go sqlite driver (CGO-free, cross-platform)
 )
 
 //go:embed migrations/*.sql
@@ -54,7 +54,7 @@ type Store struct {
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode,
 // and applies any pending versioned migrations. Use ":memory:" for tests.
 func Open(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}

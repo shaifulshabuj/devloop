@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/shaifulshabuj/devloop/internal/git"
+	"github.com/shaifulshabuj/devloop/v6/internal/git"
 )
 
 // skipIfNoGit skips the test when git is not on PATH.

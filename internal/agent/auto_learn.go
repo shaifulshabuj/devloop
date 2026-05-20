@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 // AutoLearnConfig configures the auto-learning watcher.

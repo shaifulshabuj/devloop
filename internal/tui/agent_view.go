@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
 )
 
 // Ensure *AgentView satisfies tea.Model at compile time.

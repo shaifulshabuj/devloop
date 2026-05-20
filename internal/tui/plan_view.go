@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/shaifulshabuj/devloop/internal/orchestrator"
+	"github.com/shaifulshabuj/devloop/v6/internal/orchestrator"
 )
 
 // Ensure *PlanView satisfies tea.Model at compile time.

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/shaifulshabuj/devloop/internal/config"
+	"github.com/shaifulshabuj/devloop/v6/internal/config"
 )
 
 // BuildSystemPrompt constructs the system prompt to inject at agent startup.

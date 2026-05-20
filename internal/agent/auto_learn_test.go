@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shaifulshabuj/devloop/internal/storage"
+	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 )
 
 // mockStore implements learnStore for testing.

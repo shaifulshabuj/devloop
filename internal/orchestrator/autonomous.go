@@ -4,8 +4,8 @@ import (
 	"context"
 	"log"
 
-	"github.com/shaifulshabuj/devloop/internal/agent"
-	"github.com/shaifulshabuj/devloop/internal/git"
+	"github.com/shaifulshabuj/devloop/v6/internal/agent"
+	"github.com/shaifulshabuj/devloop/v6/internal/git"
 )
 
 // AutonomousRunner runs the full devloop pipeline without human review.
