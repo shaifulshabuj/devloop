@@ -89,21 +89,23 @@ _download "$CHECKSUM_URL" "$TMP_DIR/checksums.txt" || error "Download failed: $C
 
 # ── verify checksum ───────────────────────────────────────────────────────────
 info "Verifying checksum..."
-pushd "$TMP_DIR" > /dev/null
-# macOS ships a BSD sha256sum that lacks --check; prefer shasum (Perl) on Darwin
-if [[ "$(uname -s)" == "Darwin" ]] && command -v shasum &>/dev/null; then
-  grep "$ARCHIVE" checksums.txt | shasum -a 256 --check --status \
-    || error "Checksum verification failed — download may be corrupt or tampered"
-elif command -v sha256sum &>/dev/null; then
-  grep "$ARCHIVE" checksums.txt | sha256sum --check --status \
-    || error "Checksum verification failed — download may be corrupt or tampered"
-elif command -v shasum &>/dev/null; then
-  grep "$ARCHIVE" checksums.txt | shasum -a 256 --check --status \
-    || error "Checksum verification failed — download may be corrupt or tampered"
-else
-  echo "  ⚠ sha256sum/shasum not found — skipping checksum verification"
+# Portable hash comparison — avoids BSD sha256sum's missing --check flag
+_sha256() {
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum &>/dev/null; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo "SKIP"
+  fi
+}
+expected=$(grep "$ARCHIVE" "$TMP_DIR/checksums.txt" | awk '{print $1}')
+actual=$(_sha256 "$TMP_DIR/$ARCHIVE")
+if [[ "$actual" == "SKIP" ]]; then
+  echo "  ⚠ No sha256 tool found — skipping checksum verification"
+elif [[ "$expected" != "$actual" ]]; then
+  error "Checksum verification failed — download may be corrupt or tampered"
 fi
-popd > /dev/null
 success "Checksum OK"
 
 # ── extract ───────────────────────────────────────────────────────────────────
