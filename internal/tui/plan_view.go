@@ -51,6 +51,12 @@ func NewPlanView(plan *orchestrator.Plan) *PlanView {
 	return &PlanView{plan: plan}
 }
 
+// SetSize sets the rendering dimensions.
+func (p *PlanView) SetSize(w, h int) {
+	p.width = w
+	p.height = h
+}
+
 // Init implements tea.Model.
 func (p *PlanView) Init() tea.Cmd { return nil }
 

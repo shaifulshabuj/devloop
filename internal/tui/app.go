@@ -31,6 +31,7 @@ type focusArea int
 const (
 	focusInput focusArea = iota
 	focusViewport
+	focusPlanReview
 )
 
 // Model is the root Bubble Tea application model.
@@ -42,6 +43,7 @@ type Model struct {
 	sidebar      Sidebar
 	output       Output
 	input        Input
+	planView     *PlanView
 	orch         *orchestrator.Orchestrator
 	disp         *orchestrator.Dispatcher
 	outputCh     <-chan string
@@ -72,8 +74,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.setSize(msg.Width, msg.Height)
 		m.ready = true
+		if m.planView != nil {
+			m.planView.SetSize(msg.Width, msg.Height-statusBarHeight-inputBarHeight)
+		}
 		// Focus input on first resize so the cursor blink is active.
-		return m, m.input.Focus()
+		if m.focus != focusPlanReview {
+			return m, m.input.Focus()
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.Type {
@@ -81,39 +89,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyTab:
-			cmd := m.toggleFocus()
-			return m, cmd
+			if m.focus != focusPlanReview {
+				cmd := m.toggleFocus()
+				return m, cmd
+			}
 		}
 
 	case SubmitMsg:
-		if m.running {
-			// Ignore new submissions while a task is in flight.
+		if m.running || m.focus == focusPlanReview {
 			return m, nil
 		}
 		text := msg.Text
+		m.output.AppendLine("Planning: " + text)
+		orch := m.orch
+		return m, func() tea.Msg {
+			plan, err := orch.Plan(context.Background(), text)
+			if err != nil {
+				return taskResultMsg{err: err}
+			}
+			return PlanReviewMsg{Plan: plan}
+		}
+
+	case PlanReviewMsg:
+		pv := NewPlanView(msg.Plan)
+		pv.SetSize(m.width, m.height-statusBarHeight-inputBarHeight)
+		m.planView = pv
+		m.focus = focusPlanReview
+		m.input.Blur()
+		return m, nil
+
+	case PlanApprovedMsg:
+		m.planView = nil
+		m.focus = focusInput
+		m.running = true
+		m.runningTitle = msg.Plan.Title
+		m.sidebar.SetRunningTask(msg.Plan.Title)
+		m.output.AppendLine("▶ Dispatching: " + msg.Plan.Title)
+
 		ch := make(chan string, 256)
 		m.outputCh = ch
-		m.running = true
-		m.runningTitle = text
-		m.sidebar.SetRunningTask(text)
-		m.output.AppendLine("▶ " + text)
-
-		orch := m.orch
 		disp := m.disp
+		plan := msg.Plan
 		go func() {
 			defer close(ch)
-			ctx := context.Background()
-
-			plan, err := orch.Plan(ctx, text)
-			if err != nil {
-				ch <- "Error planning: " + err.Error()
-				return
-			}
 			for _, step := range plan.Steps {
 				ch <- fmt.Sprintf("[%d/%d] %s", step.Number, len(plan.Steps), step.Description)
 			}
-
-			result, err := disp.Dispatch(ctx, plan)
+			result, err := disp.Dispatch(context.Background(), plan)
 			if err != nil {
 				ch <- "Error: " + err.Error()
 			}
@@ -130,6 +152,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}()
 		return m, waitForLine(ch)
+
+	case PlanRejectedMsg:
+		m.planView = nil
+		m.focus = focusInput
+		m.output.AppendLine("Task cancelled.")
+		return m, m.input.Focus()
 
 	case OutputLineMsg:
 		m.output.AppendLine(msg.Line)
@@ -150,6 +178,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Delegate remaining messages to the focused component.
+	if m.focus == focusPlanReview && m.planView != nil {
+		var cmd tea.Cmd
+		_, cmd = m.planView.Update(msg)
+		return m, cmd
+	}
 	if m.focus == focusInput {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
@@ -169,16 +202,24 @@ func (m Model) View() string {
 	}
 
 	statusText := "  devloop v6"
-	if m.running {
+	switch {
+	case m.focus == focusPlanReview:
+		statusText = "  Plan Review  [Enter approve  q cancel]"
+	case m.running:
 		statusText = "  ● " + m.runningTitle
 	}
 	statusBar := statusBarStyle.Width(m.width).Render(statusText)
 
-	middle := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		m.sidebar.View(),
-		m.output.View(),
-	)
+	var middle string
+	if m.focus == focusPlanReview && m.planView != nil {
+		middle = m.planView.View()
+	} else {
+		middle = lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			m.sidebar.View(),
+			m.output.View(),
+		)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		statusBar,
