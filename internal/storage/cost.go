@@ -25,7 +25,29 @@ type TaskCost struct {
 	EstimatedUSD float64
 }
 
-// EstimateCost estimates token usage from context entries.
+// ComputeAllCosts loads up to limit tasks from the store and estimates cost for each.
+// The model string is applied to every task; pass "" to fall back to the default pricing.
+func ComputeAllCosts(store *Store, model string, limit int) ([]TaskCost, error) {
+	tasks, err := store.ListTasks(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	if model == "" {
+		model = "claude-sonnet-4-5"
+	}
+
+	costs := make([]TaskCost, 0, len(tasks))
+	for _, t := range tasks {
+		entries, err := store.GetContext(t.ID)
+		if err != nil {
+			continue
+		}
+		tc := EstimateCost(t.ID, model, entries)
+		costs = append(costs, tc)
+	}
+	return costs, nil
+}
 // Heuristic: 1 token ≈ 4 characters.
 // user/system role entries count as input tokens; assistant role counts as output tokens.
 // Looks up pricing in KnownPricing; defaults to Sonnet pricing if the model is unknown.
