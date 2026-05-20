@@ -92,6 +92,106 @@ func (r *Runner) SetBackendArgs(id string, args []string) {
 	}
 }
 
+// limitPatterns are substrings (lowercase) that indicate a backend has hit a
+// usage/session/rate limit and a failover to the next backend should be tried.
+var limitPatterns = []string{
+	"session limit",
+	"rate limit",
+	"hit your limit",
+	"hit limit",
+	"usage limit",
+	"you've hit",
+	"you have hit",
+	"quota exceeded",
+	"too many requests",
+	"resets ",
+}
+
+// failoverOrder defines the priority order for automatic backend failover.
+// When a backend hits a limit, the next available backend in this list is tried.
+var failoverOrder = []string{"claude", "copilot", "opencode", "pi"}
+
+// IsLimitError reports whether the session output or error message indicates
+// the backend has hit a rate/session limit and a failover should be attempted.
+func IsLimitError(sess *Session, err error) bool {
+	if err == nil {
+		return false
+	}
+	check := func(s string) bool {
+		lower := strings.ToLower(s)
+		for _, p := range limitPatterns {
+			if strings.Contains(lower, p) {
+				return true
+			}
+		}
+		return false
+	}
+	if check(err.Error()) {
+		return true
+	}
+	if sess != nil {
+		for _, line := range sess.Lines {
+			if check(line) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SpawnWithFailover tries the preferred backend first, then automatically
+// falls back through failoverOrder when a limit error is detected.
+// Returns the session, the backend that actually ran, and any error.
+func (r *Runner) SpawnWithFailover(ctx context.Context, preferredBackend string, opts SpawnOpts) (*Session, string, error) {
+	// Build ordered candidate list: preferred backend first, then failover order.
+	seen := map[string]bool{}
+	var order []string
+	for _, id := range append([]string{preferredBackend}, failoverOrder...) {
+		if !seen[id] {
+			seen[id] = true
+			order = append(order, id)
+		}
+	}
+
+	var lastSess *Session
+	var lastErr error
+	anyTried := false
+
+	for _, id := range order {
+		b, ok := r.backends[id]
+		if !ok || !b.Found {
+			continue
+		}
+		anyTried = true
+		if id != preferredBackend {
+			log.Printf("agent: failover — trying backend %q (previous hit limit)", id)
+		}
+
+		sess, err := r.Spawn(ctx, id, opts)
+		if err == nil {
+			return sess, id, nil
+		}
+
+		lastSess, lastErr = sess, err
+
+		if ctx.Err() != nil {
+			return sess, id, ctx.Err()
+		}
+		if !IsLimitError(sess, err) {
+			// Real error (not a limit) — stop immediately, don't try other backends.
+			return sess, id, err
+		}
+		log.Printf("agent: backend %q hit limit, failing over to next backend", id)
+	}
+
+	if !anyTried {
+		return nil, preferredBackend, fmt.Errorf("agent: no available backend found in [%s]",
+			strings.Join(order, ", "))
+	}
+
+	return lastSess, preferredBackend, lastErr
+}
+
 // Spawn launches the named backend as a subprocess and streams its stdout.
 //
 // Behaviour:

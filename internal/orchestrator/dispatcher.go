@@ -61,8 +61,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *Plan) (*DispatchResult,
 			input += "\n\nContext:\n" + strings.Join(accumulated, "\n")
 		}
 
-		// Spawn the backend for this step.
-		sess, err := d.runner.Spawn(ctx, step.Backend, agent.SpawnOpts{InputText: input})
+		// Spawn the backend for this step, with automatic failover on limit errors.
+		sess, usedBackend, err := d.runner.SpawnWithFailover(ctx, step.Backend, agent.SpawnOpts{InputText: input})
+		if usedBackend != step.Backend {
+			step.Backend = usedBackend // record which backend actually ran
+		}
 
 		// Collect output lines from the session.
 		var output string
