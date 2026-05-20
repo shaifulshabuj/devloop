@@ -1,12 +1,308 @@
 # DevLoop — End-to-End Usage Guide
 
-Five complete walkthroughs from zero to approved implementation.
+DevLoop ships as **two co-existing tracks**. Pick the one that fits your workflow:
+
+| | **v5 — devloop.sh** | **v6 — Go binary** |
+|---|---|---|
+| What it is | 380KB+ Bash script, battle-tested pipeline | Standalone Go binary, SQLite persistence |
+| Install | `devloop update` or `curl …/devloop.sh` | `curl …/install.sh \| bash` or `go install` |
+| Config | `devloop.config.sh` (shell vars) | `.devloop/config.toml` (TOML) |
+| AI backends | Claude + Copilot (configurable) | claude · copilot · opencode · pi (all 4 auto-detected) |
+| Persistence | Files in `.devloop/specs/` | SQLite `~/.devloop/devloop.db` |
+| Session reuse | Cold-start each run | Session pool — warm sessions reused across tasks |
+| Best for | Remote control pipeline, daemon mode, approval gates | Batch task execution, parallel dispatch, session management |
+
+> **Not sure?** If you use `devloop daemon` + phone remote control + approval gates → **v5**.
+> If you want `devloop run "task"` with auto-backend selection + warm session reuse → **v6**.
 
 ---
 
-## Scenario 1 — New Project, Default Setup (Claude + Copilot)
+## v6 Quick Start (Go binary)
 
-The most common starting point. Claude designs specs and reviews code; Copilot implements.
+### Install
+
+```bash
+# Option 1 — curl installer (detects OS/arch, SHA256 verified):
+curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/install.sh | bash
+
+# Option 2 — go install (requires Go 1.26+):
+go install github.com/shaifulshabuj/devloop/v6/cmd/devloop@latest
+
+# Option 3 — build from source:
+git clone https://github.com/shaifulshabuj/devloop.git
+cd devloop && make install    # CGO_ENABLED=0, installs to /usr/local/bin
+```
+
+Verify:
+```bash
+devloop version    # → devloop v6.0.2
+```
+
+### Initialize a project
+
+```bash
+cd ~/projects/my-api
+devloop init
+```
+
+Output:
+```
+Initialized DevLoop project: my-api
+```
+
+Creates `.devloop/config.toml`:
+```toml
+[project]
+name = "my-api"
+description = ""
+stack = ""
+conventions = ""
+
+[agents]
+default_backend = "claude"
+
+[models]
+orchestrator = "claude-opus-4-5"
+worker       = "claude-sonnet-4-5"
+reviewer     = "claude-sonnet-4-5"
+
+[storage]
+db_path      = "~/.devloop/devloop.db"
+sessions_dir = "~/.devloop/sessions"
+keep_days    = 30
+```
+
+Also registers the project in `~/.devloop/projects.toml` — visible via `devloop projects`.
+
+### List registered projects
+
+```bash
+devloop projects
+# NAME       PATH                  LAST USED
+# my-api     ~/projects/my-api     2026-05-20 21:00:00
+```
+
+### Preview a plan without running it
+
+```bash
+devloop plan "add GET /orders endpoint with date range filter"
+```
+
+Output:
+```
+Plan: add GET /orders endpoint with date range filter
+Estimated time: 10m0s
+Steps (2):
+  1. add GET /orders endpoint with date range filter
+  2. with date range filter
+```
+
+### Run a task end-to-end
+
+```bash
+devloop run "add GET /orders endpoint with date range filter"
+```
+
+DevLoop:
+1. Classifies the task (complex if >5 words or contains `and/then/also`)
+2. Splits into steps, persists to SQLite
+3. Routes each step to the best available backend + model
+4. Spawns the agent subprocess, streams output
+5. Auto-commits via `git add -A && git commit -m "devloop: task title [auto]"`
+6. Extracts lessons to `.devloop/lessons.md`
+
+### Check task history
+
+```bash
+devloop status
+# ID        STATUS     CREATED        TITLE
+# a3f8c21b  completed  2026-05-20…   add GET /orders endpoint with date range filter
+```
+
+### Resume a failed/interrupted task
+
+```bash
+devloop resumable           # list tasks that can be resumed
+devloop resume <task-id>    # re-run pending/failed steps only
+```
+
+### Manage the session pool
+
+```bash
+devloop sessions            # alias for: devloop sessions list
+devloop sessions list
+# ID        ROLE          BACKEND  STATUS  USED
+# a1b2c3d4  orchestrator  claude   idle    2026-05-20 20:55
+
+devloop sessions show <session-id>   # full details + context summary
+devloop sessions reset <session-id>  # remove from pool + DB
+devloop sessions summarize <id>      # print context summary
+```
+
+### Extract lessons from a completed task
+
+```bash
+devloop learn <task-id>
+# Extracted 3 lesson(s) from task "add GET /orders endpoint with date range filter".
+# → appended to .devloop/lessons.md
+```
+
+### Inspect config and system prompt
+
+```bash
+devloop config show     # dump merged global + project config as TOML
+devloop context show    # print the system prompt injected at agent startup
+```
+
+---
+
+## v6 Scenario A — 4-Backend Auto-Detection
+
+v6 probes your `$PATH` at startup for all four built-in backends and uses whichever are available.
+
+### How detection works
+
+```bash
+devloop run "implement feature"
+# agent: backend "claude" available at /usr/local/bin/claude
+# agent: backend "copilot" available at /usr/local/bin/copilot
+# agent: backend "opencode" not available in PATH
+# agent: backend "pi" not available in PATH
+```
+
+### Override per-run with `--backend`
+
+```bash
+devloop run --backend copilot "add unit tests for the orders endpoint"
+devloop run --backend opencode "fix typo in README"
+```
+
+### Set a default in config
+
+```toml
+# .devloop/config.toml
+[agents]
+default_backend = "copilot"   # or claude / opencode / pi
+```
+
+### Pin models per role
+
+```toml
+[models]
+orchestrator = "claude-opus-4-5"     # complex planning tasks
+worker       = "claude-sonnet-4-5"   # implementation steps
+reviewer     = "claude-sonnet-4-5"   # review + audit steps
+```
+
+### Task-type routing
+
+The Router classifies each step by keyword and selects the most appropriate backend:
+
+| Step contains… | Task type | Default model tier |
+|---|---|---|
+| `test`, `spec`, `coverage` | Test | worker |
+| `review`, `analyse`, `check`, `audit` | Review | reviewer |
+| `document`, `readme`, `comment` | Doc | worker |
+| `implement`, `add`, `create`, `fix`, `update` | Code | worker |
+| _(anything else)_ | General | worker |
+
+### Install optional backends
+
+```bash
+# OpenCode:
+npm install -g opencode-ai
+
+# Pi:
+# (follow https://pi.ai/cli for your platform)
+```
+
+---
+
+## v6 Scenario B — Session Pool & Task Resume
+
+v6 maintains a **session pool** so warm agent processes are reused across tasks, reducing cold-start overhead.
+
+### How the pool works
+
+Each project+role pair (e.g. `my-api:worker`) gets a deterministic UUID. When a task runs:
+
+1. `SessionPool.Get("my-api", "worker")` → returns existing session or creates new one
+2. Context is appended via `Load()`, message count incremented
+3. After the step: `Flush()` — session stays alive (status: `idle`)
+4. Idle sessions past **30 minutes** are pruned by a background goroutine (`StartIdlePruner`)
+
+Session states:
+```
+idle → warm (first Spawn, PID recorded)
+warm → idle (Flush after step)
+idle → archived (PruneIdle, idle > 30m)
+warm → dead (process exits, IsAlive() = false)
+```
+
+### List and inspect sessions
+
+```bash
+devloop sessions
+# ID        ROLE     BACKEND  STATUS  USED
+# a1b2c3d4  worker   claude   warm    2026-05-20 21:00
+# b5c6d7e8  reviewer claude   idle    2026-05-20 20:45
+```
+
+```bash
+devloop sessions show a1b2c3d4
+# ID:          a1b2c3d4-...
+# Project:     my-api
+# Role:        worker
+# Backend:     claude
+# Status:      warm
+# PID:         12345
+# Messages:    7
+# Last used:   2026-05-20T21:00:00+09:00
+# Created:     2026-05-20T19:30:00+09:00
+# Summary:     [context summary appended here]
+```
+
+### Reset a stuck or stale session
+
+```bash
+devloop sessions reset a1b2c3d4
+# Session a1b2c3d4 reset.
+```
+
+### Resume an interrupted task
+
+Tasks persist to SQLite immediately when created. If a run is interrupted (Ctrl+C, crash, rate limit), resume it:
+
+```bash
+devloop resumable
+# ID        STATUS   TITLE
+# a3f8c21b  running  add GET /orders endpoint with date range filter
+
+devloop resume a3f8c21b
+# Step 1 [ok]: add GET /orders endpoint with date range filter
+# Step 2 [ok]: with date range filter
+#
+# Task a3f8c21b resumed successfully.
+```
+
+Only **pending and failed steps** are re-run — completed steps are skipped.
+
+### Parallel dispatch for multi-step tasks
+
+Tasks with independent steps are dispatched to up to **4 concurrent workers**:
+
+```bash
+devloop run "add login endpoint and add logout endpoint and add profile endpoint"
+# Plan: ... (3 steps)
+# → 3 goroutines, each spawning an agent subprocess in parallel
+# → results collected in step order, first error cancels remaining
+```
+
+---
+
+## v5 Scenario 1 — New Project, Default Setup (Claude + Copilot)
+
+The most common v5 starting point. Claude designs specs and reviews code; Copilot implements.
 
 ### Prerequisites
 ```bash
@@ -15,9 +311,12 @@ curl -fsSL https://claude.ai/install.sh | bash          # Claude Code CLI
 npm install -g @github/copilot                           # Copilot CLI
 brew install git                                         # Git
 
-# Install DevLoop globally
-curl -fsSL https://raw.githubusercontent.com/your-org/devloop/main/devloop.sh \
+# Install DevLoop v5 (Bash script):
+curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/devloop.sh \
   -o /tmp/devloop && chmod +x /tmp/devloop && sudo mv /tmp/devloop /usr/local/bin/devloop
+
+# OR install DevLoop v6 (Go binary):
+curl -fsSL https://raw.githubusercontent.com/shaifulshabuj/devloop/main/install.sh | bash
 ```
 
 ### Step 1 — Initialize the project
@@ -113,7 +412,7 @@ devloop clean --days 30     # remove approved specs older than 30 days
 
 ---
 
-## Scenario 2 — Existing Project, Mobile-First (Remote Control via Phone)
+## v5 Scenario 2 — Existing Project, Mobile-First (Remote Control via Phone)
 
 Work on an existing codebase entirely from your phone while your Mac runs headlessly.
 
@@ -200,7 +499,7 @@ devloop logs sessions        # session start/end history
 
 ---
 
-## Scenario 3 — All-Claude Mode (No Copilot Required)
+## v5 Scenario 3 — All-Claude Mode (No Copilot Required)
 
 Use Claude as both the main (architect/reviewer) and worker (implementer). Ideal when you don't have Copilot access or want a uniform Claude-only workflow.
 
@@ -250,7 +549,7 @@ You can still use `devloop start` or `devloop daemon` — the orchestrator (Clau
 
 ---
 
-## Scenario 4 — Copilot Main + Claude/OpenCode Workers
+## v5 Scenario 4 — Copilot Main + Claude/OpenCode Workers
 
 Swap the default roles: Copilot orchestrates and designs specs, while Claude or OpenCode implements. Useful when your Claude usage is limited but Copilot subscription has headroom.
 
@@ -310,7 +609,7 @@ devloop review  # Claude reviews OpenCode's output
 
 ---
 
-## Scenario 5 — Smart Provider Failover (Automatic Limit Handling)
+## v5 Scenario 5 — Smart Provider Failover (Automatic Limit Handling)
 
 DevLoop automatically switches providers when a rate limit is hit and restores the original provider the moment it's available again — without stopping mid-task.
 
@@ -422,7 +721,7 @@ DEVLOOP_FAILOVER_ENABLED="false"
 
 ---
 
-## Scenario 6 — Smart Permissions (No More Permission Walls)
+## v5 Scenario 6 — Smart Permissions (No More Permission Walls)
 
 DevLoop installs a permission gate that prevents Claude's interactive permission dialogs from blocking the automated pipeline. Copilot worker calls are configured with `--allow-all-tools` so they run without prompting.
 
@@ -513,6 +812,45 @@ Workers (non-interactive) have separate permission control:
 If you see `"Permission denied and could not request permission from user"` from a Copilot worker, run `devloop hooks` to ensure the Copilot flags are in place. Then re-run `devloop work`.
 
 ---
+
+## Quick Reference — v6 Commands (Go binary)
+
+```bash
+# Setup
+devloop init [--name NAME]           # create .devloop/config.toml + register project
+devloop projects                     # list all registered projects
+devloop config show                  # dump merged (global + project) config as TOML
+devloop context show                 # print agent system prompt
+
+# Task execution
+devloop plan "feature desc"          # dry-run: generate plan without running
+devloop run "feature desc"           # Plan → Route → Dispatch → auto-commit
+devloop run --backend claude "…"     # force a specific backend
+devloop status                       # list last 10 tasks (from SQLite)
+devloop resumable                    # list tasks that can be resumed
+devloop resume <task-id>             # re-run pending/failed steps only
+
+# Session pool
+devloop sessions                     # alias: devloop sessions list
+devloop sessions list                # ID · role · backend · status · used
+devloop sessions show <id>           # full details + context summary
+devloop sessions reset <id>          # remove session from pool + DB
+devloop sessions summarize <id>      # print context summary only
+
+# Knowledge
+devloop skills                       # list .devloop/skills/*.md
+devloop skills show <name>           # print skill content
+devloop personas                     # list registered agent personas
+devloop learn <task-id>              # extract lessons → .devloop/lessons.md
+
+# Utility
+devloop version                      # print binary version
+devloop start [--no-tui]             # launch TUI (or headless with --no-tui)
+```
+
+---
+
+## Quick Reference — v5 Commands (devloop.sh)
 
 ```bash
 # Project setup
