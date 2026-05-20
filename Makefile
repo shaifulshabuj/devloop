@@ -4,7 +4,7 @@
 # ── v6 targets ─────────────────────────────────────────────────────────────
 
 BINARY := devloop
-VERSION := v6.1.1
+VERSION := v6.1.2
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 build:
