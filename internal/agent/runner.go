@@ -85,6 +85,16 @@ func (r *Runner) AvailableBackends() []*Backend {
 	return out
 }
 
+// BackendBinary returns the binary name and args for the named backend.
+// ok is false when the backend is not registered or not found in PATH.
+func (r *Runner) BackendBinary(id string) (binary string, args []string, ok bool) {
+	b, exists := r.backends[id]
+	if !exists || !b.Found {
+		return "", nil, false
+	}
+	return b.Binary, b.Args, true
+}
+
 // SetBackendArgs overrides the default argument list for a named backend.
 func (r *Runner) SetBackendArgs(id string, args []string) {
 	if b, ok := r.backends[id]; ok {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,13 +21,13 @@ const (
 	// inputBarHeight accounts for the top border line (1) + the input line (1).
 	inputBarHeight  = 2
 	sidebarFraction = 0.25
+	maxVisiblePanes = 4 // max PTY panes shown side-by-side
 )
 
 var statusBarStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#1a1a2e")).
 	Foreground(lipgloss.Color("#ffffff")).
 	Bold(true)
-
 
 type focusArea int
 
@@ -40,6 +39,7 @@ const (
 	focusSkills
 	focusPersonas
 	focusCost
+	focusPane // keyboard focus is inside a PTY pane
 )
 
 // Model is the root Bubble Tea application model.
@@ -60,30 +60,36 @@ type Model struct {
 	costView     *CostView
 	showCost     bool
 	splitActive  bool
-	splitPanes   []string // per-step descriptions / outputs
-	splitFocIdx  int      // focused pane index for left/right nav
+	splitPanes   []string // legacy parallel step text buffers (kept for SplitViewMsg compat)
+	splitFocIdx  int
 	orch         *orchestrator.Orchestrator
 	disp         *orchestrator.Dispatcher
 	store        *storage.Store
 	runner       *agent.Runner
 	outputCh     <-chan string
-	taggedOutputCh <-chan PaneOutputMsg // parallel dispatch: per-pane live lines
-	taggedErrCh    <-chan error         // receives dispatch error when taggedOutputCh closes
 	running      bool
 	runningTitle string
+
+	// PTY sub-panel management.
+	ptyPanes    []*PtyPane   // all open PTY panes
+	paneOffset  int          // index of first visible pane (for > maxVisiblePanes)
+	focusPaneID int          // ID of focused pane; -1 means main panel
+	nextPaneID  int          // monotonic ID counter
+	program     *tea.Program // back-reference so goroutines can send msgs
 }
 
 // New creates a root Model for the given project name.
 func New(projectName string, store *storage.Store, runner *agent.Runner) Model {
 	return Model{
-		sidebar: NewSidebar(projectName),
-		output:  NewOutput(),
-		input:   NewInput(),
-		focus:   focusInput,
-		orch:    orchestrator.New(store, runner),
-		disp:    orchestrator.NewDispatcher(store, runner),
-		store:   store,
-		runner:  runner,
+		sidebar:     NewSidebar(projectName),
+		output:      NewOutput(),
+		input:       NewInput(),
+		focus:       focusInput,
+		orch:        orchestrator.New(store, runner),
+		disp:        orchestrator.NewDispatcher(store, runner),
+		store:       store,
+		runner:      runner,
+		focusPaneID: -1,
 	}
 }
 
@@ -172,15 +178,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.costView != nil {
 			m.costView.SetSize(msg.Width, contentH)
 		}
-		// Focus input on first resize unless an overlay is active.
+		// Resize PTY panes.
+		m.resizePtyPanes()
+		// Focus input on first resize unless an overlay or pane is active.
 		if m.focus == focusInput || m.focus == focusViewport || m.focus == focusSidebar {
 			return m, m.input.Focus()
 		}
 		return m, nil
 
+	case PanePtyLineMsg:
+		// Update the viewport of the matching pane.
+		for _, p := range m.ptyPanes {
+			if p.ID == msg.PaneID {
+				p.RefreshViewport()
+				break
+			}
+		}
+		return m, nil
+
+	case PanePtyExitedMsg:
+		// Mark the pane as exited; keep it visible so the user can read output.
+		for _, p := range m.ptyPanes {
+			if p.ID == msg.PaneID {
+				// exited flag already set inside readLoop
+				break
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		// When a PTY pane has focus, forward almost all keys to it.
+		if m.focus == focusPane && m.focusPaneID >= 0 {
+			return m.handlePaneFocusedKey(msg)
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			m.closeAllPanes()
 			return m, tea.Quit
 
 		case tea.KeyEsc:
@@ -197,7 +231,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus != focusPlanReview &&
 				m.focus != focusSkills &&
 				m.focus != focusPersonas &&
-				m.focus != focusCost {
+				m.focus != focusCost &&
+				m.focus != focusPane {
 				return m, m.cycleFocus()
 			}
 		case tea.KeyUp, tea.KeyDown:
@@ -221,9 +256,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.splitFocIdx--
 				return m, nil
 			}
+			// Scroll pane strip left.
+			if len(m.ptyPanes) > 0 && m.paneOffset > 0 {
+				m.paneOffset--
+				return m, nil
+			}
 		case tea.KeyRight:
 			if m.splitActive && m.splitFocIdx < len(m.splitPanes)-1 {
 				m.splitFocIdx++
+				return m, nil
+			}
+			// Scroll pane strip right.
+			if len(m.ptyPanes) > 0 && m.paneOffset+maxVisiblePanes < len(m.ptyPanes) {
+				m.paneOffset++
 				return m, nil
 			}
 		}
@@ -240,6 +285,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "$":
 			if m.focus != focusPlanReview && m.focus != focusInput {
 				return m, m.toggleOverlay(focusCost)
+			}
+		// F1-F4: focus visible pane 1-4.
+		case "f1", "1":
+			if m.focus != focusInput && m.focus != focusPlanReview {
+				return m, m.focusPane(0)
+			}
+		case "f2", "2":
+			if m.focus != focusInput && m.focus != focusPlanReview {
+				return m, m.focusPane(1)
+			}
+		case "f3", "3":
+			if m.focus != focusInput && m.focus != focusPlanReview {
+				return m, m.focusPane(2)
+			}
+		case "f4", "4":
+			if m.focus != focusInput && m.focus != focusPlanReview {
+				return m, m.focusPane(3)
+			}
+		case "0":
+			// Return focus to main panel.
+			if m.focus == focusPane {
+				m.focus = focusInput
+				m.focusPaneID = -1
+				return m, m.input.Focus()
+			}
+		case "ctrl+n":
+			// Open a new pane with the default backend (claude).
+			if m.runner != nil {
+				return m, m.openPane("claude", "claude", "")
+			}
+		case "ctrl+w":
+			// Close the focused pane.
+			if m.focus == focusPane {
+				return m, m.closeFocusedPane()
 			}
 		}
 
@@ -276,55 +355,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		plan := msg.Plan
 
-		if len(plan.Steps) > 1 && m.runner != nil {
-			// Parallel dispatch — show split pane view with live per-step streaming.
-			m.splitActive = true
-			m.splitFocIdx = 0
-			m.splitPanes = make([]string, len(plan.Steps))
-			m.outputCh = nil // not used for parallel dispatch
-
-			// Tagged channel multiplexes all per-step lines with their pane index.
-			taggedCh := make(chan PaneOutputMsg, 512)
-			errCh := make(chan error, 1)
-			m.taggedOutputCh = taggedCh
-			m.taggedErrCh = errCh
-
-			// Per-step bidirectional channels; send-only ends passed to dispatcher.
-			stepChans := make([]chan string, len(plan.Steps))
-			stepSendChans := make([]chan<- string, len(plan.Steps))
-			for i := range stepChans {
-				stepChans[i] = make(chan string, 256)
-				stepSendChans[i] = stepChans[i]
+		// Open a PTY pane for each unique backend in the plan.
+		// Multiple steps with the same backend share one pane.
+		var openCmds []tea.Cmd
+		seenBackend := map[string]bool{}
+		for _, step := range plan.Steps {
+			b := step.Backend
+			if seenBackend[b] {
+				continue
 			}
-
-			// Forwarder goroutines relay each step channel into the tagged channel.
-			var fwdWg sync.WaitGroup
-			fwdWg.Add(len(stepChans))
-			for i, sc := range stepChans {
-				i, sc := i, sc
-				go func() {
-					defer fwdWg.Done()
-					for line := range sc {
-						taggedCh <- PaneOutputMsg{PaneIndex: i, Line: line}
-					}
-				}()
+			seenBackend[b] = true
+			label := fmt.Sprintf("%s:%s", b, "devloop")
+			cmd := m.openPane(b, label, step.Description)
+			if cmd != nil {
+				openCmds = append(openCmds, cmd)
 			}
-
-			parDisp := orchestrator.NewParallelDispatcher(m.store, m.runner, 0)
-			go func() {
-				// DispatchOpts closes each stepSendChans[i] when its step finishes.
-				_, err := parDisp.DispatchOpts(context.Background(), plan, orchestrator.ParallelOpts{
-					StepOutput: stepSendChans,
-				})
-				// Drain forwarders then signal the TUI that dispatch is complete.
-				fwdWg.Wait()
-				close(taggedCh)
-				errCh <- err
-			}()
-			return m, tea.Batch(waitForPaneOutput(taggedCh, errCh), m.input.Focus())
 		}
 
-		// Sequential dispatch — stream output into the main viewport.
+		// Also run sequential dispatch to feed steps into the orchestrator.
 		ch := make(chan string, 256)
 		m.outputCh = ch
 		disp := m.disp
@@ -338,7 +386,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ch <- "Error: " + err.Error()
 			}
 		}()
-		return m, tea.Batch(waitForLine(ch), m.input.Focus())
+		openCmds = append(openCmds, waitForLine(ch), m.input.Focus())
+		return m, tea.Batch(openCmds...)
 
 	case PlanRejectedMsg:
 		m.planView = nil
@@ -357,8 +406,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.runningTitle = ""
 		m.outputCh = nil
-		m.taggedOutputCh = nil
-		m.taggedErrCh = nil
 		m.splitActive = false
 		m.splitPanes = nil
 		m.sidebar.SetRunningTask("")
@@ -411,7 +458,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mirror to main viewport so output is preserved after split clears.
 			m.output.AppendLine(fmt.Sprintf("[%d] %s", msg.PaneIndex+1, msg.Line))
 		}
-		return m, waitForPaneOutput(m.taggedOutputCh, m.taggedErrCh)
+		return m, nil
 	}
 
 	// Delegate remaining messages to the focused component.
@@ -460,7 +507,7 @@ func (m Model) View() string {
 		return "Initializing…"
 	}
 
-	statusText := "  devloop v6  [s skills  p personas  $ cost  Tab focus]"
+	statusText := "  devloop v6  [Ctrl+N new pane  1-4 focus pane  0 main  Ctrl+W close  Tab focus]"
 	switch {
 	case m.focus == focusPlanReview:
 		statusText = "  Plan Review  [Enter approve  q cancel]"
@@ -472,6 +519,9 @@ func (m Model) View() string {
 		statusText = "  Cost  [↑/↓ navigate  $/Esc close]"
 	case m.focus == focusSidebar:
 		statusText = "  Projects  [↑/↓ navigate  Enter switch  Tab next]"
+	case m.focus == focusPane:
+		statusText = fmt.Sprintf("  Agent pane  [0 = main  Ctrl+W close  ←/→ scroll panes (%d/%d)]",
+			m.paneOffset+1, len(m.ptyPanes))
 	case m.running:
 		statusText = "  ● " + m.runningTitle
 	}
@@ -487,14 +537,8 @@ func (m Model) View() string {
 		middle = m.personaView.View()
 	case m.showCost && m.costView != nil:
 		middle = m.costView.View()
-	case m.splitActive && len(m.splitPanes) > 0:
-		middle = m.renderSplitPanes()
 	default:
-		middle = lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			m.sidebar.View(),
-			m.output.View(),
-		)
+		middle = m.renderMainWithPanes()
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -504,30 +548,72 @@ func (m Model) View() string {
 	)
 }
 
-// renderSplitPanes renders parallel step panes side by side.
-func (m Model) renderSplitPanes() string {
-	n := len(m.splitPanes)
-	if n == 0 {
-		return m.output.View()
-	}
+// renderMainWithPanes renders the main output panel with PTY panes on the right.
+// Layout: main panel (left) + up to maxVisiblePanes panes (right).
+func (m Model) renderMainWithPanes() string {
 	contentH := m.height - statusBarHeight - inputBarHeight
-	paneW := m.width / n
-
-	panes := make([]string, n)
-	for i, content := range m.splitPanes {
-		header := fmt.Sprintf("▸ Step %d", i+1)
-		body := content
-		if body == "" {
-			body = "Running…"
-		}
-		style := lipgloss.NewStyle().Width(paneW).Height(contentH)
-		if i == m.splitFocIdx {
-			style = style.BorderStyle(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("#7c7cff"))
-		}
-		panes[i] = style.Render(header + "\n" + body)
+	if contentH < 1 {
+		contentH = 1
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
+
+	visible := m.visiblePanes()
+	if len(visible) == 0 {
+		// No panes: main panel fills the whole width (sidebar + output).
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			m.sidebar.View(),
+			m.output.View(),
+		)
+	}
+
+	// Main panel takes 40% of width; panes share the rest equally.
+	nPanes := len(visible)
+	mainW := m.width * 40 / 100
+	panesW := m.width - mainW
+	paneW := panesW / nPanes
+
+	// Recompute sidebar and output to fit mainW.
+	sbW := int(float64(mainW) * sidebarFraction)
+	outW := mainW - sbW
+	m.sidebar.SetSize(sbW, contentH)
+	m.output.SetSize(outW, contentH)
+
+	mainSection := lipgloss.JoinHorizontal(lipgloss.Top,
+		m.sidebar.View(),
+		m.output.View(),
+	)
+
+	// Render each visible pane.
+	paneViews := make([]string, len(visible))
+	for i, p := range visible {
+		p.Resize(paneW, contentH)
+		focused := m.focus == focusPane && p.ID == m.focusPaneID
+		paneViews[i] = p.View(focused)
+	}
+
+	// Scroll indicator when more panes than visible.
+	total := len(m.ptyPanes)
+	if total > maxVisiblePanes {
+		end := m.paneOffset + nPanes
+		indicator := lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).
+			Render(fmt.Sprintf(" [%d-%d of %d  ←/→ scroll]", m.paneOffset+1, end, total))
+		paneViews = append(paneViews, indicator)
+	}
+
+	paneSection := lipgloss.JoinHorizontal(lipgloss.Top, paneViews...)
+	return lipgloss.JoinHorizontal(lipgloss.Top, mainSection, paneSection)
+}
+
+// visiblePanes returns the slice of panes currently on screen (up to maxVisiblePanes).
+func (m Model) visiblePanes() []*PtyPane {
+	if len(m.ptyPanes) == 0 {
+		return nil
+	}
+	start := m.paneOffset
+	end := start + maxVisiblePanes
+	if end > len(m.ptyPanes) {
+		end = len(m.ptyPanes)
+	}
+	return m.ptyPanes[start:end]
 }
 
 // setSize recomputes layout after a terminal resize.
@@ -535,12 +621,18 @@ func (m *Model) setSize(w, h int) {
 	m.width = w
 	m.height = h
 
-	sidebarW := int(float64(w) * sidebarFraction)
-	outputW := w - sidebarW
 	contentH := h - statusBarHeight - inputBarHeight
 	if contentH < 0 {
 		contentH = 0
 	}
+
+	// When panes are open, main panel gets 40% width.
+	mainW := w
+	if len(m.ptyPanes) > 0 {
+		mainW = w * 40 / 100
+	}
+	sidebarW := int(float64(mainW) * sidebarFraction)
+	outputW := mainW - sidebarW
 
 	m.sidebar.SetSize(sidebarW, contentH)
 	m.output.SetSize(outputW, contentH)
@@ -553,6 +645,145 @@ func (m *Model) setSize(w, h int) {
 	}
 	if m.costView != nil {
 		m.costView.SetSize(w, contentH)
+	}
+}
+
+// resizePtyPanes updates PTY pane dimensions based on current terminal size.
+func (m *Model) resizePtyPanes() {
+	visible := m.visiblePanes()
+	if len(visible) == 0 {
+		return
+	}
+	contentH := m.height - statusBarHeight - inputBarHeight
+	if contentH < 1 {
+		contentH = 1
+	}
+	panesW := m.width - (m.width * 40 / 100)
+	paneW := panesW / len(visible)
+	if paneW < 10 {
+		paneW = 10
+	}
+	for _, p := range visible {
+		p.Resize(paneW, contentH)
+	}
+}
+
+// openPane creates a new PTY pane for the named backend.
+// label is the display name; initialInput is written to stdin after start.
+// Returns nil if the backend is not available.
+func (m *Model) openPane(backendID, label, initialInput string) tea.Cmd {
+	if m.runner == nil {
+		return nil
+	}
+	binary, args, ok := m.runner.BackendBinary(backendID)
+	if !ok {
+		// Backend not found — log to main output and skip.
+		m.output.AppendLine(fmt.Sprintf("⚠ Backend %q not available", backendID))
+		return nil
+	}
+
+	id := m.nextPaneID
+	m.nextPaneID++
+
+	contentH := m.height - statusBarHeight - inputBarHeight
+	if contentH < 4 {
+		contentH = 24
+	}
+	nVisible := len(m.ptyPanes) + 1
+	if nVisible > maxVisiblePanes {
+		nVisible = maxVisiblePanes
+	}
+	panesW := m.width - (m.width * 40 / 100)
+	paneW := panesW / nVisible
+	if paneW < 20 {
+		paneW = 80
+	}
+
+	prog := m.program // capture for goroutine
+	send := func(msg tea.Msg) {
+		if prog != nil {
+			prog.Send(msg)
+		}
+	}
+
+	pane, err := newPtyPane(id, binary, args, label, backendID, paneW, contentH, initialInput, send)
+	if err != nil {
+		m.output.AppendLine(fmt.Sprintf("⚠ Could not open pane for %q: %v", backendID, err))
+		return nil
+	}
+
+	m.ptyPanes = append(m.ptyPanes, pane)
+	m.output.AppendLine(fmt.Sprintf("▸ Opened pane [%d] %s", id+1, label))
+
+	// Scroll offset so the new pane is visible.
+	if len(m.ptyPanes) > maxVisiblePanes {
+		m.paneOffset = len(m.ptyPanes) - maxVisiblePanes
+	}
+
+	return nil // pane goroutine sends msgs via prog.Send
+}
+
+// focusPane sets keyboard focus to the visible pane at slot visibleIdx (0-based).
+func (m *Model) focusPane(visibleIdx int) tea.Cmd {
+	visible := m.visiblePanes()
+	if visibleIdx < 0 || visibleIdx >= len(visible) {
+		return nil
+	}
+	m.focus = focusPane
+	m.focusPaneID = visible[visibleIdx].ID
+	m.input.Blur()
+	return nil
+}
+
+// handlePaneFocusedKey forwards the key to the focused PTY pane.
+// Ctrl+0 / Esc returns focus to the main panel.
+func (m Model) handlePaneFocusedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ctrl+0 or backtick returns focus to main.
+	if msg.String() == "0" || msg.Type == tea.KeyCtrlBackslash {
+		m.focus = focusInput
+		m.focusPaneID = -1
+		return m, m.input.Focus()
+	}
+	// Ctrl+W closes the focused pane.
+	if msg.Type == tea.KeyCtrlW {
+		return m, m.closeFocusedPane()
+	}
+	// Forward all other keys to the focused pane's PTY.
+	for _, p := range m.ptyPanes {
+		if p.ID == m.focusPaneID {
+			p.Write(keyToBytes(msg))
+			break
+		}
+	}
+	return m, nil
+}
+
+// closeFocusedPane closes the currently focused pane and returns focus to main.
+func (m *Model) closeFocusedPane() tea.Cmd {
+	for i, p := range m.ptyPanes {
+		if p.ID == m.focusPaneID {
+			p.Close()
+			m.ptyPanes = append(m.ptyPanes[:i], m.ptyPanes[i+1:]...)
+			m.output.AppendLine(fmt.Sprintf("✕ Closed pane [%d] %s", p.ID+1, p.Label))
+			break
+		}
+	}
+	m.focus = focusInput
+	m.focusPaneID = -1
+	// Clamp paneOffset.
+	if m.paneOffset > 0 && m.paneOffset >= len(m.ptyPanes) {
+		m.paneOffset = len(m.ptyPanes) - 1
+		if m.paneOffset < 0 {
+			m.paneOffset = 0
+		}
+	}
+	return m.input.Focus()
+}
+
+// closeAllPanes terminates all PTY pane subprocesses (called on quit).
+func (m *Model) closeAllPanes() {
+	for _, p := range m.ptyPanes {
+		p.Close()
 	}
 }
 
@@ -659,7 +890,11 @@ func waitForLine(ch <-chan string) tea.Cmd {
 // Run starts the Bubble Tea program in alternate-screen mode.
 func Run(projectName string, store *storage.Store, runner *agent.Runner) error {
 	m := New(projectName, store, runner)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Expose program handle so PTY pane goroutines can inject messages.
+	m.program = p
 	_, err := p.Run()
+	// Ensure all PTY pane subprocesses are cleaned up on exit.
+	// (model is value-copied inside tea.Program, so we call cleanup on m directly)
 	return err
 }
