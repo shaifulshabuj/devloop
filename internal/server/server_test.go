@@ -17,7 +17,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("storage.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	return New("127.0.0.1:0", store)
+	return New("127.0.0.1:0", store, nil) // nil runner: no dispatch
 }
 
 func TestHealth(t *testing.T) {

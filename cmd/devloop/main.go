@@ -13,6 +13,7 @@ import (
 	"github.com/shaifulshabuj/devloop/v6/internal/agent"
 	"github.com/shaifulshabuj/devloop/v6/internal/config"
 	"github.com/shaifulshabuj/devloop/v6/internal/orchestrator"
+	"github.com/shaifulshabuj/devloop/v6/internal/server"
 	"github.com/shaifulshabuj/devloop/v6/internal/storage"
 	"github.com/shaifulshabuj/devloop/v6/internal/tui"
 	"github.com/spf13/cobra"
@@ -46,6 +47,7 @@ func main() {
 	root.AddCommand(configCmd())
 	root.AddCommand(contextCmd())
 	root.AddCommand(startCmd())
+	root.AddCommand(serveCmd())
 	root.AddCommand(initCmd())
 	root.AddCommand(projectsCmd())
 	root.AddCommand(runCmd())
@@ -191,6 +193,38 @@ func startCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Run in non-interactive mode without the TUI")
+	return cmd
+}
+
+func serveCmd() *cobra.Command {
+	var addr string
+
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the DevLoop HTTP API server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := openStore()
+			if err != nil {
+				return fmt.Errorf("opening storage: %w", err)
+			}
+			defer func() {
+				if cerr := store.Close(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", cerr)
+				}
+			}()
+
+			runner := agent.NewRunner()
+			runner.Detect()
+
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+
+			fmt.Fprintf(os.Stderr, "devloop serve: listening on %s\n", addr)
+			return server.New(addr, store, runner).Start(ctx)
+		},
+	}
+
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:7331", "Address to listen on")
 	return cmd
 }
 
