@@ -361,7 +361,11 @@ func (s *Server) handleTaskStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ts := val.(*taskState)
+	ts, ok := val.(*taskState)
+	if !ok {
+		http.Error(w, "internal error: invalid task state", http.StatusInternalServerError)
+		return
+	}
 	ch := ts.subscribe()
 
 	for {
