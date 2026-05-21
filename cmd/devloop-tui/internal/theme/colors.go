@@ -160,6 +160,26 @@ var (
 				Foreground(Blue).
 				BorderForeground(Blue)
 
+	// Phase 4 additions — Quiet / Stuck (gate-timeout) / Re-architecting.
+	//
+	// Wording is "quiet" not "stuck" for the no-output case: a worker
+	// doing a large refactor can legitimately run > 10 min, "quiet"
+	// communicates "hasn't produced output recently" without implying
+	// failure. "Stuck" is reserved for the genuinely-blocked
+	// gate-timeout case where action is required.
+
+	StylePhaseBoxQuiet = StylePhaseBox.
+				BorderForeground(Yellow).
+				Background(lipgloss.Color("#1a1000"))
+
+	StylePhaseBoxStuck = StylePhaseBox.
+				BorderForeground(Red).
+				Background(lipgloss.Color("#1a0000"))
+
+	StylePhaseBoxReArch = StylePhaseBox.
+				BorderForeground(Blue).
+				Background(lipgloss.Color("#00051a"))
+
 	// Error / warning messages
 	StyleError   = lipgloss.NewStyle().Foreground(Red)
 	StyleWarning = lipgloss.NewStyle().Foreground(Yellow)

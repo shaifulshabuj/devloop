@@ -34,8 +34,8 @@ type PaletteAction struct {
 }
 
 // DefaultActions is the action set shown when no user filter is active.
-// Ordering matches the redesign brief (architect → work → review → fix →
-// learn → tasks → providers → diff → hooks → update).
+// Ordering matches the redesign brief (core loop first, then read-only
+// utilities, then Phase 4 additions for permit/daemon/resume).
 var DefaultActions = []PaletteAction{
 	{"A", "architect", "design a spec for a new feature", "architect"},
 	{"W", "work", "run worker on the latest task", "work"},
@@ -47,6 +47,16 @@ var DefaultActions = []PaletteAction{
 	{"D", "diff", "show git diff from baseline", "diff"},
 	{"H", "hooks", "install Claude pipeline hooks", "hooks"},
 	{"U", "update", "self-upgrade devloop script", "update"},
+
+	// Phase 4 additions
+	{"E", "run", "full pipeline: architect+work+review", "run"},
+	{"G", "permit grant", "approve a queued permission request", "permit grant"},
+	{"X", "permit deny", "deny a queued permission request", "permit deny"},
+	{"Q", "permit status", "show permission gate status + log", "permit status"},
+	{"I", "daemon start", "start devloop daemon (background)", "daemon"},
+	{"K", "daemon stop", "stop running daemon", "daemon stop"},
+	{"J", "daemon log", "tail live daemon log", "daemon log"},
+	{"Z", "resume", "resume a quiet or paused pipeline", "resume"},
 }
 
 // Palette is a Bubble Tea sub-model.

@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/permit"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
@@ -66,6 +67,7 @@ const (
 	TabLog FocusTab = iota
 	TabSpec
 	TabDiff
+	TabPermit // visible only when permit.Count > 0
 )
 
 // FocusModel is the Bubble Tea model for ViewFocus.
@@ -92,6 +94,16 @@ type FocusModel struct {
 	eventsCh <-chan stream.Event
 	errsCh   <-chan error
 	cancel   context.CancelFunc
+
+	// Permit queue snapshot for the PERMIT tab. Refreshed on every tick
+	// via refreshPermits; PERMIT tab is hidden when len==0.
+	permitItems  []permit.Item
+	permitCursor int
+
+	// Set of session IDs currently mid-re-architect — populated on
+	// phase.escalate events and cleared on the next phase.start of the
+	// architect phase. Drives the blue ReArch styling + footer text.
+	reArchSessions map[string]bool
 }
 
 // NewFocus is the live constructor — use NewFocusWithOptions in tests so the
@@ -107,14 +119,15 @@ func NewFocus(projectRoot string, startIdx int, startID string) FocusModel {
 // any goroutines; goroutine startup happens in Init().
 func NewFocusWithOptions(projectRoot string, opts FocusOptions) FocusModel {
 	return FocusModel{
-		projectRoot: projectRoot,
-		opts:        opts,
-		idx:         -1,
-		vp:          viewport.New(0, focusBodyHeight),
-		specCache:   map[string]string{},
-		diffCache:   map[string]string{},
-		diffLoading: map[string]bool{},
-		logLines:    map[string][]string{},
+		projectRoot:    projectRoot,
+		opts:           opts,
+		idx:            -1,
+		vp:             viewport.New(0, focusBodyHeight),
+		specCache:      map[string]string{},
+		diffCache:      map[string]string{},
+		diffLoading:    map[string]bool{},
+		logLines:       map[string][]string{},
+		reArchSessions: map[string]bool{},
 	}
 }
 
@@ -157,6 +170,16 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case focusTickMsg:
 		m.spinnerTick++
+		// Refresh permit queue every 5 ticks (≈ 500ms) — cheap dirent scan.
+		if m.spinnerTick%5 == 0 {
+			m.permitItems, _ = permit.Read(m.projectRoot)
+			// Auto-show PERMIT tab when an item appears; auto-hide when
+			// none remain and the user is on it.
+			if m.tab == TabPermit && len(m.permitItems) == 0 {
+				m.tab = TabLog
+				m = m.refreshViewport()
+			}
+		}
 		cmds = append(cmds, m.tickCmd())
 
 	case focusSessionsLoadedMsg:
@@ -176,6 +199,16 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.diffLoading, msg.taskID)
 		m.diffCache[msg.taskID] = msg.content
 		if m.idx >= 0 && msg.taskID == m.sessions[m.idx].ID && m.tab == TabDiff {
+			m = m.refreshViewport()
+		}
+
+	case permitRefreshedMsg:
+		m.permitItems = msg.items
+		if m.permitCursor >= len(m.permitItems) {
+			m.permitCursor = 0
+		}
+		if m.tab == TabPermit && len(m.permitItems) == 0 {
+			m.tab = TabLog
 			m = m.refreshViewport()
 		}
 
@@ -209,11 +242,42 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tab = TabDiff
 			m = m.refreshViewport()
 			cmds = append(cmds, m.maybeDispatchDiff()...)
+		case "4":
+			if len(m.permitItems) > 0 {
+				m.tab = TabPermit
+				m.permitCursor = 0
+			}
 		case "tab":
-			m.tab = (m.tab + 1) % 3
+			// Cycle 3 tabs, or 4 when the PERMIT tab is visible.
+			tabs := 3
+			if len(m.permitItems) > 0 {
+				tabs = 4
+			}
+			m.tab = FocusTab((int(m.tab) + 1) % tabs)
 			m = m.refreshViewport()
 			if m.tab == TabDiff {
 				cmds = append(cmds, m.maybeDispatchDiff()...)
+			}
+
+		case "up", "k":
+			if m.tab == TabPermit && m.permitCursor > 0 {
+				m.permitCursor--
+			}
+		case "down", "j":
+			if m.tab == TabPermit && m.permitCursor < len(m.permitItems)-1 {
+				m.permitCursor++
+			}
+
+		case "g":
+			// Grant the highlighted permit request.
+			if m.tab == TabPermit && m.permitCursor < len(m.permitItems) {
+				id := m.permitItems[m.permitCursor].ID
+				cmds = append(cmds, m.dispatchPermit("grant", id))
+			}
+		case "x":
+			if m.tab == TabPermit && m.permitCursor < len(m.permitItems) {
+				id := m.permitItems[m.permitCursor].ID
+				cmds = append(cmds, m.dispatchPermit("deny", id))
 			}
 
 		case "left", "h":
@@ -297,6 +361,9 @@ func (m FocusModel) renderPhases(w int, s stream.Session) string {
 
 func (m FocusModel) renderTabs(w int) string {
 	labels := []string{"LOG", "SPEC", "DIFF"}
+	if len(m.permitItems) > 0 {
+		labels = append(labels, fmt.Sprintf("PERMIT (%d)", len(m.permitItems)))
+	}
 	out := make([]string, len(labels))
 	for i, lab := range labels {
 		style := theme.StyleTabInactive
@@ -314,20 +381,204 @@ func (m FocusModel) renderTabs(w int) string {
 }
 
 func (m FocusModel) renderTabBody(w int, s stream.Session) string {
+	if m.tab == TabPermit {
+		return m.renderPermitTab(w)
+	}
 	if w-4 > 0 {
 		m.vp.Width = w - 4
 	}
 	return lipgloss.NewStyle().Padding(0, 2).Render(m.vp.View())
 }
 
+// renderPermitTab shows the pending permit queue with a cursor and per-row
+// command / tool / relative time.
+func (m FocusModel) renderPermitTab(w int) string {
+	if len(m.permitItems) == 0 {
+		return theme.StyleMeta.Padding(0, 4).Render("(no pending permission requests)")
+	}
+	now := time.Now()
+	var rows []string
+	rows = append(rows, theme.StyleSectionLabel.Padding(0, 2).Render(
+		fmt.Sprintf("PERMIT QUEUE  ·  %d pending", len(m.permitItems)),
+	))
+	for i, it := range m.permitItems {
+		// Truncate commands so they fit in narrow terminals.
+		cmd := it.Command
+		if len(cmd) > w-20 && w > 20 {
+			cmd = cmd[:w-20] + "…"
+		}
+		cursor := "  "
+		style := lipgloss.NewStyle().Foreground(theme.Text)
+		if i == m.permitCursor {
+			cursor = "▸ "
+			style = theme.StylePaletteSelected
+		}
+		row := fmt.Sprintf("%s%-3d %s",
+			cursor,
+			i+1,
+			cmd,
+		)
+		meta := theme.StyleMeta.Render(fmt.Sprintf("      %s  ·  %s  ·  %s",
+			it.Tool, it.RelativeTime(now), it.ShortID()))
+		rows = append(rows, style.Render(row), meta)
+	}
+	rows = append(rows, "",
+		theme.StyleFooter.Padding(0, 2).Render(
+			"g grant  ·  x deny  ·  ↑/↓ select  ·  esc back"),
+	)
+	return strings.Join(rows, "\n")
+}
+
+// dispatchPermit spawns `bash devloop.sh permit grant|deny <ID>` and on
+// completion refreshes the queue snapshot. The output of the subprocess
+// itself is discarded — the response file appearing is what unblocks
+// devloop's gate.
+func (m FocusModel) dispatchPermit(action, id string) tea.Cmd {
+	root := m.projectRoot
+	return func() tea.Msg {
+		cmd := exec.Command("bash", filepath.Join(root, "devloop.sh"), "permit", action, id)
+		cmd.Dir = root
+		_ = cmd.Run() // errors surface implicitly via the queue refresh
+		items, _ := permit.Read(root)
+		return permitRefreshedMsg{items: items}
+	}
+}
+
+// permitRefreshedMsg carries an updated permit queue snapshot.
+type permitRefreshedMsg struct{ items []permit.Item }
+
 func (m FocusModel) renderFooter(w int) string {
-	hints := "←/→ task  ·  1/2/3 tab  ·  tab cycle  ·  esc back"
+	hints := m.contextualFooterHint()
 	return lipgloss.NewStyle().
 		Width(w).
 		Faint(true).
 		Foreground(theme.Dim).
 		Padding(0, 2).
 		Render(hints)
+}
+
+// contextualFooterHint chooses the footer copy based on the active session's
+// state. Spec corrections baked in:
+//
+//   - "stuck" → use "quiet" for no-output state (slow worker, not failure)
+//   - gate timeout (`timed-out-at-*` in session status) → distinct footer
+//     pointing at the PERMIT tab, not a generic resume hint
+//   - phase.escalate detected → "re-architecting…" footer until next
+//     phase.start fires for the session
+func (m FocusModel) contextualFooterHint() string {
+	const base = "←/→ task  ·  1/2/3 tab  ·  tab cycle  ·  space actions  ·  esc back"
+	if m.idx < 0 || m.idx >= len(m.sessions) {
+		return base
+	}
+	id := m.sessions[m.idx].ID
+
+	// Highest-priority: in the middle of a respec escalation.
+	if m.reArchSessions[id] {
+		return lipgloss.NewStyle().Foreground(theme.Blue).Render(
+			"⟳ re-architecting after retries exhausted  ·  waiting for new spec…",
+		) + "  ·  esc back"
+	}
+
+	status, cmd, ok := readSessionStatus(m.projectRoot, id)
+	if ok && strings.HasPrefix(status, "timed-out-at-") {
+		// Gate-timeout footer: surface the offending command so the user
+		// knows WHAT to approve in the PERMIT tab.
+		hint := "⚠ approval timed out"
+		if cmd != "" {
+			hint += ": " + truncate(cmd, 40)
+		}
+		permitHint := "tab 4 permit"
+		if len(m.permitItems) == 0 {
+			permitHint = "tab 4 permit (queue empty)"
+		}
+		return theme.StyleError.Render(hint) + "  ·  " + permitHint + "  ·  esc back"
+	}
+
+	// "Quiet" worker — running phase with no output for > threshold.
+	for name, ps := range m.sessions[m.idx].PhaseStates {
+		if ps.Status == "running" && time.Since(ps.Time) > stuckThreshold() {
+			d := time.Since(ps.Time)
+			hint := fmt.Sprintf("⚠ %s quiet %s", name, humanizeDuration(d))
+			return theme.StyleWarning.Render(hint) + "  ·  Z resume  ·  esc back"
+		}
+	}
+
+	return base
+}
+
+// readSessionStatus reads .devloop/sessions/<TASK-ID>/status. Returns
+// (status, command-that-triggered-gate, ok=true). The command comes from
+// the last `approval.request` event in the per-session events.ndjson, since
+// devloop.sh's status file doesn't carry that info. Best-effort: if the
+// command can't be reconstructed, returns status + empty cmd + ok=true.
+//
+// Spec correction: brief originally referenced a `worker.state` file that
+// doesn't exist. Real source-of-truth file is `status` (no extension).
+func readSessionStatus(projectRoot, taskID string) (status, cmd string, ok bool) {
+	if taskID == "" {
+		return "", "", false
+	}
+	dir := filepath.Join(projectRoot, ".devloop", "sessions", taskID)
+	b, err := os.ReadFile(filepath.Join(dir, "status"))
+	if err != nil {
+		return "", "", false
+	}
+	status = strings.TrimSpace(string(b))
+	if status == "" {
+		return "", "", false
+	}
+	cmd = lastApprovalRequestCommand(filepath.Join(dir, "events.ndjson"))
+	return status, cmd, true
+}
+
+// lastApprovalRequestCommand reads the per-session events.ndjson and
+// returns the `summary` (or `detail_path`) of the most-recent
+// approval.request event. Returns "" on any failure.
+func lastApprovalRequestCommand(eventsFile string) string {
+	b, err := os.ReadFile(eventsFile)
+	if err != nil {
+		return ""
+	}
+	var last string
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.Contains(line, `"kind":"approval.request"`) {
+			continue
+		}
+		// Cheap field extraction without full JSON parse: find "summary":"…"
+		// or fall back to "gate":"…". Keeps this hot path allocation-light.
+		if v := extractJSONString(line, "summary"); v != "" {
+			last = v
+			continue
+		}
+		if v := extractJSONString(line, "gate"); v != "" {
+			last = v
+		}
+	}
+	return last
+}
+
+// extractJSONString returns the value of `key` in a JSON line, or "". Only
+// handles plain string values without escaped quotes — sufficient for the
+// `summary`/`gate` fields devloop.sh writes.
+func extractJSONString(line, key string) string {
+	needle := `"` + key + `":"`
+	i := strings.Index(line, needle)
+	if i < 0 {
+		return ""
+	}
+	rest := line[i+len(needle):]
+	j := strings.IndexByte(rest, '"')
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -496,6 +747,17 @@ func (m FocusModel) applyStreamEvent(ev stream.Event) FocusModel {
 				ps.Status = ev.Status
 				ps.Time = ev.TS
 				m.sessions[i].PhaseStates[ev.Phase] = ps
+				// phase.start clears any pending re-arch flag for this
+				// session — the new phase has begun, so we're no longer
+				// "waiting on respec".
+				if ev.Kind == "phase.start" {
+					delete(m.reArchSessions, ev.Session)
+				}
+			case "phase.escalate":
+				// Worker exhausted retries; devloop is about to enter the
+				// respec phase. Track this so the phase card flips to
+				// blue (ReArch) and the footer surfaces the message.
+				m.reArchSessions[ev.Session] = true
 			}
 			// Append a log line, keeping at most 200 per session to bound
 			// memory for long-running pipelines.

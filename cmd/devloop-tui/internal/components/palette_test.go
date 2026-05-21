@@ -111,8 +111,9 @@ func TestPalette_SingleLetterIgnoredAfterTyping(t *testing.T) {
 	p := NewPalette(nil)
 	p, _ = p.Open()
 
-	// Start typing with a non-shortcut letter so we enter the filter.
-	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	// Start typing with a non-shortcut letter so we enter filter mode.
+	// 'm' is not a single-letter shortcut in the default action set.
+	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	// Now 'a' should narrow the filter further, NOT dispatch architect.
 	p, cmd := p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if cmd != nil {
@@ -141,7 +142,10 @@ func TestPalette_EscClosesWithoutDispatch(t *testing.T) {
 func TestPalette_NoMatchesPlaceholder(t *testing.T) {
 	p := NewPalette(nil)
 	p, _ = p.Open()
-	for _, r := range "zzzz" {
+	// "mnopq" — none of the leading letters are single-letter shortcuts
+	// (shortcut set: A W R F L T P D H U E G X Q I K J Z), so the keys
+	// flow into the filter. The sequence then matches nothing.
+	for _, r := range "mnopq" {
 		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	out := p.SetWidth(60).View()

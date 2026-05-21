@@ -19,6 +19,7 @@ import (
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/health"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/permit"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
@@ -85,6 +86,9 @@ type DashboardModel struct {
 	daemonOK         bool // last kill -0 result
 	daemonRestarts   int  // recent auto-restart count from daemon.log
 	daemonMaxReached bool // true once "Max restarts (...) reached" line is logged
+
+	// Pending count from .devloop/permission-queue/. 0 hides the chip.
+	permitPending int
 
 	// Collapsible SPEC panel — shows .devloop/specs/<TASK-ID>.md for the
 	// currently active task. Toggled with the `s` key.
@@ -360,8 +364,22 @@ func (m DashboardModel) renderTopBar() string {
 		formatHealthChip("worker", m.health.Worker),
 		formatDaemonChip(m.daemonOK, m.daemonRestarts, m.daemonMaxReached),
 	}
+	// Permit chip is conditional — don't clutter the bar with "0 pending".
+	if m.permitPending > 0 {
+		parts = append(parts, formatPermitChip(m.permitPending))
+	}
 	sep := lipgloss.NewStyle().Foreground(theme.Dim).Render(" · ")
 	return strings.Join(parts, sep)
+}
+
+// formatPermitChip renders the pending-permission indicator. Always yellow
+// because pending permissions are user-action-required, not failures.
+func formatPermitChip(n int) string {
+	flag := lipgloss.NewStyle().Foreground(theme.Yellow).Render("⚑")
+	count := lipgloss.NewStyle().Foreground(theme.Yellow).Render(
+		fmt.Sprintf("%d pending", n),
+	)
+	return flag + " " + count
 }
 
 func formatHealthChip(label string, s health.State) string {
@@ -409,6 +427,7 @@ func (m DashboardModel) refreshHealth() DashboardModel {
 	m.health = health.Load(m.projectRoot)
 	m.daemonPID, m.daemonOK = readDaemonPID(m.projectRoot)
 	m.daemonRestarts, m.daemonMaxReached = readDaemonRestarts(m.projectRoot)
+	m.permitPending = permit.Count(m.projectRoot)
 	return m
 }
 
@@ -509,6 +528,41 @@ func (m DashboardModel) loadSpecContent(taskID string) string {
 		return fmt.Sprintf("(error reading spec: %v)", err)
 	}
 	return string(b)
+}
+
+// stuckThreshold returns the duration after which a running phase is
+// considered "quiet". Configurable via DEVLOOP_STUCK_THRESHOLD_MIN env var
+// (minutes); defaults to 10 min. The wording is deliberately "quiet" not
+// "stuck" — a worker doing a large refactor legitimately runs > 10 min,
+// and "quiet" communicates "hasn't produced output recently" without
+// implying failure.
+func stuckThreshold() time.Duration {
+	if v := os.Getenv("DEVLOOP_STUCK_THRESHOLD_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Minute
+		}
+	}
+	return 10 * time.Minute
+}
+
+// isPhaseQuiet reports whether a phase has been "running" longer than the
+// configured threshold without an update. Non-running phases are never quiet.
+func isPhaseQuiet(ps stream.PhaseState) bool {
+	if ps.Status != "running" {
+		return false
+	}
+	return time.Since(ps.Time) > stuckThreshold()
+}
+
+// quietPhase returns the first running phase in `s` that's been quiet
+// longer than the threshold, plus its name. Empty name = no quiet phase.
+func quietPhase(s *stream.Session) (name string, ps stream.PhaseState) {
+	for n, p := range s.PhaseStates {
+		if isPhaseQuiet(p) {
+			return n, p
+		}
+	}
+	return "", stream.PhaseState{}
 }
 
 // readDaemonRestarts counts occurrences of the auto-restart marker emitted by
@@ -841,10 +895,35 @@ func sessionToItem(s stream.Session) components.Item {
 	badge := statusBadge(s.Status)
 	rel := humanizeRel(s.StartedAt)
 	sub := badge + "  " + rel
+	// Surface a "quiet" or "timed out" marker for running sessions whose
+	// active phase hasn't produced output recently. Bubbles/list's
+	// pickerDelegate currently renders a single Subtitle line; we splice
+	// the hint into that line rather than restructuring the delegate.
+	if s.Status == "running" {
+		if name, ps := quietPhase(&s); name != "" {
+			d := time.Since(ps.Time)
+			hint := fmt.Sprintf("⚠ %s quiet %s", name, humanizeDuration(d))
+			sub += "  ·  " + hint
+		}
+	}
 	return components.Item{
 		ID:       s.ID,
 		Title:    s.Feature,
 		Subtitle: sub,
+	}
+}
+
+// humanizeDuration is a compact "Nm" / "Nh" / "Ns" formatter for the
+// quiet-phase indicator. Threshold renders are coarse on purpose — sub-minute
+// precision isn't useful for "quiet" wording.
+func humanizeDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 }
 

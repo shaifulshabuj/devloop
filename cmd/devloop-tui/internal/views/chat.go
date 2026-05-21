@@ -654,7 +654,15 @@ func (m ChatModel) buildArgv(command, arg string) []string {
 		// arg is the baseline hash.
 		return []string{"git", "-C", m.projectRoot, "reset", "--hard", arg}
 	default:
-		return []string{"bash", devloopScript, command, arg}
+		// Generic path: support multi-word commands like "daemon stop",
+		// "permit grant", "permit status" by splitting Command on
+		// whitespace. arg (if non-empty) is appended verbatim.
+		out := []string{"bash", devloopScript}
+		out = append(out, strings.Fields(command)...)
+		if arg != "" {
+			out = append(out, arg)
+		}
+		return out
 	}
 }
 
