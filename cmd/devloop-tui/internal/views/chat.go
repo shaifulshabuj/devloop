@@ -17,6 +17,7 @@ import (
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
 
 // ─── Line kinds ───────────────────────────────────────────────────────────────
@@ -111,7 +112,7 @@ func NewChatWithOptions(projectRoot string, opts ChatOptions) ChatModel {
 	ti := textinput.New()
 	ti.Placeholder = "type a command or natural-language feature…"
 	ti.Prompt = "❯ "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(theme.Purple)
 	ti.Focus()
 
 	m := ChatModel{
@@ -249,20 +250,20 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 var (
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("205")).
+			Foreground(theme.Purple).
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderBottom(true).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(theme.Dim)
 
 	styleInputLine = lipgloss.NewStyle().
 			BorderStyle(lipgloss.NormalBorder()).
 			BorderTop(true).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(theme.Dim)
 
-	styleLineInput  = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	styleLineInput  = lipgloss.NewStyle().Foreground(theme.Text).Bold(true)
 	styleLineOutput = lipgloss.NewStyle().Faint(true).PaddingLeft(2)
-	styleLineInfo   = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("39"))
-	styleLineError  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	styleLineInfo   = lipgloss.NewStyle().Faint(true).Foreground(theme.Blue)
+	styleLineError  = lipgloss.NewStyle().Foreground(theme.Red)
 )
 
 func (m ChatModel) View() string {

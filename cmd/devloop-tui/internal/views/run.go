@@ -15,6 +15,7 @@ import (
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
 
 // ─── Internal message types ───────────────────────────────────────────────────
@@ -230,14 +231,14 @@ func (m RunModel) View() string {
 
 	// Error bar
 	if m.err != nil {
-		errLine := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("⚠ " + m.err.Error())
+		errLine := lipgloss.NewStyle().Foreground(theme.Red).Render("⚠ " + m.err.Error())
 		lines = append(lines, errLine)
 	}
 
 	// Recent event log (last 8 lines, dim)
 	if len(m.recentLines) > 0 {
 		lines = append(lines, "")
-		dimStyle := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("240"))
+		dimStyle := lipgloss.NewStyle().Faint(true).Foreground(theme.Dim)
 		for _, l := range m.recentLines {
 			lines = append(lines, dimStyle.Render(l))
 		}
@@ -259,7 +260,7 @@ func (m RunModel) View() string {
 // ─── Rendering helpers ────────────────────────────────────────────────────────
 
 func (m RunModel) renderRunHeader(w int) string {
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("DevLoop")
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.Purple).Render("DevLoop")
 	taskPart := ""
 	if m.opts.TaskID != "" {
 		taskPart = "  ·  " + m.opts.TaskID
@@ -276,7 +277,7 @@ func (m RunModel) renderRunHeader(w int) string {
 		Width(w).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(theme.Dim).
 		Render(content)
 }
 
@@ -288,7 +289,7 @@ func (m RunModel) renderRunFooter(w int) string {
 	return lipgloss.NewStyle().
 		Width(w).
 		Faint(true).
-		Foreground(lipgloss.Color("240")).
+		Foreground(theme.Dim).
 		Render(hints)
 }
 
@@ -342,7 +343,7 @@ func (m RunModel) renderWithModal(body string, w int) string {
 
 	titleStyle := lipgloss.NewStyle().Bold(true)
 	dimStyle := lipgloss.NewStyle().Faint(true)
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	keyStyle := lipgloss.NewStyle().Foreground(theme.Yellow)
 
 	var innerLines []string
 	innerLines = append(innerLines, titleStyle.Render(titleStr))
@@ -366,7 +367,7 @@ func (m RunModel) renderWithModal(body string, w int) string {
 
 	modal := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("220")).
+		BorderForeground(theme.Yellow).
 		Padding(1, 2).
 		Width(modalW).
 		Render(inner)

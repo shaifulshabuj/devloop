@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
 
 // PhaseStatus represents the execution state of a pipeline phase.
@@ -34,16 +36,17 @@ type GridOptions struct {
 	SpinnerTick int  // animation frame counter for running phases (caller increments)
 }
 
-// spinnerFrames is a braille spinner cycle.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// spinnerFrames is a braille spinner cycle. Mirrors theme.SpinnerFrames; kept
+// here for the legacy single-line Compact mode that wraps with parens.
+var spinnerFrames = theme.SpinnerFrames
 
-// Lipgloss styles — computed once at package init.
+// Lipgloss styles — derived from the central theme palette.
 var (
-	stylePending = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("240"))
-	styleRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
-	styleDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // green
-	styleFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
-	styleSkipped = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("39")) // blue/dim
+	stylePending = lipgloss.NewStyle().Faint(true).Foreground(theme.Dim)
+	styleRunning = lipgloss.NewStyle().Foreground(theme.Yellow)
+	styleDone    = lipgloss.NewStyle().Foreground(theme.Green)
+	styleFailed  = lipgloss.NewStyle().Foreground(theme.Red)
+	styleSkipped = lipgloss.NewStyle().Faint(true).Foreground(theme.Blue)
 )
 
 // glyph returns the status indicator character for a phase.

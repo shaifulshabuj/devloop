@@ -10,6 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
 
 // Item is one entry shown in the Picker list.
@@ -37,10 +39,10 @@ func (d pickerDelegate) Render(w io.Writer, m list.Model, index int, listItem li
 	isSelected := index == m.Index()
 	var titleStyle, subtitleStyle lipgloss.Style
 	if isSelected {
-		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-		subtitleStyle = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("205"))
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(theme.Purple)
+		subtitleStyle = lipgloss.NewStyle().Faint(true).Foreground(theme.Purple)
 	} else {
-		titleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		titleStyle = lipgloss.NewStyle().Foreground(theme.Text)
 		subtitleStyle = lipgloss.NewStyle().Faint(true)
 	}
 

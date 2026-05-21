@@ -16,6 +16,7 @@ import (
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
 
 // ─── Message types ────────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ func (m DashboardModel) renderHeader(w int) string {
 		}
 	}
 
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("DevLoop")
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.Purple).Render("DevLoop")
 
 	info := lipgloss.NewStyle().Faint(true).Render(
 		fmt.Sprintf("·  %d session%s  ·  %d active", total, plural(total), active),
@@ -219,7 +220,7 @@ func (m DashboardModel) renderHeader(w int) string {
 
 	var status string
 	if m.err != nil {
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(
+		status = lipgloss.NewStyle().Foreground(theme.Red).Render(
 			"  ⚠ " + m.err.Error(),
 		)
 	}
@@ -229,7 +230,7 @@ func (m DashboardModel) renderHeader(w int) string {
 		Width(w).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(theme.Dim).
 		Render(content)
 }
 
@@ -238,7 +239,7 @@ func (m DashboardModel) renderFooter(w int) string {
 	return lipgloss.NewStyle().
 		Width(w).
 		Faint(true).
-		Foreground(lipgloss.Color("240")).
+		Foreground(theme.Dim).
 		Render(hints)
 }
 
@@ -248,7 +249,7 @@ func (m DashboardModel) renderLeft(w, h int) string {
 }
 
 func (m DashboardModel) renderRight(w, h int) string {
-	divider := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│")
+	divider := lipgloss.NewStyle().Foreground(theme.Dim).Render("│")
 
 	var content string
 	if m.active == nil {
@@ -600,11 +601,11 @@ func colorStatus(status string) string {
 	var style lipgloss.Style
 	switch status {
 	case "done", "approved":
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+		style = lipgloss.NewStyle().Foreground(theme.Green)
 	case "running":
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+		style = lipgloss.NewStyle().Foreground(theme.Yellow)
 	case "failed", "rejected":
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		style = lipgloss.NewStyle().Foreground(theme.Red)
 	default:
 		style = lipgloss.NewStyle().Faint(true)
 	}
