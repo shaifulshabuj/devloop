@@ -1,4 +1,11 @@
-# 🔁 DevLoop
+# 🔁 DevLoop — v6 (Deprecated)
+
+> ⚠️ **This branch (`v6-deprecated`) contains the experimental Go rewrite of DevLoop.**
+> It has been deprecated in favour of the battle-tested bash version on the `main` branch.
+> The code is preserved here for reference. **Do not use this branch for production.**
+> See the [main branch](https://github.com/shaifulshabuj/devloop) for the active version.
+
+---
 
 **Multi-agent AI development pipeline — remote-controllable, self-healing, provider-flexible**
 
