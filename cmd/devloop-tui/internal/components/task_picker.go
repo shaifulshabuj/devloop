@@ -201,6 +201,23 @@ func (p Picker) SetItems(items []Item) Picker {
 	return p.applyFilter()
 }
 
+// FilterFocused reports whether the filter input currently owns keystrokes.
+// Parent views consult this before claiming keys like `enter` so the picker's
+// filter-mode bindings (confirm/clear) keep working.
+func (p Picker) FilterFocused() bool { return p.filterFocused }
+
+// SelectedIndex returns the index of the currently highlighted item within
+// the (possibly filtered) visible list. Returns -1 when the list is empty.
+// Note: this is the index inside the picker's currently visible items —
+// callers that need an index into the original (unfiltered) source slice
+// should keep their own mapping.
+func (p Picker) SelectedIndex() int {
+	if len(p.list.Items()) == 0 {
+		return -1
+	}
+	return p.list.Index()
+}
+
 // Selected returns the highlighted item, or (Item{}, false) if empty.
 func (p Picker) Selected() (Item, bool) {
 	if len(p.list.Items()) == 0 {

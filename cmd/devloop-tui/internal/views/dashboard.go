@@ -20,6 +20,7 @@ import (
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/health"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
 )
 
 // ─── Message types ────────────────────────────────────────────────────────────
@@ -181,6 +182,19 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keyRefresh):
 			cmds = append(cmds, m.scanCmd())
+
+		case msg.String() == "enter" && !m.picker.FilterFocused() && len(m.sessions) > 0:
+			// Enter on a highlighted task opens Focus Mode (Phase 2
+			// wires the receiver). When the picker's filter input is
+			// focused, enter still goes to the picker so it can confirm
+			// the filter — picker handles that internally.
+			idx := m.picker.SelectedIndex()
+			if idx >= 0 && idx < len(m.sessions) {
+				id := m.sessions[idx].ID
+				cmds = append(cmds, func() tea.Msg {
+					return uimsg.OpenFocus{SessionIdx: idx, SessionID: id}
+				})
+			}
 
 		default:
 			// Delegate all other keys (navigation, filter) to the picker.
