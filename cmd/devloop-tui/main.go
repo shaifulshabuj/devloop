@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/app"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/views"
 )
 
 const Version = "0.1.0"
@@ -29,10 +30,14 @@ func main() {
 		}
 	}
 
-	// Determine subcommand.  The default is "dashboard".
+	// Determine subcommand.  The default is "dashboard" unless no
+	// devloop.config.sh is present, in which case the wizard runs.
 	sub := "dashboard"
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
 		sub = args[0]
+	} else if !configPresent() {
+		// Auto-launch onboarding wizard on first run.
+		sub = "onboard"
 	}
 
 	switch sub {
@@ -42,10 +47,43 @@ func main() {
 		runChat(args[1:])
 	case "status":
 		runStatus(args[1:])
+	case "onboard":
+		runOnboard()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", sub)
 		fmt.Fprintf(os.Stderr, "Run 'devloop-tui --help' for usage.\n")
 		os.Exit(2)
+	}
+}
+
+// configPresent returns true when devloop.config.sh exists at the current
+// working directory's resolved project root.
+func configPresent() bool {
+	root, err := resolveProjectRoot()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(root, "devloop.config.sh"))
+	return err == nil
+}
+
+// runOnboard launches the Phase 3 onboarding wizard. On clean exit it
+// re-launches the dashboard so the user lands in the live UI.
+func runOnboard() {
+	root, err := resolveProjectRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	m := views.NewOnboard(root)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	// If config now exists, fall through to the dashboard.
+	if configPresent() {
+		runDashboard()
 	}
 }
 
