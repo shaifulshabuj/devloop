@@ -366,6 +366,38 @@ func TestDashboard_SpecPanel_MissingSpecShowsPlaceholder(t *testing.T) {
 	}
 }
 
+// ── Footer + filter (P1-6 / P1-11) ────────────────────────────────────────────
+
+func TestDashboard_Footer_ListsNewKeybinds(t *testing.T) {
+	root := t.TempDir()
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = driveModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	out := stripANSI(m.View())
+	for _, hint := range []string{"/ filter", "s spec", "d diff", "enter focus"} {
+		if !strings.Contains(out, hint) {
+			t.Errorf("expected footer hint %q in view, got %q", hint, out)
+		}
+	}
+}
+
+func TestDashboard_Filter_ActivatesOnSlash(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-F01", Feature: "add orders", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, _ := stream.Scan(root)
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+
+	if m.picker.FilterFocused() {
+		t.Fatal("expected filter not focused initially")
+	}
+	m = driveModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !m.picker.FilterFocused() {
+		t.Fatal("expected filter focused after '/'")
+	}
+}
+
 // ── DIFF panel (P1-9) ─────────────────────────────────────────────────────────
 
 func TestDashboard_DiffPanel_StartsCollapsed(t *testing.T) {

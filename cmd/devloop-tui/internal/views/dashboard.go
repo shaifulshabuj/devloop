@@ -568,7 +568,7 @@ func readDaemonPID(projectRoot string) (int, bool) {
 }
 
 func (m DashboardModel) renderFooter(w int) string {
-	hints := "↑/↓ move  ·  / filter  ·  enter view  ·  r refresh  ·  q quit"
+	hints := "↑/↓ move  ·  / filter  ·  s spec  ·  d diff  ·  enter focus  ·  r refresh  ·  q quit"
 	return lipgloss.NewStyle().
 		Width(w).
 		Faint(true).
