@@ -97,7 +97,7 @@ func (m DashboardModel) Init() tea.Cmd {
 	}
 
 	if !m.opts.NoStream {
-		tailPath := filepath.Join(m.projectRoot, ".devloop", "pipeline.log")
+		tailPath := filepath.Join(m.projectRoot, ".devloop", "events.ndjson")
 		tailer := &stream.Tailer{Path: tailPath}
 		ctx, cancel := context.WithCancel(context.Background())
 		m.cancel = cancel

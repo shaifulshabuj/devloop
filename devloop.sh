@@ -227,10 +227,29 @@ _find_tui() {
   return 1
 }
 
+# ── Session status vocabulary ─────────────────────────────────────────────────
+# The single-word content of .devloop/sessions/<TASK-ID>/status is used by
+# `devloop resume`, the TUI, and the inbox watcher to decide what to do next.
+# Authoritative list of values:
+#   running              — pipeline currently executing a phase
+#   needs-work           — reviewer returned NEEDS_WORK; resumable via fix loop
+#   timed-out-at-plan    — approval gate timed out at architect plan stage (exit 3)
+#   timed-out-at-diff    — approval gate timed out at diff/review stage (exit 3)
+#   rejected-at-plan     — user rejected the architect plan; resumable via respec
+#   rejected-at-diff     — user rejected the diff at review; resumable via fix
+#   approved             — TERMINAL: reviewer approved; nothing to resume
+#   rejected             — TERMINAL: max retries exhausted or user gave up
+# Resumable statuses (everything not terminal) are listed in cmd_resume.
+# Gate-timeout exit code is 3 (see _approval_resolve).
+#
 # ── Structured Event Stream ───────────────────────────────────────────────────
 # emit_event <kind> [key=value ...]   — append one NDJSON line to two sinks:
 #   1) .devloop/events.ndjson          (project-wide stream — single source of truth for TUI / monitors)
 #   2) <session_dir>/events.ndjson     (per-session, if DEVLOOP_CURRENT_SESSION_ID is set)
+# Event kinds emitted today:
+#   session.start | session.end | session.resume
+#   phase.start   | phase.end   | phase.escalate    (from→to retries reason)
+#   approval.request | approval.decision
 # Failures are silent: a broken event stream must never break the pipeline.
 emit_event() {
   [[ "${DEVLOOP_EVENTS_DISABLED:-}" == "1" ]] && return 0
@@ -1853,6 +1872,22 @@ cmd_permit() {
 
     grant)
       local target="${2:-}"
+      # ── Bulk grant — resolve every pending request currently in the queue ──
+      if [[ "$target" == "--all" ]]; then
+        local granted=0 skipped=0 f id
+        shopt -s nullglob
+        for f in "$queue"/*.json; do
+          id="$(basename "$f" .json)"
+          if [[ -f "$queue/$id.response" ]]; then
+            skipped=$(( skipped + 1 ))
+            continue
+          fi
+          echo "allow" > "$queue/$id.response" && granted=$(( granted + 1 ))
+        done
+        shopt -u nullglob
+        success "Granted $granted pending request(s)${skipped:+ (skipped $skipped already resolved)}"
+        return 0
+      fi
       local req_file=""
       if [[ -n "$target" ]]; then
         req_file="$queue/$target.json"
@@ -1869,6 +1904,22 @@ cmd_permit() {
 
     deny)
       local target="${2:-}"
+      # ── Bulk deny — resolve every pending request currently in the queue ──
+      if [[ "$target" == "--all" ]]; then
+        local denied=0 skipped=0 f id
+        shopt -s nullglob
+        for f in "$queue"/*.json; do
+          id="$(basename "$f" .json)"
+          if [[ -f "$queue/$id.response" ]]; then
+            skipped=$(( skipped + 1 ))
+            continue
+          fi
+          echo "deny" > "$queue/$id.response" && denied=$(( denied + 1 ))
+        done
+        shopt -u nullglob
+        warn "Denied $denied pending request(s)${skipped:+ (skipped $skipped already resolved)}"
+        return 0
+      fi
       local req_file=""
       if [[ -n "$target" ]]; then
         req_file="$queue/$target.json"
@@ -1914,7 +1965,7 @@ cmd_permit() {
 
     *)
       error "Unknown permit subcommand: $subcmd"
-      echo "  devloop permit [status|watch|grant [id]|deny [id]|log|mode <off|auto|smart|strict>]"
+      echo "  devloop permit [status|watch|grant [id|--all]|deny [id|--all]|log|mode <off|auto|smart|strict>]"
       exit 1
       ;;
   esac
@@ -2034,6 +2085,15 @@ cmd_configure() {
 
 cmd_doctor() {
   load_config
+
+  # ── --json mode (for TUI / scripts) ─────────────────────────────────────────
+  # When --json is set, human output is suppressed (held in a temp file) and
+  # a JSON array of {check, status, message} rows is emitted on stdout at end.
+  local emit_json="false"
+  local _a
+  for _a in "$@"; do [[ "$_a" == "--json" ]] && emit_json="true"; done
+  local _DOCTOR_ROWS=()
+
   step "🩺 DevLoop Doctor"
   divider
 
@@ -2043,6 +2103,9 @@ cmd_doctor() {
     local label="$1"
     local ok="$2"
     local hint="${3:-}"
+    local _status
+    if [[ "$ok" == "true" ]]; then _status="pass"; else _status="fail"; fi
+    _DOCTOR_ROWS+=("$_status"$'\t'"$label"$'\t'"$hint")
     if [[ "$ok" == "true" ]]; then
       echo -e "  ${GREEN}✔${RESET}  $label"
       pass=$(( pass + 1 ))
@@ -2191,7 +2254,8 @@ cmd_doctor() {
   _chk "~/.devloop/ directory exists" "$ok" "devloop configure --global"
   if [[ -f "$DEVLOOP_GLOBAL_DIR/config.sh" ]]; then
     local custom_count
-    custom_count="$(grep -v '^#' "$DEVLOOP_GLOBAL_DIR/config.sh" | grep -v '^[[:space:]]*$' | wc -l | tr -d ' ')"
+    custom_count="$(grep -v '^#' "$DEVLOOP_GLOBAL_DIR/config.sh" 2>/dev/null | grep -v '^[[:space:]]*$' | wc -l | tr -d ' ' || true)"
+    [[ -z "$custom_count" ]] && custom_count=0
     echo -e "  ${GRAY}—${RESET}  Global config keys set: ${CYAN}${custom_count}${RESET}  (edit: ${CYAN}devloop configure --global${RESET})"
   else
     echo -e "  ${GRAY}—  No global config yet. Create with: devloop configure --global${RESET}"
@@ -2212,6 +2276,32 @@ cmd_doctor() {
   else
     success "All checks passed — DevLoop is healthy"
     echo ""
+  fi
+
+  # ── Emit JSON (if --json was passed) ────────────────────────────────────────
+  if [[ "$emit_json" == "true" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      printf '%s\n' "${_DOCTOR_ROWS[@]+"${_DOCTOR_ROWS[@]}"}" \
+        | jq -Rsc --argjson pass "$pass" --argjson fail "$fail" '
+            split("\n")
+            | map(select(length > 0))
+            | map(split("\t") | {status: .[0], check: .[1], message: .[2]})
+            | {pass: $pass, fail: $fail, checks: .}'
+    else
+      # Fallback hand-rolled JSON.
+      printf '{"pass":%d,"fail":%d,"checks":[' "$pass" "$fail"
+      local _first=true _row _st _ck _msg
+      for _row in "${_DOCTOR_ROWS[@]+"${_DOCTOR_ROWS[@]}"}"; do
+        _st="${_row%%	*}"
+        local _rest="${_row#*	}"
+        _ck="${_rest%%	*}"
+        _msg="${_rest#*	}"
+        _ck="${_ck//\"/\\\"}"; _msg="${_msg//\"/\\\"}"
+        if [[ "$_first" == "true" ]]; then _first=false; else printf ','; fi
+        printf '{"status":"%s","check":"%s","message":"%s"}' "$_st" "$_ck" "$_msg"
+      done
+      printf ']}\n'
+    fi
   fi
 }
 
@@ -3796,6 +3886,13 @@ cmd_daemon() {
     fi
   fi
 
+  # Detect --json flag in remaining args (supported by: status)
+  local emit_json="false"
+  local a
+  for a in "$@"; do
+    [[ "$a" == "--json" ]] && emit_json="true"
+  done
+
   local log_file="${DEVLOOP_DIR}/daemon.log"
   local pid_file="${DEVLOOP_DIR}/daemon.pid"
 
@@ -3818,6 +3915,38 @@ cmd_daemon() {
       return
       ;;
     status)
+      # ── Machine-readable JSON status (for TUI / scripts) ───────────────────
+      if [[ "$emit_json" == "true" ]]; then
+        local _pid="" _running="false" _rc=0 _maxed="false" _last=""
+        if [[ -f "$pid_file" ]]; then
+          _pid="$(cat "$pid_file" 2>/dev/null || echo "")"
+          if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+            _running="true"
+          fi
+        fi
+        if [[ -f "$log_file" ]]; then
+          _rc="$(grep -c 'Restarting in' "$log_file" 2>/dev/null || echo 0)"
+          _rc="${_rc//[^0-9]/}"
+          [[ -z "$_rc" ]] && _rc=0
+          grep -q 'Max restarts.*reached' "$log_file" 2>/dev/null && _maxed="true"
+          _last="$(grep 'Restarting in' "$log_file" 2>/dev/null | tail -1 | sed -E 's/^\[([^]]*)\].*/\1/' || true)"
+        fi
+        if command -v jq >/dev/null 2>&1; then
+          jq -nc \
+            --arg pid "$_pid" \
+            --argjson running "$_running" \
+            --argjson restart_count "$_rc" \
+            --argjson max_reached "$_maxed" \
+            --arg last_restart "$_last" \
+            --arg log_path "$log_file" \
+            '{pid: $pid, running: $running, restart_count: $restart_count, max_reached: $max_reached, last_restart: $last_restart, log_path: $log_path}'
+        else
+          # Best-effort fallback when jq is absent.
+          printf '{"pid":"%s","running":%s,"restart_count":%s,"max_reached":%s,"last_restart":"%s","log_path":"%s"}\n' \
+            "$_pid" "$_running" "$_rc" "$_maxed" "$_last" "$log_file"
+        fi
+        return
+      fi
       if [[ -f "$pid_file" ]]; then
         local pid; pid="$(cat "$pid_file")"
         if kill -0 "$pid" 2>/dev/null; then
@@ -8104,6 +8233,7 @@ $(cat "$review_file")
           # ── Phase 3: Re-architect (escalate strategy only) ──────────────
           if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
             warn "⚠  Max fix retries ($max_retries) reached — escalating to re-architect phase"
+            emit_event phase.escalate from=fix to=respec retries="$max_retries" reason=max-retries-exhausted
             _session_phase_start "respec"
             echo ""
             local combined_history=""
@@ -8868,6 +8998,7 @@ cmd_resume() {
           # ── Escalate to re-architect (escalate strategy only) ──────────────
           if [[ "$fix_strategy" == "escalate" && "$no_respec" == "false" ]]; then
             warn "⚠  Max fix retries ($max_retries) reached — escalating to re-architect phase"
+            emit_event phase.escalate from=fix to=respec retries="$max_retries" reason=max-retries-exhausted
             _session_phase_start "respec"
             echo ""
             local combined_history=""

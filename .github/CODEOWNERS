@@ -1,0 +1,7 @@
+# DevLoop CODEOWNERS
+# Auto-requests review from listed owners for matching paths.
+
+cmd/devloop-tui/**     @shaifulshabuj
+devloop.sh             @shaifulshabuj
+.github/workflows/**   @shaifulshabuj
+.github/CODEOWNERS     @shaifulshabuj

@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### TUI Redesign — Preflight (`tui-v5.3 / preflight`)
+
+Backend prerequisites for the upcoming TUI redesign (Phases 1–4). All
+additive; existing CLI surface is unchanged.
+
+#### Added
+
+- **`phase.escalate` NDJSON event** emitted from both fix-loop escalation
+  paths in `cmd_resume`, with fields `from=fix to=respec retries=<N>
+  reason=max-retries-exhausted`. Lets the new TUI react to re-architect
+  events without scraping worker stdout. (`DEVLOOP_EVENTS_DISABLED=1`
+  covers rollback.)
+- **`devloop permit grant --all`** and **`devloop permit deny --all`** —
+  bulk-resolve every pending request in `.devloop/permission-queue/`.
+  Replaces the dangerous "use `permit mode auto`" workaround which
+  silently flipped the global permission mode instead of just resolving
+  the queue.
+- **`devloop daemon status --json`** — emits
+  `{pid, running, restart_count, max_reached, last_restart, log_path}`.
+  Consumed by the TUI top bar's daemon liveness indicator.
+- **`devloop doctor --json`** — emits
+  `{pass, fail, checks: [{check, status, message}]}`.
+  Consumed by the TUI onboarding wizard's structured doctor table.
+- **Status vocabulary documented** in `devloop.sh` header alongside the
+  event-stream comment: `running | needs-work | timed-out-at-{plan,diff}
+  | rejected-at-{plan,diff} | approved | rejected`.
+
+#### Fixed
+
+- **Doctor early-exit on near-empty `~/.devloop/config.sh`**: when the
+  global config contained only comments and blank lines, the
+  `grep -v '^#' | grep -v '^[[:space:]]*$'` pipe returned 1 → `pipefail`
+  killed the function before the "Global Config keys set: N" line and
+  the trailing summary. Now tolerates the empty result and prints
+  `Registered projects` + summary correctly.
+- **TUI stream source standardised** on `.devloop/events.ndjson`. The
+  dashboard view was tailing the legacy `.devloop/pipeline.log` while
+  `run.go` and `chat.go` were already on `events.ndjson`; the
+  inconsistency meant phase events weren't visible in the dashboard's
+  live log.
+
+#### Project meta
+
+- `.github/workflows/tui-ci.yml` — Go build + test on PRs touching
+  `cmd/devloop-tui/**` or `devloop.sh`. Plus optional `shellcheck` job.
+- `.github/CODEOWNERS` — auto-assigns review on TUI and devloop.sh PRs.
+- `.github/ISSUE_TEMPLATE/{feature,bug,chore}.yml` +
+  `.github/pull_request_template.md` — standard issue/PR layout with
+  acceptance-criteria checkboxes and build/test verification.
+
+---
+
 ## [5.1.6] — 2026-05-17
 
 ### Fixed — reviewer chokes on huge diffs / provider error replies

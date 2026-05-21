@@ -1,0 +1,50 @@
+name: Feature
+description: New functionality or enhancement
+title: "[feature] "
+labels: ["type/feature"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: 1–2 sentence summary
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Motivation, brief reference, spec corrections (if any)
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable items as a checklist
+      value: |
+        - [ ] criterion 1
+        - [ ] criterion 2
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files touched
+      description: Paths the implementer will modify or create
+    validations:
+      required: false
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies
+      description: Issue numbers that must merge first
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes for implementer
+      description: Spec corrections, patterns to reuse, gotchas
+    validations:
+      required: false

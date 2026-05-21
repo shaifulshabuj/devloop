@@ -1,0 +1,25 @@
+name: Chore
+description: Maintenance, refactor, docs, infra — no user-visible behaviour change
+title: "[chore] "
+labels: ["type/chore"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done when
+      value: |
+        - [ ] item 1
+    validations:
+      required: true

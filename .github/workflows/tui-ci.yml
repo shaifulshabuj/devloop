@@ -1,0 +1,53 @@
+name: tui-ci
+
+on:
+  pull_request:
+    paths:
+      - 'cmd/devloop-tui/**'
+      - 'devloop.sh'
+      - '.github/workflows/tui-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/devloop-tui/**'
+      - 'devloop.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & test devloop-tui
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: cmd/devloop-tui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: cmd/devloop-tui/go.sum
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      - name: go vet
+        run: go vet ./...
+
+  shellcheck:
+    name: Shellcheck devloop.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: shellcheck -S warning devloop.sh || true
