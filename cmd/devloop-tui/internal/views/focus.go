@@ -104,6 +104,21 @@ type FocusModel struct {
 	// phase.escalate events and cleared on the next phase.start of the
 	// architect phase. Drives the blue ReArch styling + footer text.
 	reArchSessions map[string]bool
+
+	// LOG tab source (P4-D2): 0=events, 1=pipeline.log, 2=notifications.log,
+	// 3=sessions.log. Cycled with ',' (prev) / '.' (next) on the LOG tab.
+	logSource int
+}
+
+// logSources maps the cycling state to (label, relative-path).
+var logSources = []struct {
+	Label string
+	Path  string // relative to project root; empty = use per-session events
+}{
+	{"events", ""},
+	{"pipeline", ".devloop/pipeline.log"},
+	{"notifications", ".devloop/notifications.log"},
+	{"sessions", ".devloop/sessions.log"},
 }
 
 // NewFocus is the live constructor — use NewFocusWithOptions in tests so the
@@ -280,6 +295,17 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.dispatchPermit("deny", id))
 			}
 
+		case ",":
+			if m.tab == TabLog {
+				m.logSource = (m.logSource - 1 + len(logSources)) % len(logSources)
+				m = m.refreshViewport()
+			}
+		case ".":
+			if m.tab == TabLog {
+				m.logSource = (m.logSource + 1) % len(logSources)
+				m = m.refreshViewport()
+			}
+
 		case "left", "h":
 			if len(m.sessions) > 0 {
 				m.idx = (m.idx - 1 + len(m.sessions)) % len(m.sessions)
@@ -360,7 +386,13 @@ func (m FocusModel) renderPhases(w int, s stream.Session) string {
 }
 
 func (m FocusModel) renderTabs(w int) string {
-	labels := []string{"LOG", "SPEC", "DIFF"}
+	// Annotate the LOG label with the active sub-source so cycling is
+	// visible at a glance.
+	logLabel := "LOG"
+	if m.logSource > 0 {
+		logLabel = "LOG (" + logSources[m.logSource].Label + ")"
+	}
+	labels := []string{logLabel, "SPEC", "DIFF"}
 	if len(m.permitItems) > 0 {
 		labels = append(labels, fmt.Sprintf("PERMIT (%d)", len(m.permitItems)))
 	}
@@ -609,11 +641,26 @@ func (m FocusModel) refreshViewport() FocusModel {
 	var body string
 	switch m.tab {
 	case TabLog:
-		lines := m.logLines[id]
-		if len(lines) == 0 {
-			body = "(no events yet for " + id + " — waiting on stream)"
+		// LOG tab cycles between event stream (default) and the three
+		// .devloop/*.log files via , / . keys.
+		src := logSources[m.logSource]
+		if src.Path == "" {
+			lines := m.logLines[id]
+			if len(lines) == 0 {
+				body = "(no events yet for " + id + " — waiting on stream)"
+			} else {
+				body = strings.Join(lines, "\n")
+			}
 		} else {
-			body = strings.Join(lines, "\n")
+			b, err := os.ReadFile(filepath.Join(m.projectRoot, src.Path))
+			switch {
+			case err != nil && os.IsNotExist(err):
+				body = "(" + src.Path + " not present yet)"
+			case err != nil:
+				body = "(error reading " + src.Path + ": " + err.Error() + ")"
+			default:
+				body = string(b)
+			}
 		}
 	case TabSpec:
 		if cached, ok := m.specCache[id]; ok {
