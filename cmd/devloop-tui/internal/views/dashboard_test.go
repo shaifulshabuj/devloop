@@ -294,6 +294,78 @@ func TestDashboard_TopBar_DaemonRestarts(t *testing.T) {
 	}
 }
 
+// ── SPEC panel (P1-8) ─────────────────────────────────────────────────────────
+
+func TestDashboard_SpecPanel_StartsCollapsed(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-001", Feature: "f", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+
+	// Write a spec file so syncActive has something to load.
+	specDir := filepath.Join(root, ".devloop", "specs")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(specDir, s.ID+".md"), "# Spec\n\nUNIQUE_SPEC_BODY")
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, err := stream.Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+	m = driveModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	if m.specPanel.IsOpen() {
+		t.Fatal("expected SPEC panel collapsed by default")
+	}
+	out := stripANSI(m.View())
+	if strings.Contains(out, "UNIQUE_SPEC_BODY") {
+		t.Errorf("collapsed SPEC panel should not render body, but found UNIQUE_SPEC_BODY in output")
+	}
+}
+
+func TestDashboard_SpecPanel_OpensOnS(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-002", Feature: "f", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+	specDir := filepath.Join(root, ".devloop", "specs")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(specDir, s.ID+".md"), "# Spec\n\nUNIQUE_SPEC_BODY")
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, _ := stream.Scan(root)
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+	m = driveModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	// Press 's'
+	m = driveModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+
+	if !m.specPanel.IsOpen() {
+		t.Fatal("expected SPEC panel to open after pressing 's'")
+	}
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "UNIQUE_SPEC_BODY") {
+		t.Errorf("expected SPEC body 'UNIQUE_SPEC_BODY' in view after toggle, got %q", out)
+	}
+}
+
+func TestDashboard_SpecPanel_MissingSpecShowsPlaceholder(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-003", Feature: "f", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, _ := stream.Scan(root)
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+	m = driveModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = driveModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "no spec yet") {
+		t.Errorf("expected placeholder for missing spec, got %q", out)
+	}
+}
+
 func TestDashboard_TopBar_DaemonMaxRestarts(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {

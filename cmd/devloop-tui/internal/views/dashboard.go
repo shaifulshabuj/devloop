@@ -76,6 +76,11 @@ type DashboardModel struct {
 	daemonRestarts   int  // recent auto-restart count from daemon.log
 	daemonMaxReached bool // true once "Max restarts (...) reached" line is logged
 
+	// Collapsible SPEC panel — shows .devloop/specs/<TASK-ID>.md for the
+	// currently active task. Toggled with the `s` key.
+	specPanel        components.Panel
+	specLoadedForID  string // the TASK-ID whose spec content is in the panel
+
 	err      error // last non-fatal error shown in status bar
 	eventsCh <-chan stream.Event
 	errsCh   <-chan error
@@ -96,6 +101,7 @@ func NewDashboardWithOptions(projectRoot string, opts DashboardOptions) Dashboar
 		projectRoot: projectRoot,
 		opts:        opts,
 		picker:      components.NewPicker(nil),
+		specPanel:   components.NewPanel(components.PanelOptions{Label: "SPEC", ExpandedHeight: 10}),
 	}
 }
 
@@ -184,6 +190,21 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keyRefresh):
 			cmds = append(cmds, m.scanCmd())
+
+		case msg.String() == "s" && !m.picker.FilterFocused():
+			// Toggle the SPEC panel. Content is loaded lazily by
+			// syncActive whenever the highlighted task changes, so the
+			// first 's' press always has fresh content for the visible
+			// task.
+			m.specPanel = m.specPanel.Toggle()
+
+		case m.specPanel.IsOpen() && !m.picker.FilterFocused() &&
+			isScrollKey(msg.String()):
+			// While the panel is open, scroll keys (↑/↓/pgup/pgdn) go to
+			// the panel's viewport instead of the picker.
+			var panelCmd tea.Cmd
+			m.specPanel, panelCmd = m.specPanel.Update(msg)
+			cmds = append(cmds, panelCmd)
 
 		case msg.String() == "enter" && !m.picker.FilterFocused() && len(m.sessions) > 0:
 			// Enter on a highlighted task opens Focus Mode (Phase 2
@@ -346,6 +367,36 @@ func (m DashboardModel) refreshHealth() DashboardModel {
 	return m
 }
 
+// isScrollKey identifies the keystrokes a viewport-backed panel needs.
+// Kept narrow on purpose so navigation keys (j/k/up/down) still go to the
+// picker by default; only the explicit scroll keys are routed to the panel.
+func isScrollKey(s string) bool {
+	switch s {
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+		return true
+	}
+	return false
+}
+
+// loadSpecContent reads .devloop/specs/<TASK-ID>.md and returns either the
+// content or a friendly placeholder when the spec hasn't been written yet.
+// Errors other than missing-file are surfaced verbatim so the user can
+// see what's wrong.
+func (m DashboardModel) loadSpecContent(taskID string) string {
+	if taskID == "" {
+		return "(no task selected — pick one in the list)"
+	}
+	path := filepath.Join(m.projectRoot, ".devloop", "specs", taskID+".md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("(no spec yet for %s — run `devloop architect …`)", taskID)
+		}
+		return fmt.Sprintf("(error reading spec: %v)", err)
+	}
+	return string(b)
+}
+
 // readDaemonRestarts counts occurrences of the auto-restart marker emitted by
 // devloop.sh inside the most recent 50 lines of daemon.log. The result is the
 // "recent restart count" — not lifetime — which is what the top bar should
@@ -427,6 +478,10 @@ func (m DashboardModel) renderRight(w, h int) string {
 	} else {
 		content = m.renderSessionDetail(m.active, w-2) // -2 for divider + space
 	}
+
+	// Append the SPEC panel (collapsed = 1 line, open ≈ 11 lines).
+	panel := m.specPanel.SetSize(w - 2).View()
+	content = lipgloss.JoinVertical(lipgloss.Left, content, panel)
 
 	pane := lipgloss.NewStyle().
 		Width(w - 1). // leave 1 col for divider
@@ -616,16 +671,28 @@ func (m DashboardModel) patchPhaseState(sessionID, phase string, ps stream.Phase
 	return m
 }
 
-// syncActive aligns m.active with the picker's current selection.
+// syncActive aligns m.active with the picker's current selection and refreshes
+// any panels whose content depends on which task is active.
 func (m DashboardModel) syncActive() DashboardModel {
 	item, ok := m.picker.Selected()
 	if !ok {
 		m.active = nil
+		// Clear the spec panel so a stale spec isn't shown if the user
+		// later opens it.
+		if m.specLoadedForID != "" {
+			m.specPanel = m.specPanel.SetContent("")
+			m.specLoadedForID = ""
+		}
 		return m
 	}
 	for i := range m.sessions {
 		if m.sessions[i].ID == item.ID {
 			m.active = &m.sessions[i]
+			// Refresh the spec panel content if the active task changed.
+			if m.specLoadedForID != item.ID {
+				m.specPanel = m.specPanel.SetContent(m.loadSpecContent(item.ID))
+				m.specLoadedForID = item.ID
+			}
 			return m
 		}
 	}
