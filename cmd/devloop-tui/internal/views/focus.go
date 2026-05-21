@@ -12,10 +12,13 @@ package views
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -24,6 +27,16 @@ import (
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
 )
+
+// focusDiffLoadedMsg carries the result of an async git-diff for Focus Mode.
+type focusDiffLoadedMsg struct {
+	taskID  string
+	content string
+	err     error
+}
+
+// focusBodyHeight is the rendered viewport height for the per-tab body.
+const focusBodyHeight = 14
 
 // focusSessionsLoadedMsg carries the result of the initial session scan.
 type focusSessionsLoadedMsg struct {
@@ -67,6 +80,14 @@ type FocusModel struct {
 	width       int
 	height      int
 
+	// Per-tab content. A single viewport is shared across the three tabs;
+	// its content is swapped on tab switch (see refreshViewport).
+	vp           viewport.Model
+	specCache    map[string]string // TASK-ID → spec content
+	diffCache    map[string]string // TASK-ID → diff content
+	diffLoading  map[string]bool   // TASK-ID → goroutine in flight
+	logLines     map[string][]string // TASK-ID → recent log lines
+
 	err      error
 	eventsCh <-chan stream.Event
 	errsCh   <-chan error
@@ -89,6 +110,11 @@ func NewFocusWithOptions(projectRoot string, opts FocusOptions) FocusModel {
 		projectRoot: projectRoot,
 		opts:        opts,
 		idx:         -1,
+		vp:          viewport.New(0, focusBodyHeight),
+		specCache:   map[string]string{},
+		diffCache:   map[string]string{},
+		diffLoading: map[string]bool{},
+		logLines:    map[string][]string{},
 	}
 }
 
@@ -140,6 +166,17 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.sessions = msg.sessions
 			m.idx = m.resolveStartIndex()
+			m = m.refreshViewport()
+			if m.idx >= 0 {
+				cmds = append(cmds, m.maybeDispatchDiff()...)
+			}
+		}
+
+	case focusDiffLoadedMsg:
+		delete(m.diffLoading, msg.taskID)
+		m.diffCache[msg.taskID] = msg.content
+		if m.idx >= 0 && msg.taskID == m.sessions[m.idx].ID && m.tab == TabDiff {
+			m = m.refreshViewport()
 		}
 
 	case focusStreamEventMsg:
@@ -164,20 +201,40 @@ func (m FocusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			m.tab = TabLog
+			m = m.refreshViewport()
 		case "2":
 			m.tab = TabSpec
+			m = m.refreshViewport()
 		case "3":
 			m.tab = TabDiff
+			m = m.refreshViewport()
+			cmds = append(cmds, m.maybeDispatchDiff()...)
 		case "tab":
 			m.tab = (m.tab + 1) % 3
+			m = m.refreshViewport()
+			if m.tab == TabDiff {
+				cmds = append(cmds, m.maybeDispatchDiff()...)
+			}
 
 		case "left", "h":
 			if len(m.sessions) > 0 {
 				m.idx = (m.idx - 1 + len(m.sessions)) % len(m.sessions)
+				m = m.refreshViewport()
+				cmds = append(cmds, m.maybeDispatchDiff()...)
 			}
 		case "right", "l":
 			if len(m.sessions) > 0 {
 				m.idx = (m.idx + 1) % len(m.sessions)
+				m = m.refreshViewport()
+				cmds = append(cmds, m.maybeDispatchDiff()...)
+			}
+
+		default:
+			// Forward scroll keys to the active viewport.
+			if isScrollKey(msg.String()) {
+				var vpCmd tea.Cmd
+				m.vp, vpCmd = m.vp.Update(msg)
+				cmds = append(cmds, vpCmd)
 			}
 		}
 	}
@@ -257,15 +314,10 @@ func (m FocusModel) renderTabs(w int) string {
 }
 
 func (m FocusModel) renderTabBody(w int, s stream.Session) string {
-	switch m.tab {
-	case TabLog:
-		return theme.StyleLogLine.Render("(LOG tab — live event stream lands here in P2-3)")
-	case TabSpec:
-		return theme.StyleLogLine.Render("(SPEC tab — .devloop/specs/" + s.ID + ".md lands here in P2-3)")
-	case TabDiff:
-		return theme.StyleLogLine.Render("(DIFF tab — git diff baseline..HEAD lands here in P2-3)")
+	if w-4 > 0 {
+		m.vp.Width = w - 4
 	}
-	return ""
+	return lipgloss.NewStyle().Padding(0, 2).Render(m.vp.View())
 }
 
 func (m FocusModel) renderFooter(w int) string {
@@ -294,6 +346,118 @@ func (m FocusModel) tickCmd() tea.Cmd {
 	})
 }
 
+// refreshViewport swaps the shared viewport's content to match the current
+// (idx, tab) combination. Spec content is cached; diff is filled in by
+// focusDiffLoadedMsg; log content is the per-session line buffer.
+func (m FocusModel) refreshViewport() FocusModel {
+	if m.idx < 0 || m.idx >= len(m.sessions) {
+		m.vp.SetContent("")
+		return m
+	}
+	id := m.sessions[m.idx].ID
+	var body string
+	switch m.tab {
+	case TabLog:
+		lines := m.logLines[id]
+		if len(lines) == 0 {
+			body = "(no events yet for " + id + " — waiting on stream)"
+		} else {
+			body = strings.Join(lines, "\n")
+		}
+	case TabSpec:
+		if cached, ok := m.specCache[id]; ok {
+			body = cached
+		} else {
+			body = m.loadSpecForTab(id)
+			m.specCache[id] = body
+		}
+	case TabDiff:
+		if cached, ok := m.diffCache[id]; ok {
+			body = cached
+		} else if m.diffLoading[id] {
+			body = "loading diff…"
+		} else {
+			body = "(press 3 or tab to focus the DIFF tab to load)"
+		}
+	}
+	m.vp.SetContent(body)
+	m.vp.GotoTop()
+	return m
+}
+
+// loadSpecForTab reads .devloop/specs/<TASK-ID>.md or a placeholder.
+func (m FocusModel) loadSpecForTab(taskID string) string {
+	path := filepath.Join(m.projectRoot, ".devloop", "specs", taskID+".md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "(no spec yet for " + taskID + " — run `devloop architect …`)"
+		}
+		return fmt.Sprintf("(error reading spec: %v)", err)
+	}
+	return string(b)
+}
+
+// maybeDispatchDiff returns a tea.Cmd that kicks off an async git-diff for
+// the current task when the DIFF tab is active and the result is not yet
+// cached. Returns nothing if already cached or in flight.
+func (m FocusModel) maybeDispatchDiff() []tea.Cmd {
+	if m.idx < 0 || m.tab != TabDiff {
+		return nil
+	}
+	id := m.sessions[m.idx].ID
+	if _, ok := m.diffCache[id]; ok {
+		return nil
+	}
+	if m.diffLoading[id] {
+		return nil
+	}
+	m.diffLoading[id] = true
+	return []tea.Cmd{m.dispatchFocusDiff(id)}
+}
+
+// dispatchFocusDiff is the goroutine-backed git-diff worker. Mirrors
+// dashboard's dispatchDiffLoad but emits focusDiffLoadedMsg so the two
+// views' message graphs stay independent.
+func (m FocusModel) dispatchFocusDiff(taskID string) tea.Cmd {
+	root := m.projectRoot
+	return func() tea.Msg {
+		baselinePath := filepath.Join(root, ".devloop", "specs", taskID+".pre-commit")
+		baseline := ""
+		if b, err := os.ReadFile(baselinePath); err == nil {
+			baseline = strings.TrimSpace(string(b))
+		}
+		// Reuse dashboard.go's dispatchDiffLoad return path by wrapping
+		// the same helper inline. Keeping this separate from the
+		// dashboard's diff so each view can evolve its caching strategy.
+		args := []string{"-C", root, "--no-pager", "diff", "--no-color"}
+		if baseline != "" {
+			args = append(args, baseline+"..HEAD")
+		} else {
+			args = append(args, "HEAD")
+		}
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			return focusDiffLoadedMsg{
+				taskID:  taskID,
+				content: fmt.Sprintf("(git diff failed: %v)\n%s", err, out),
+				err:     err,
+			}
+		}
+		content := string(out)
+		if strings.TrimSpace(content) == "" {
+			if baseline == "" {
+				content = "(no baseline recorded — run `devloop work` to capture one)"
+			} else {
+				content = fmt.Sprintf("(no diff vs baseline %s)", baseline[:min(len(baseline), 7)])
+			}
+		} else {
+			content = colourisedDiff(content)
+		}
+		return focusDiffLoadedMsg{taskID: taskID, content: content}
+	}
+}
+
 // resolveStartIndex translates the (idx, id) handoff into a valid index
 // inside the freshly-scanned session list. id wins on conflict — indices
 // can be stale after a rescan.
@@ -311,9 +475,9 @@ func (m FocusModel) resolveStartIndex() int {
 	return 0
 }
 
-// applyStreamEvent merges one Event into the appropriate session entry. The
-// scaffold updates session status/phases; richer per-tab updates land in
-// P2-3.
+// applyStreamEvent merges one Event into the appropriate session entry and
+// appends a human-readable line into that session's log buffer for the LOG
+// tab.
 func (m FocusModel) applyStreamEvent(ev stream.Event) FocusModel {
 	if ev.Session == "" {
 		return m
@@ -333,10 +497,51 @@ func (m FocusModel) applyStreamEvent(ev stream.Event) FocusModel {
 				ps.Time = ev.TS
 				m.sessions[i].PhaseStates[ev.Phase] = ps
 			}
+			// Append a log line, keeping at most 200 per session to bound
+			// memory for long-running pipelines.
+			line := formatFocusEventLine(ev)
+			lines := append(m.logLines[ev.Session], line)
+			if len(lines) > 200 {
+				lines = lines[len(lines)-200:]
+			}
+			m.logLines[ev.Session] = lines
+
+			// If the LOG tab is showing this session, refresh viewport.
+			if m.idx >= 0 && m.sessions[m.idx].ID == ev.Session && m.tab == TabLog {
+				m = m.refreshViewport()
+				m.vp.GotoBottom()
+			}
 			return m
 		}
 	}
 	return m
+}
+
+// formatFocusEventLine renders one NDJSON event as a single log line for the
+// Focus Mode LOG tab. Distinct from run.go's formatEventLine so the two
+// views' formatting can evolve independently.
+func formatFocusEventLine(ev stream.Event) string {
+	ts := ev.TS.Format("15:04:05")
+	switch ev.Kind {
+	case "phase.start":
+		return fmt.Sprintf("%s  %-12s  ▶ start", ts, ev.Phase)
+	case "phase.end":
+		return fmt.Sprintf("%s  %-12s  ■ %s", ts, ev.Phase, ev.Status)
+	case "session.start":
+		return fmt.Sprintf("%s  session       ▶ start", ts)
+	case "session.end":
+		return fmt.Sprintf("%s  session       ■ %s", ts, ev.Status)
+	case "session.resume":
+		return fmt.Sprintf("%s  session       ↻ resume", ts)
+	case "phase.escalate":
+		return fmt.Sprintf("%s  escalate      ⟳ re-architect (retries exhausted)", ts)
+	case "approval.request":
+		return fmt.Sprintf("%s  approval      ? request", ts)
+	case "approval.decision":
+		return fmt.Sprintf("%s  approval      ✓ %s", ts, ev.Status)
+	default:
+		return fmt.Sprintf("%s  %s  %s", ts, ev.Kind, ev.Status)
+	}
 }
 
 // ── Stream message glue ───────────────────────────────────────────────────────

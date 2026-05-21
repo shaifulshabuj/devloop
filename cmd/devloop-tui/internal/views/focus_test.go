@@ -1,6 +1,8 @@
 package views
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,6 +97,57 @@ func TestFocus_TabSwitching(t *testing.T) {
 	if m.tab != TabLog {
 		t.Errorf("expected tab cycle wrap → TabLog, got %v", m.tab)
 	}
+}
+
+func TestFocus_SpecTabLoadsContent(t *testing.T) {
+	root := t.TempDir()
+	if err := writeAt(root, ".devloop/specs/TASK-A.md", "FOCUS_SPEC_BODY"); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	m := NewFocusWithOptions(root, FocusOptions{StartID: "TASK-A", NoStream: true})
+	m = driveFocus(t, m, focusSessionsLoadedMsg{sessions: []stream.Session{
+		{ID: "TASK-A", Feature: "a"},
+	}})
+	m = driveFocus(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // SPEC tab
+	m = driveFocus(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "FOCUS_SPEC_BODY") {
+		t.Errorf("expected spec body in SPEC tab view, got %q", out)
+	}
+}
+
+func TestFocus_LogTabAccumulatesEvents(t *testing.T) {
+	root := t.TempDir()
+	m := NewFocusWithOptions(root, FocusOptions{StartID: "TASK-A", NoStream: true})
+	m = driveFocus(t, m, focusSessionsLoadedMsg{sessions: []stream.Session{
+		{ID: "TASK-A", Feature: "a"},
+	}})
+	// Initially LOG tab is empty.
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "no events yet") {
+		t.Errorf("expected empty-log hint, got %q", out)
+	}
+	// Feed a phase.start event.
+	m = driveFocus(t, m, focusStreamEventMsg{event: stream.Event{
+		Session: "TASK-A",
+		Kind:    "phase.start",
+		Phase:   "worker",
+	}})
+	out = stripANSI(m.View())
+	if !strings.Contains(out, "worker") || !strings.Contains(out, "start") {
+		t.Errorf("expected log line for phase.start worker, got %q", out)
+	}
+}
+
+// writeAt creates a file at root/relpath with the given content, creating
+// parent directories as needed. Returns the first error encountered.
+func writeAt(root, relpath, content string) error {
+	full := filepath.Join(root, relpath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(full, []byte(content), 0o644)
 }
 
 func TestFocus_EscEmitsCloseFocus(t *testing.T) {
