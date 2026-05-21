@@ -9,6 +9,7 @@ package app
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/views"
 )
 
@@ -22,6 +23,9 @@ const (
 	ViewRun
 	// ViewChat is the slash-command REPL interface.
 	ViewChat
+	// ViewFocus is the single-task full-screen mode (Phase 2). Reached
+	// from the dashboard via uimsg.OpenFocus; returns via uimsg.CloseFocus.
+	ViewFocus
 	// Future: ViewInbox
 )
 
@@ -32,6 +36,12 @@ type SwitchViewMsg struct {
 	Target    ViewID
 	RunTaskID string // optional: overrides Options.RunTaskID for ViewRun
 	ChatMode  string // optional: overrides Options.ChatMode for ViewChat
+
+	// FocusSessionIdx / FocusSessionID let the dashboard hand off the
+	// highlighted task when switching into ViewFocus. Both are optional
+	// and consulted only when Target == ViewFocus.
+	FocusSessionIdx int
+	FocusSessionID  string
 }
 
 // Options configures AppModel construction.
@@ -116,6 +126,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSwitch(swm)
 	}
 
+	// uimsg.OpenFocus / CloseFocus are routed to view transitions so the
+	// dashboard and Focus Mode don't need to know about each other.
+	if of, ok := msg.(uimsg.OpenFocus); ok {
+		return m.handleSwitch(SwitchViewMsg{
+			Target:          ViewFocus,
+			FocusSessionIdx: of.SessionIdx,
+			FocusSessionID:  of.SessionID,
+		})
+	}
+	if _, ok := msg.(uimsg.CloseFocus); ok {
+		return m.handleSwitch(SwitchViewMsg{Target: ViewDashboard})
+	}
+
 	updated, cmd := m.activeView().Update(msg)
 	m = m.setActiveView(updated)
 	return m, cmd
@@ -168,6 +191,8 @@ func (m AppModel) handleSwitch(msg SwitchViewMsg) (AppModel, tea.Cmd) {
 			m.views[ViewRun] = buildRun(root, m.opts)
 		case ViewChat:
 			m.views[ViewChat] = buildChat(root, m.opts)
+		case ViewFocus:
+			m.views[ViewFocus] = buildFocus(root, m.opts, msg.FocusSessionIdx, msg.FocusSessionID)
 		}
 	}
 
@@ -213,5 +238,15 @@ func buildChat(root string, opts Options) tea.Model {
 	}
 	return views.NewChatWithOptions(root, views.ChatOptions{
 		StartMode: opts.ChatMode,
+	})
+}
+
+// buildFocus constructs the Focus Mode view rooted at the given session.
+// idx/id come from the originating uimsg.OpenFocus message.
+func buildFocus(root string, opts Options, idx int, id string) tea.Model {
+	return views.NewFocusWithOptions(root, views.FocusOptions{
+		StartIndex: idx,
+		StartID:    id,
+		NoStream:   opts.Test,
 	})
 }
