@@ -4,10 +4,12 @@ package views
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -15,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/health"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
 )
@@ -64,6 +67,12 @@ type DashboardModel struct {
 	width       int
 	height      int
 
+	// Cached provider-failover snapshot for the top bar; refreshed on a
+	// slower cadence than the spinner (see refreshHealth + healthTicker).
+	health    health.ProviderHealth
+	daemonPID int  // 0 if not running / pidfile missing
+	daemonOK  bool // last kill -0 result
+
 	err      error // last non-fatal error shown in status bar
 	eventsCh <-chan stream.Event
 	errsCh   <-chan error
@@ -92,6 +101,9 @@ func NewDashboardWithOptions(projectRoot string, opts DashboardOptions) Dashboar
 // Init starts the NDJSON tailer (unless NoStream), kicks the 100 ms ticker, and
 // emits an initial Scan() result.
 func (m DashboardModel) Init() tea.Cmd {
+	// Health snapshot is populated on the first tickMsg (Init can't mutate
+	// the framework-held model, only spawn Cmds). The dashboard renders
+	// healthy by default until the first refresh completes (~100 ms).
 	cmds := []tea.Cmd{
 		m.scanCmd(),
 		m.tickCmd(),
@@ -129,6 +141,12 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.resizePanes()
 
 	case tickMsg:
+		// Refresh provider-health + daemon liveness on the first tick
+		// and then every ~5 ticks (≈ 500 ms): cheap (one stat + small
+		// file read) but not per-frame, which would dominate file I/O.
+		if m.spinnerTick%5 == 0 {
+			m = m.refreshHealth()
+		}
 		m.spinnerTick++
 		cmds = append(cmds, m.tickCmd())
 
@@ -225,13 +243,97 @@ func (m DashboardModel) renderHeader(w int) string {
 		)
 	}
 
-	content := title + "  " + info + status
+	left := title + "  " + info + status
+	right := m.renderTopBar()
+
+	// Right-justify the top bar within the available width.
+	pad := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 1 {
+		pad = 1
+	}
+	content := left + strings.Repeat(" ", pad) + right
+
 	return lipgloss.NewStyle().
 		Width(w).
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderBottom(true).
 		BorderForeground(theme.Dim).
 		Render(content)
+}
+
+// renderTopBar formats the provider/daemon health chips:
+//
+//	main ✓  ·  worker ✓  ·  daemon ✓
+//
+// When a side is on a fallback provider the chip becomes
+//
+//	main ✗→copilot
+//
+// (i.e., the active fallback is named so the user knows what they're
+// actually running). The daemon chip flips to red ✗ when the pidfile is
+// stale or absent.
+func (m DashboardModel) renderTopBar() string {
+	parts := []string{
+		formatHealthChip("main", m.health.Main),
+		formatHealthChip("worker", m.health.Worker),
+		formatDaemonChip(m.daemonOK),
+	}
+	sep := lipgloss.NewStyle().Foreground(theme.Dim).Render(" · ")
+	return strings.Join(parts, sep)
+}
+
+func formatHealthChip(label string, s health.State) string {
+	if !s.Limited() {
+		ok := lipgloss.NewStyle().Foreground(theme.Green).Render("✓")
+		return label + " " + ok
+	}
+	mark := lipgloss.NewStyle().Foreground(theme.Yellow).Render("✗")
+	fb := s.Override
+	if fb == "" {
+		fb = "fallback"
+	}
+	arrow := lipgloss.NewStyle().Foreground(theme.Dim).Render("→")
+	name := lipgloss.NewStyle().Foreground(theme.Yellow).Render(fb)
+	return label + " " + mark + arrow + name
+}
+
+func formatDaemonChip(running bool) string {
+	if running {
+		return "daemon " + lipgloss.NewStyle().Foreground(theme.Green).Render("✓")
+	}
+	return "daemon " + lipgloss.NewStyle().Foreground(theme.Red).Render("✗")
+}
+
+// refreshHealth re-reads provider-health.sh and re-checks the daemon pidfile.
+// Cheap enough to call from the 100ms tick; if it ever becomes a hot path,
+// gate behind a slower cadence.
+func (m DashboardModel) refreshHealth() DashboardModel {
+	m.health = health.Load(m.projectRoot)
+	m.daemonPID, m.daemonOK = readDaemonPID(m.projectRoot)
+	return m
+}
+
+// readDaemonPID returns (pid, alive) by reading .devloop/daemon.pid and
+// sending signal 0. A missing or stale pidfile reports (0, false).
+func readDaemonPID(projectRoot string) (int, bool) {
+	b, err := os.ReadFile(filepath.Join(projectRoot, ".devloop", "daemon.pid"))
+	if err != nil {
+		return 0, false
+	}
+	pidStr := strings.TrimSpace(string(b))
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return pid, false
+	}
+	// signal 0: existence check, no actual signal delivered.
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		return pid, false
+	}
+	return pid, true
 }
 
 func (m DashboardModel) renderFooter(w int) string {

@@ -1,6 +1,7 @@
 package views
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,4 +213,89 @@ func makeSessionInRoot(t *testing.T, root string, s stream.Session) string {
 		writeFile(t, filepath.Join(dir, "status"), s.Status)
 	}
 	return dir
+}
+
+// ── Top bar (P1-3) ────────────────────────────────────────────────────────────
+
+func TestDashboard_TopBar_DefaultsHealthy(t *testing.T) {
+	root := t.TempDir()
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = m.refreshHealth()
+
+	out := stripANSI(m.renderHeader(120))
+
+	if !strings.Contains(out, "main ✓") {
+		t.Errorf("expected 'main ✓' in header, got %q", out)
+	}
+	if !strings.Contains(out, "worker ✓") {
+		t.Errorf("expected 'worker ✓' in header, got %q", out)
+	}
+	// No pidfile written → daemon ✗
+	if !strings.Contains(out, "daemon ✗") {
+		t.Errorf("expected 'daemon ✗' in header (no pidfile), got %q", out)
+	}
+}
+
+func TestDashboard_TopBar_MainLimited(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(root, ".devloop", "provider-health.sh"),
+		"HEALTH_MAIN_LIMITED_SINCE=1716020118\nHEALTH_MAIN_OVERRIDE=copilot\n")
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = m.refreshHealth()
+
+	out := stripANSI(m.renderHeader(120))
+
+	if !strings.Contains(out, "main ✗→copilot") {
+		t.Errorf("expected 'main ✗→copilot' in header, got %q", out)
+	}
+	if !strings.Contains(out, "worker ✓") {
+		t.Errorf("expected 'worker ✓' (worker still healthy) in header, got %q", out)
+	}
+}
+
+func TestDashboard_TopBar_DaemonAlive(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Use our own PID — guaranteed alive while the test is running.
+	writeFile(t, filepath.Join(root, ".devloop", "daemon.pid"),
+		fmt.Sprintf("%d\n", os.Getpid()))
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = m.refreshHealth()
+
+	out := stripANSI(m.renderHeader(120))
+	if !strings.Contains(out, "daemon ✓") {
+		t.Errorf("expected 'daemon ✓' (PID %d is us), got %q", os.Getpid(), out)
+	}
+}
+
+// stripANSI removes ANSI colour escape sequences so test assertions can match
+// the rendered visible text directly.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			// Skip past the CSI sequence up to a letter terminator.
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }
