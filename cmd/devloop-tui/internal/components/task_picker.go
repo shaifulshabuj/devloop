@@ -228,6 +228,8 @@ func (p Picker) SetSize(width, height int) Picker {
 }
 
 // applyFilter re-filters p.items by the current filter value and resets the list.
+// Uses the shared FuzzyMatch primitive so picker and palette (Phase 2) stay
+// behaviourally identical.
 func (p Picker) applyFilter() Picker {
 	query := strings.ToLower(p.filter.Value())
 	if query == "" {
@@ -236,31 +238,13 @@ func (p Picker) applyFilter() Picker {
 	}
 	var filtered []list.Item
 	for _, item := range p.items {
-		if fuzzyMatch(query, strings.ToLower(item.Title)) ||
-			fuzzyMatch(query, strings.ToLower(item.Subtitle)) {
+		if FuzzyMatch(query, strings.ToLower(item.Title)) ||
+			FuzzyMatch(query, strings.ToLower(item.Subtitle)) {
 			filtered = append(filtered, item)
 		}
 	}
 	p.list.SetItems(filtered)
 	return p
-}
-
-// fuzzyMatch returns true when every rune in query appears in order in text.
-func fuzzyMatch(query, text string) bool {
-	if query == "" {
-		return true
-	}
-	qi := 0
-	queryRunes := []rune(query)
-	for _, r := range text {
-		if qi < len(queryRunes) && r == queryRunes[qi] {
-			qi++
-		}
-		if qi == len(queryRunes) {
-			return true
-		}
-	}
-	return qi == len(queryRunes)
 }
 
 // itemsToListItems converts []Item to []list.Item (interface slice).
