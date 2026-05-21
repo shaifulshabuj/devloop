@@ -186,6 +186,65 @@ _Run `devloop agent-sync` to refresh docs and check for provider updates._
 ## Stack
 See devloop.config.sh for project-specific stack details.
 
+## TUI — `cmd/devloop-tui` (shipped v5.3)
+
+A Go TUI (Bubble Tea + Lipgloss) sits beside the bash engine, watching the
+same `.devloop/` directory it reads and writes. CLI behaviour is unchanged;
+the TUI is opt-in.
+
+### Package layout
+
+```
+cmd/devloop-tui/
+├── main.go                            ← subcommand dispatch
+└── internal/
+    ├── theme/      colors.go          ← single source of truth for colour
+    ├── health/     health.go          ← parses provider-health.sh
+    ├── permit/     permit.go          ← parses permission-queue UUIDs
+    ├── uimsg/      uimsg.go           ← cross-package tea.Msg (no cycles)
+    ├── stream/     events, tailer, session_scan   (DO NOT MODIFY — stable)
+    ├── components/ filter, panel, palette, task_picker, pipeline_grid
+    ├── views/      dashboard, focus, chat, run, onboard
+    └── app/        app.go              ← root router + palette overlay
+```
+
+### Hard reuse rules (enforced by review)
+
+- Subprocess execution flows through `chat.dispatchShell` — no new
+  `exec.Command` paths in view code.
+- NDJSON events come via `stream.Tailer` — no ad-hoc re-reads of
+  `events.ndjson`.
+- All colours via `theme.*`. Zero raw `lipgloss.Color("…")` literals
+  outside the theme package.
+- Cross-package messages live in `internal/uimsg` so `app` can route them
+  without creating an import cycle with `views`.
+
+### Key files agents will touch
+
+| File | Purpose |
+|------|---------|
+| `internal/views/dashboard.go` | Split pane + top bar + SPEC/DIFF panels |
+| `internal/views/focus.go` | Single-task view with LOG/SPEC/DIFF/PERMIT tabs |
+| `internal/views/onboard.go` | First-run wizard (init + doctor) |
+| `internal/components/palette.go` | Command palette with 18 default actions |
+| `internal/app/app.go` | Router; intercepts `space`, OpenFocus, CloseFocus, PaletteRun |
+
+### File paths the TUI consumes (read-only, written by `devloop.sh`)
+
+| Path | Used by |
+|------|---------|
+| `.devloop/events.ndjson` | Live event stream (dashboard, focus) |
+| `.devloop/sessions/<TASK-ID>/events.ndjson` | Per-session events |
+| `.devloop/sessions/<TASK-ID>/status` | Gate-timeout detection |
+| `.devloop/specs/<TASK-ID>.md` | SPEC panel content |
+| `.devloop/specs/<TASK-ID>.pre-commit` | DIFF panel baseline hash |
+| `.devloop/permission-queue/<UUID>.json` | Permit queue items |
+| `.devloop/provider-health.sh` | Provider failover snapshot |
+| `.devloop/daemon.pid`, `daemon.log` | Daemon liveness + restart count |
+
+→ Full TUI reference: [README — TUI section](./README.md#tui--devloop-tui)
+→ TUI deep dive: [cmd/devloop-tui/README.md](./cmd/devloop-tui/README.md)
+
 ## Learned Patterns
 <!-- devloop learn appends dated lessons here -->
 <!-- DEVLOOP:CLAUDE:END -->

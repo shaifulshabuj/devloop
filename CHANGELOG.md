@@ -7,48 +7,150 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### TUI Redesign — Preflight (`tui-v5.3 / preflight`)
+(no unreleased changes)
 
-Backend prerequisites for the upcoming TUI redesign (Phases 1–4). All
-additive; existing CLI surface is unchanged.
+---
 
-#### Added
+## [5.3.0] — 2026-05-22
+
+**TUI Redesign**: `devloop-tui` graduates from a rough side-binary into a
+first-class user surface. Dashboard, Focus Mode, Command Palette, and an
+Onboarding Wizard land together — plus the backend hooks they consume.
+
+CLI behaviour is unchanged. The redesign is purely additive: `devloop-tui`
+is opt-in, and the existing `devloop run/work/review/fix` commands keep
+running exactly as before.
+
+### Added — TUI (`cmd/devloop-tui`)
+
+#### Dashboard (Phase 1)
+
+- **Provider top bar** showing main/worker/daemon health at a glance:
+  - `main ✓  ·  worker ✓  ·  daemon ✓`        — all healthy
+  - `main ✗→copilot  ·  worker ✓  ·  daemon ✓`  — main failed over to a
+    named fallback
+  - `daemon ✓ ×N`                              — daemon has restarted N
+    times recently (yellow)
+  - `daemon ⊘ ×N max`                          — auto-restart budget
+    exhausted (red)
+  - `⚑ N pending` chip when the permission queue has items (yellow)
+- **Fuzzy task filter** — press `/` to filter the task list as you type.
+- **Collapsible SPEC panel** (`s` toggle) — viewport-backed view of
+  `.devloop/specs/<TASK-ID>.md` for the highlighted task; reloads as you
+  navigate.
+- **Collapsible DIFF panel** (`d` toggle) — asynchronous
+  `git diff <baseline>..HEAD` using the recorded `pre-commit` hash;
+  +/- lines coloured green/red; falls back to `git diff HEAD` when no
+  baseline is recorded; non-blocking goroutine load.
+- **Secondary "quiet" line** under tasks whose running phase has produced
+  no output for longer than the configured threshold (default 10 min,
+  override via `DEVLOOP_STUCK_THRESHOLD_MIN`).
+
+#### Focus Mode (Phase 2)
+
+A single-task full-screen view reached by pressing `enter` on a task.
+
+- **Phase track** rendered with the same `pipeline_grid` component the
+  dashboard uses (consistent visualisation across views).
+- **Tab switcher**: `1`/`2`/`3` (or `tab`) cycle through
+  `LOG · SPEC · DIFF`. A 4th `PERMIT (N)` tab appears only when the
+  queue has items.
+- **`←/→` task navigation** with wrap-around (also `h`/`l` vim-style).
+- **LOG sub-source cycling**: inside the LOG tab `,`/`.` switch between
+  the live per-session event stream and the global
+  `.devloop/{pipeline,notifications,sessions}.log` files. The active
+  source is appended to the tab label (e.g. `LOG (notifications)`).
+- **Contextual footer** that reacts to session state:
+  - Default: `←/→ task · 1/2/3 tab · space actions · esc back`
+  - Quiet phase: `⚠ <phase> quiet 14m  ·  Z resume  ·  esc back`
+  - Gate timeout: `⚠ approval timed out: "<cmd>" · tab 4 permit · esc back`
+  - Re-architecting (after `phase.escalate`): `⟳ re-architecting after
+    retries exhausted · waiting for new spec…`
+
+#### Command Palette (Phase 2)
+
+- **`space` opens the palette** from any view (suppressed when an input
+  field is focused, e.g. chat or filter).
+- **18 default actions** covering the full pipeline: architect, work,
+  review, fix, learn, tasks, providers, diff, hooks, update, run,
+  permit grant/deny/status, daemon start/stop/log, resume.
+- **Fuzzy search** filters actions as you type; **single-letter
+  shortcuts** dispatch directly when the filter is empty.
+- **Dispatch via chat scrollback** — selected actions run through the
+  existing chat `dispatchShell` so output streams in the same place as
+  manual slash commands. No second subprocess pattern.
+
+#### Onboarding Wizard (Phase 3)
+
+- **Auto-launches** when `devloop.config.sh` is missing in the working
+  directory. Or invoked explicitly via `devloop-tui onboard`.
+- **Streamed `devloop init`** with structured parsing of `✔ Created:` /
+  `✔ Updated:` lines.
+- **`devloop doctor --json` consumer** — renders each check as a green
+  ✓ / red ✗ row with the hint message; summary line below.
+- **READY box** with green border when all checks pass (`enter` opens
+  the dashboard); yellow warning when some failed.
+
+#### Permit Queue (Phase 4)
+
+- **`internal/permit` package** parses `.devloop/permission-queue/<UUID>.json`
+  files and surfaces them via:
+  - Top-bar `⚑ N pending` indicator (dashboard).
+  - Conditional `PERMIT (N)` tab in Focus Mode showing each request's
+    command + tool + relative time + short ID.
+  - In-tab `g` grants / `x` denies the selected item by dispatching
+    `bash devloop.sh permit grant|deny <ID>` and refreshing the queue.
+  - Palette `G permit grant` / `X permit deny` / `Q permit status`
+    actions.
+- **Robust against races**: items vanishing mid-scan are skipped;
+  malformed JSON files are ignored silently; the UI never panics on a
+  half-written queue file.
+
+#### Quiet / Stuck / Re-architect (Phase 4)
+
+- **Wording**: a no-output running phase is **"quiet"**, never "stuck" —
+  a long refactor isn't a failure. Reserve "stuck" wording for the
+  genuinely-blocked gate-timeout case.
+- **Gate-timeout detection**: reads `.devloop/sessions/<TASK-ID>/status`
+  and reconstructs the offending command from the per-session
+  `events.ndjson`'s last `approval.request` event.
+- **Re-architect signalling**: Focus Mode subscribes to the new
+  `phase.escalate` NDJSON event (no stdout scraping) and renders the
+  active phase card in blue while waiting for the next `phase.start`.
+
+### Added — Backend (`devloop.sh`)
 
 - **`phase.escalate` NDJSON event** emitted from both fix-loop escalation
-  paths in `cmd_resume`, with fields `from=fix to=respec retries=<N>
-  reason=max-retries-exhausted`. Lets the new TUI react to re-architect
-  events without scraping worker stdout. (`DEVLOOP_EVENTS_DISABLED=1`
-  covers rollback.)
+  paths in `cmd_resume`. Fields: `from=fix to=respec retries=<N>
+  reason=max-retries-exhausted`. Suppressible via `DEVLOOP_EVENTS_DISABLED=1`.
 - **`devloop permit grant --all`** and **`devloop permit deny --all`** —
   bulk-resolve every pending request in `.devloop/permission-queue/`.
   Replaces the dangerous "use `permit mode auto`" workaround which
-  silently flipped the global permission mode instead of just resolving
-  the queue.
+  silently flipped the global permission mode instead of resolving the
+  queue.
 - **`devloop daemon status --json`** — emits
   `{pid, running, restart_count, max_reached, last_restart, log_path}`.
-  Consumed by the TUI top bar's daemon liveness indicator.
 - **`devloop doctor --json`** — emits
   `{pass, fail, checks: [{check, status, message}]}`.
-  Consumed by the TUI onboarding wizard's structured doctor table.
-- **Status vocabulary documented** in `devloop.sh` header alongside the
-  event-stream comment: `running | needs-work | timed-out-at-{plan,diff}
-  | rejected-at-{plan,diff} | approved | rejected`.
+- **Session status vocabulary documented** in `devloop.sh` header
+  alongside the event-stream comment block:
+  `running | needs-work | timed-out-at-{plan,diff} |
+  rejected-at-{plan,diff} | approved | rejected`.
 
-#### Fixed
+### Fixed
 
 - **Doctor early-exit on near-empty `~/.devloop/config.sh`**: when the
   global config contained only comments and blank lines, the
   `grep -v '^#' | grep -v '^[[:space:]]*$'` pipe returned 1 → `pipefail`
   killed the function before the "Global Config keys set: N" line and
-  the trailing summary. Now tolerates the empty result and prints
-  `Registered projects` + summary correctly.
+  the trailing summary. Now tolerates the empty result.
 - **TUI stream source standardised** on `.devloop/events.ndjson`. The
   dashboard view was tailing the legacy `.devloop/pipeline.log` while
-  `run.go` and `chat.go` were already on `events.ndjson`; the
+  `run.go` and `chat.go` were already on `events.ndjson`. The
   inconsistency meant phase events weren't visible in the dashboard's
   live log.
 
-#### Project meta
+### Project meta
 
 - `.github/workflows/tui-ci.yml` — Go build + test on PRs touching
   `cmd/devloop-tui/**` or `devloop.sh`. Plus optional `shellcheck` job.
@@ -56,6 +158,40 @@ additive; existing CLI surface is unchanged.
 - `.github/ISSUE_TEMPLATE/{feature,bug,chore}.yml` +
   `.github/pull_request_template.md` — standard issue/PR layout with
   acceptance-criteria checkboxes and build/test verification.
+- GitHub Project **"TUI Redesign v5.3"** + 5 milestones + new labels
+  (`tui-redesign`, `tui-phase/0..4`, `size/xs`, `type/{bug,refactor,
+  test,chore}`, `needs-spec-correction`).
+
+### Internal architecture
+
+- **Package layout** under `cmd/devloop-tui/internal/`:
+  - `theme/` — colour tokens + style helpers (single source of truth)
+  - `health/` — provider failover snapshot loader
+  - `permit/` — permission queue parser
+  - `uimsg/` — cross-package tea.Msg types (no import-cycle path)
+  - `components/{filter,panel,palette,task_picker,pipeline_grid}`
+  - `views/{dashboard,focus,chat,run,onboard}`
+  - `app/` — root router with view registry + palette overlay
+  - `stream/` — NDJSON tailer (unchanged, stable)
+- **Hard reuse rules**: subprocess execution flows through
+  `chat.dispatchShell`; NDJSON consumption via `stream.Tailer`; colours
+  via `theme.*`; modals via string-composition in `View()`. No new
+  subprocess driver, no z-buffer renderer, no new color literals.
+
+### Spec corrections (vs the original brief in `devloop-tui-redesign 3/`)
+
+The original brief had several factual errors caught during preflight
+exploration and baked into the implementation:
+
+| Brief said… | Reality (verified, shipped) |
+|---|---|
+| `internal/theme/colors.go` is a fresh file | Already created during planning; migrated existing literals |
+| Permit queue: filename = command | UUID-named JSON: filename is `{UUID}.json`, command lives in body |
+| `permit mode auto` grants the queue | Wrong — that flips the mode globally; use new `permit grant --all` |
+| Gate timeout stored in `worker.state` | No such file; status sits in `.devloop/sessions/<TASK-ID>/status` |
+| Provider health vars `DEVLOOP_*_OVERRIDE` | Real names are `HEALTH_MAIN_*` / `HEALTH_WORKER_*` |
+| Detect escalation by scraping worker stdout | NDJSON `phase.escalate` event (new in this release) |
+| TUI tails `.devloop/pipeline.log` | Authoritative file is `events.ndjson` |
 
 ---
 

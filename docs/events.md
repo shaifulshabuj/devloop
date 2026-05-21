@@ -177,6 +177,46 @@ Emitted by `cmd_resume` before re-entering a pipeline.
 `from_phase` is the name of the last completed phase (or `"(none)"` if no `phase.end` events exist).
 `next_phase` is the first phase that will be executed on resume.
 
+### `phase.escalate`
+
+Emitted by `cmd_resume` (and the equivalent path in `cmd_run`) when the fix
+loop exhausts its retry budget and the engine is about to enter a `respec`
+(re-architect) phase. Added in v5.3 so the TUI can react to escalation
+without scraping worker stdout.
+
+```json
+{
+  "ts": "2026-05-22T08:14:42Z",
+  "session": "TASK-20260522-074500",
+  "kind": "phase.escalate",
+  "from": "fix",
+  "to": "respec",
+  "retries": "3",
+  "reason": "max-retries-exhausted"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `from` | string | The phase being abandoned. Currently always `"fix"`. |
+| `to` | string | The phase being entered. Currently always `"respec"`. |
+| `retries` | string | The configured max-retries that was just hit. |
+| `reason` | string | Symbolic cause. Currently always `"max-retries-exhausted"`. |
+
+Emission order around an escalation:
+
+```
+phase.end{phase:"fix-N", status:"needs-work"}
+phase.escalate{from:"fix", to:"respec", retries:"3", reason:"max-retries-exhausted"}
+phase.start{phase:"respec"}
+phase.end{phase:"respec", status:"approved" | "needs-work"}
+```
+
+The TUI's Focus Mode subscribes to this event: receipt flips the active
+phase card to blue (`StylePhaseBoxReArch`) and the footer to
+`⟳ re-architecting after retries exhausted · waiting for new spec…`.
+The state clears on the next `phase.start` for the same session.
+
 ## Future kinds (Phase 2+, not yet emitted)
 
 | Kind | Purpose |

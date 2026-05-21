@@ -550,6 +550,8 @@ devloop clean [--days N] [--dry-run]  # remove old finalized specs
 devloop hooks                         # install Claude pipeline hooks + permission gate
 devloop permit status                 # permission gate status + recent audit log
 devloop permit watch                  # live-poll pending permission requests
+devloop permit grant --all            # bulk-approve every pending request  (v5.3+)
+devloop permit deny  --all            # bulk-deny  every pending request    (v5.3+)
 devloop permit mode smart|auto|strict # set permission mode
 devloop permit log                    # full audit log
 devloop logs [pipeline|notifications] # view session logs
@@ -558,3 +560,118 @@ devloop tools suggest                 # stack-based tool recommendations
 devloop ci                            # generate GitHub Actions review workflow
 devloop update                        # self-upgrade devloop script
 ```
+
+---
+
+## Scenario 7 — Drive the pipeline from the TUI (`devloop-tui`)
+
+The Go TUI (introduced in v5.3) gives you a richer view onto the same
+`.devloop/` directory the bash engine reads and writes. Use it alongside
+the CLI: keep `devloop run` going in one terminal, watch and steer it from
+another.
+
+### Step 1 — Build + run
+
+```bash
+cd cmd/devloop-tui
+go build -o devloop-tui .
+./devloop-tui
+```
+
+On first run (no `devloop.config.sh` in the working directory) the TUI
+auto-launches its onboarding wizard, which streams `devloop init` followed
+by `devloop doctor --json` and shows the structured results.
+
+### Step 2 — Survey the dashboard
+
+The default view splits left (task list) / right (active task detail), with
+a persistent top bar:
+
+```
+DevLoop · 3 sessions · 1 active           main ✓ · worker ✓ · daemon ✓ · ⚑ 1 pending
+```
+
+| Keystroke | Action |
+|---|---|
+| `↑/↓` | Move between tasks |
+| `/` | Fuzzy-filter the task list |
+| `s` | Toggle the SPEC panel for the highlighted task |
+| `d` | Toggle the DIFF panel (async `git diff <baseline>..HEAD`) |
+| `enter` | Open Focus Mode |
+| `r` | Force re-scan from disk |
+
+### Step 3 — Dispatch via the Command Palette
+
+Press `space` from anywhere to open the palette. Type to filter, or use a
+single letter when the filter is empty:
+
+```
+⌘  search commands…                                           esc
+
+  A   architect    — design a spec for a new feature
+  W   work         — run worker on the latest task
+  R   review       — review implementation vs spec
+  F   fix          — apply reviewer fix instructions
+  E   run          — full pipeline: architect+work+review
+  Z   resume       — resume a quiet or paused pipeline
+  …
+```
+
+Selected actions run via the chat scrollback, so their output streams in
+the same place as manual slash commands.
+
+### Step 4 — Focus on one task
+
+Press `enter` on a task to open Focus Mode: the phase track shows
+architect → worker → reviewer → fix as bordered cards, with a tab strip
+below for LOG / SPEC / DIFF (and PERMIT when the queue has items).
+
+| Keystroke | Action |
+|---|---|
+| `←/→` `h/l` | Previous / next task |
+| `1` `2` `3` `4` | LOG / SPEC / DIFF / PERMIT tab |
+| `,` `.` (in LOG) | Cycle log source: events ⇄ pipeline ⇄ notifications ⇄ sessions |
+| `esc` | Back to Dashboard |
+
+### Step 5 — Resolve a permission request
+
+When the smart-permission hook escalates a command, the top bar shows
+`⚑ N pending` and a PERMIT tab appears in Focus Mode. Press `4` to switch:
+
+```
+PERMIT QUEUE  ·  2 pending
+
+▸ 1  rsync -av dist/ user@server:/var/www/html/
+       Bash  ·  42s ago  ·  abc12f4
+
+  2  npm install -g some-package
+       Bash  ·  12s ago  ·  7d4e913
+
+  g grant  ·  x deny  ·  ↑/↓ select  ·  esc back
+```
+
+`g` writes `allow` to the matching `.response` file; `x` writes `deny`.
+The list refreshes immediately and the pipeline unblocks.
+
+### Step 6 — When something stalls
+
+A running phase that has produced no output for longer than
+`DEVLOOP_STUCK_THRESHOLD_MIN` (default 10 min) is flagged as **"quiet"** —
+not "stuck", because a long refactor isn't a failure. The footer shifts:
+
+```
+⚠ worker quiet 14m  ·  Z resume  ·  esc back
+```
+
+Press `space` then `Z` (or just `Z` directly) to dispatch `devloop resume`.
+
+If `cmd_resume` exhausts its retry budget it emits a `phase.escalate`
+NDJSON event and the engine switches to a respec phase. The TUI catches the
+event live and renders the active phase card in blue:
+
+```
+⟳ re-architecting after retries exhausted  ·  waiting for new spec…
+```
+
+→ Top-level reference: [README — TUI section](./README.md#tui--devloop-tui)
+

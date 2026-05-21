@@ -86,6 +86,86 @@ devloop start
 
 ---
 
+## TUI — `devloop-tui`
+
+A Go-based terminal UI that watches the same `.devloop/` directory the bash
+engine writes to. Use it alongside (not instead of) the CLI: keep the pipeline
+running in one terminal, watch and drive it from another.
+
+### What you get
+
+| View | What it shows |
+|------|---------------|
+| **Dashboard** (default) | Task list + provider/daemon health bar + collapsible SPEC/DIFF panels + live event log |
+| **Focus Mode** (enter on a task) | Full-screen phase track, ←/→ between tasks, tabbed LOG / SPEC / DIFF / PERMIT viewports |
+| **Command Palette** (space anywhere) | Fuzzy-searchable list of 18 devloop subcommands; single-letter shortcuts when filter is empty |
+| **Onboarding Wizard** | Auto-launches when `devloop.config.sh` is missing; streams `devloop init` then `devloop doctor --json` into a structured wizard |
+
+### Install + run
+
+```bash
+cd cmd/devloop-tui
+go build -o devloop-tui .
+./devloop-tui              # dashboard
+./devloop-tui chat         # slash-command REPL
+./devloop-tui status       # newest session detail
+./devloop-tui onboard      # first-run wizard (also auto-triggers when no config)
+```
+
+Requires Go 1.22+. Tested with `bubbletea` 1.3 and `lipgloss` 1.1.
+
+### Keybinds (cheatsheet)
+
+| Context | Key | Action |
+|---------|-----|--------|
+| Anywhere | `space` | Toggle Command Palette |
+| Anywhere | `q` / `esc esc` | Quit |
+| Dashboard | `↑/↓` `j/k` | Move task cursor |
+| Dashboard | `/` | Activate fuzzy filter |
+| Dashboard | `s` | Toggle SPEC panel |
+| Dashboard | `d` | Toggle DIFF panel |
+| Dashboard | `enter` | Open Focus Mode |
+| Dashboard | `r` | Re-scan sessions |
+| Focus Mode | `←/→` `h/l` | Previous / next task |
+| Focus Mode | `1` / `2` / `3` / `4` | LOG / SPEC / DIFF / PERMIT tab |
+| Focus Mode | `tab` | Cycle tabs |
+| Focus Mode | `,` / `.` (in LOG) | Cycle log source (events ⇄ pipeline ⇄ notifications ⇄ sessions) |
+| Focus Mode | `g` / `x` (in PERMIT) | Grant / deny selected request |
+| Focus Mode | `esc` | Back to Dashboard |
+| Palette | `A W R F L T P D H U` | Direct shortcuts (architect/work/review/fix/learn/tasks/providers/diff/hooks/update) |
+| Palette | `E G X Q I K J Z` | Run / permit grant/deny/status / daemon start/stop/log / resume |
+| Palette | `↑/↓ enter` | Move cursor / dispatch action |
+
+### Top bar at a glance
+
+```
+DevLoop · 3 sessions · 1 active           main ✓ · worker ✓ · daemon ✓ ×2 · ⚑ 1 pending
+```
+
+| Chip | Meaning |
+|---|---|
+| `main ✓` / `worker ✓` | Healthy (using configured provider) |
+| `main ✗→copilot` | Limited, routed to fallback (named) |
+| `daemon ✓` | Running |
+| `daemon ✓ ×N` | Running, with N recent auto-restarts |
+| `daemon ⊘ ×N max` | Restart budget exhausted (red) |
+| `daemon ✗` | Not running |
+| `⚑ N pending` | N permission requests waiting for grant/deny (yellow; hidden when 0) |
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `DEVLOOP_STUCK_THRESHOLD_MIN` | `10` | Minutes before a running phase shows a "quiet" warning |
+| `DEVLOOP_EVENTS_DISABLED` | unset | Suppress NDJSON emission (debug only) |
+
+The TUI itself has no config file — all state is reflected from the same
+`.devloop/` directory the bash engine writes to.
+
+→ TUI architecture deep dive: [`cmd/devloop-tui/README.md`](./cmd/devloop-tui/README.md)
+
+---
+
 ## Architecture Diagrams
 
 Detailed Mermaid diagrams covering every aspect of the pipeline:
@@ -105,6 +185,7 @@ Detailed Mermaid diagrams covering every aspect of the pipeline:
 | 9. Status State Machine | `pending → approved/needs_work/rejected` transitions |
 | 10. Agent Collaboration | Orchestrator ↔ Architect ↔ Reviewer ↔ Worker roles |
 | 11. `devloop clean` | File selection logic and dry-run path |
+| 12. TUI Architecture (v5.3+) | Package layout, message routing, key disk surfaces |
 
 ---
 
@@ -410,13 +491,19 @@ Worker providers (non-interactive pipe mode) are not affected by hooks. Instead,
 Inspect and manage the permission gate.
 
 ```bash
-devloop permit status       # show current mode, pending requests, recent log
-devloop permit watch        # live-poll pending requests (Linux headless)
-devloop permit grant "CMD"  # manually approve a queued command
-devloop permit deny "CMD"   # manually deny a queued command
-devloop permit log          # show last 50 audit log entries
-devloop permit mode smart   # smart (default) | auto | strict | off
+devloop permit status        # show current mode, pending requests, recent log
+devloop permit watch         # live-poll pending requests (Linux headless)
+devloop permit grant [ID]    # approve a queued command (defaults to latest)
+devloop permit grant --all   # bulk-approve every pending request (v5.3+)
+devloop permit deny  [ID]    # deny a queued command (defaults to latest)
+devloop permit deny  --all   # bulk-deny every pending request (v5.3+)
+devloop permit log           # show last 50 audit log entries
+devloop permit mode smart    # smart (default) | auto | strict | off
 ```
+
+> The TUI shows a `⚑ N pending` chip in its top bar and a dedicated
+> `PERMIT (N)` tab in Focus Mode when items are queued. Press `g` / `x`
+> in the tab to resolve them inline. See [TUI section](#tui--devloop-tui).
 
 **Permission modes:**
 | Mode | Behaviour |

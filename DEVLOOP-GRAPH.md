@@ -455,3 +455,133 @@ flowchart TD
     style KEEP fill:#1a5a1a,color:#fff
     style DELETE fill:#5a1a1a,color:#fff
 ```
+
+---
+
+## 12. TUI Architecture — `cmd/devloop-tui` (v5.3+)
+
+The Go TUI reads the same `.devloop/` directory the bash engine writes
+to. AppModel is a thin router; views own their domain.
+
+```mermaid
+flowchart TD
+    classDef view  fill:#0d2244,color:#fff,stroke:#58a6ff
+    classDef comp  fill:#1c2128,color:#c9d1d9,stroke:#30363d
+    classDef pkg   fill:#161b22,color:#3fb950,stroke:#3fb950
+    classDef disk  fill:#1a1000,color:#e3b341,stroke:#e3b341
+
+    USER(["User keystrokes\n(space · enter · / · s · d · 1-4 · g · x · ,/. · esc)"])
+
+    APP["AppModel (internal/app/app.go)\n· global SPACE → palette\n· uimsg.OpenFocus / CloseFocus / PaletteRun\n· lipgloss overlay composite for palette"]:::view
+
+    USER --> APP
+
+    DASH[ViewDashboard\ndashboard.go]:::view
+    FOCUS[ViewFocus\nfocus.go]:::view
+    CHAT[ViewChat\nchat.go]:::view
+    ONBOARD[ViewOnboard\nonboard.go]:::view
+    RUN[ViewRun\nrun.go]:::view
+
+    APP --> DASH
+    APP --> FOCUS
+    APP --> CHAT
+    APP --> ONBOARD
+    APP --> RUN
+
+    PALETTE["palette.go\n18 actions · fuzzy filter\nsingle-letter shortcuts"]:::comp
+    PANEL["panel.go\ncollapsible viewport\n(SPEC, DIFF)"]:::comp
+    FILTER["filter.go\nFuzzyMatch + textinput"]:::comp
+    PICKER["task_picker.go\nfzf-style list"]:::comp
+    GRID["pipeline_grid.go\nphase cards (Done/Running/\nQuiet/Stuck/ReArch)"]:::comp
+
+    APP --> PALETTE
+    DASH --> PANEL
+    DASH --> PICKER
+    DASH --> FILTER
+    FOCUS --> GRID
+    FOCUS --> PANEL
+    PALETTE --> FILTER
+
+    THEME[theme/colors.go\nsingle source of truth\nfor all colors]:::pkg
+    UIMSG[uimsg/\nOpenFocus · CloseFocus\nPaletteRun]:::pkg
+    HEALTH[health/\nparses provider-health.sh]:::pkg
+    PERMIT[permit/\nparses permission-queue]:::pkg
+    STREAM[stream/\nNDJSON tailer\nDO NOT MODIFY]:::pkg
+
+    DASH -.-> HEALTH
+    DASH -.-> PERMIT
+    FOCUS -.-> PERMIT
+    DASH -.-> STREAM
+    FOCUS -.-> STREAM
+    CHAT -.-> STREAM
+    RUN -.-> STREAM
+
+    PALETTE -.-> UIMSG
+    DASH -.-> UIMSG
+    FOCUS -.-> UIMSG
+
+    DASH -.-> THEME
+    FOCUS -.-> THEME
+    CHAT -.-> THEME
+    ONBOARD -.-> THEME
+    PALETTE -.-> THEME
+    PANEL -.-> THEME
+    GRID -.-> THEME
+
+    EVENTS["events.ndjson\nper-session events.ndjson"]:::disk
+    STATUS[".devloop/sessions/\nTASK-ID/status"]:::disk
+    SPECS[".devloop/specs/\nTASK-ID.md + .pre-commit"]:::disk
+    QUEUE[".devloop/permission-queue/\nUUID.json + UUID.response"]:::disk
+    HEALTHF[".devloop/provider-health.sh"]:::disk
+    DAEMON[".devloop/daemon.pid\n.devloop/daemon.log"]:::disk
+
+    STREAM --> EVENTS
+    FOCUS --> STATUS
+    DASH --> SPECS
+    FOCUS --> SPECS
+    PERMIT --> QUEUE
+    HEALTH --> HEALTHF
+    DASH --> DAEMON
+```
+
+### Message flow — pressing `enter` opens Focus Mode
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant D as DashboardModel
+    participant A as AppModel
+    participant F as FocusModel
+
+    U->>D: KeyMsg{enter}
+    D-->>A: uimsg.OpenFocus{SessionIdx, SessionID}
+    A->>A: handleSwitch(SwitchViewMsg{Target: ViewFocus, ...})
+    A->>F: lazy buildFocus(root, opts, idx, id)
+    A->>F: Init() — starts NDJSON tailer for this session
+    F-->>A: tea.Batch(scanCmd, tickCmd, waitForEvent)
+    Note over F: User now in Focus Mode; ←/→ navigates,<br/>1/2/3/4 switches tabs, esc returns
+    U->>F: KeyMsg{esc}
+    F-->>A: uimsg.CloseFocus{}
+    A->>A: handleSwitch(SwitchViewMsg{Target: ViewDashboard})
+```
+
+### Message flow — `phase.escalate` triggers re-architect rendering
+
+```mermaid
+sequenceDiagram
+    participant SH as devloop.sh<br/>(cmd_resume)
+    participant NDJSON as .devloop/events.ndjson
+    participant T as stream.Tailer
+    participant F as FocusModel
+
+    SH->>NDJSON: emit_event phase.escalate<br/>from=fix to=respec retries=3
+    NDJSON-->>T: fsnotify Write
+    T-->>F: focusStreamEventMsg{event}
+    F->>F: applyStreamEvent → m.reArchSessions[id]=true
+    Note over F: Phase card → blue (StylePhaseBoxReArch)<br/>Footer → "⟳ re-architecting after retries..."
+    SH->>NDJSON: emit_event phase.start phase=respec
+    NDJSON-->>T: fsnotify Write
+    T-->>F: focusStreamEventMsg{event}
+    F->>F: applyStreamEvent → delete(m.reArchSessions, id)
+    Note over F: Footer reverts to default
+```
