@@ -7,8 +7,12 @@
 package app
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/views"
 )
@@ -65,15 +69,22 @@ type Options struct {
 	ChatMode string
 }
 
-// AppModel is the root tea.Model.  It delegates Init/Update/View entirely to
-// the active child view.  Global key interception is intentionally absent:
-// each view owns its own quit semantics.
+// AppModel is the root tea.Model.  It delegates Init/Update/View to the
+// active child view, with two cross-cutting exceptions:
+//
+//   - Space toggles the global command palette (components.Palette)
+//   - uimsg.OpenFocus / CloseFocus / PaletteRun are routed to view switches
+//
+// All other global key interception is intentionally absent: each view owns
+// its own quit semantics.
 type AppModel struct {
 	current ViewID
 	opts    Options // retained so lazy construction on switch has full context
 	views   map[ViewID]tea.Model
 	width   int
 	height  int
+
+	palette components.Palette
 }
 
 // NewApp builds the root model.  All three views are constructed eagerly so
@@ -90,6 +101,7 @@ func NewApp(opts Options) AppModel {
 		current: opts.Start,
 		opts:    opts,
 		views:   make(map[ViewID]tea.Model),
+		palette: components.NewPalette(nil),
 	}
 
 	// Always build the dashboard eagerly (it is the default fallback).
@@ -139,14 +151,101 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSwitch(SwitchViewMsg{Target: ViewDashboard})
 	}
 
+	// Palette dispatch: PaletteRun → switch to ViewChat and forward the
+	// run-command message so chat's existing dispatchShell can stream output.
+	if pr, ok := msg.(uimsg.PaletteRun); ok {
+		next, cmd := m.handleSwitch(SwitchViewMsg{Target: ViewChat})
+		updated, runCmd := next.activeView().Update(pr)
+		next = next.setActiveView(updated)
+		return next, tea.Batch(cmd, runCmd)
+	}
+
+	// Global SPACE toggle for the palette. Skip when a text input is
+	// currently focused so SPACE typed inside a filter doesn't pop the
+	// palette open mid-search.
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == " " && !m.activeViewWantsKey() {
+		if m.palette.IsOpen() {
+			m.palette = m.palette.Close()
+			return m, nil
+		}
+		var openCmd tea.Cmd
+		m.palette, openCmd = m.palette.Open()
+		return m, openCmd
+	}
+
+	// While the palette is open it owns all key input.
+	if m.palette.IsOpen() {
+		var pcmd tea.Cmd
+		m.palette, pcmd = m.palette.Update(msg)
+		return m, pcmd
+	}
+
 	updated, cmd := m.activeView().Update(msg)
 	m = m.setActiveView(updated)
 	return m, cmd
 }
 
-// View renders the active view.
+// activeViewWantsKey returns true when the active view has an input focused
+// that should swallow keys (e.g., chat input, dashboard filter). The palette
+// toggle defers to those — typing a space into a search field should not
+// pop the palette.
+func (m AppModel) activeViewWantsKey() bool {
+	type filterer interface {
+		FilterFocused() bool
+	}
+	if f, ok := m.activeView().(filterer); ok && f.FilterFocused() {
+		return true
+	}
+	// ChatModel always has a focused textinput, so SPACE goes to it.
+	if m.current == ViewChat {
+		return true
+	}
+	return false
+}
+
+// View renders the active view, with the palette overlaid when open.
 func (m AppModel) View() string {
-	return m.activeView().View()
+	base := m.activeView().View()
+	if !m.palette.IsOpen() {
+		return base
+	}
+	// Overlay the palette by anchoring it ~25% from the top, centred.
+	w := m.width
+	h := m.height
+	if w <= 0 {
+		w = 100
+	}
+	if h <= 0 {
+		h = 30
+	}
+	overlay := lipgloss.Place(w, h,
+		lipgloss.Center,
+		lipgloss.Top,
+		m.palette.SetWidth(w).View(),
+		lipgloss.WithWhitespaceChars(" "),
+	)
+	// Composite via lipgloss layer rendering: split base into lines and
+	// overwrite a centred band with the palette. Fallback: just append.
+	return overlayCompose(base, overlay)
+}
+
+// overlayCompose paints `overlay` over `base` line-by-line, preserving the
+// underlying view's content outside the overlay's painted glyphs. lipgloss
+// doesn't ship a z-buffer; this is a deliberately simple cell-wise composite
+// good enough for the palette case (centred opaque box).
+func overlayCompose(base, overlay string) string {
+	baseLines := strings.Split(base, "\n")
+	overLines := strings.Split(overlay, "\n")
+	if len(overLines) > len(baseLines) {
+		baseLines = append(baseLines, make([]string, len(overLines)-len(baseLines))...)
+	}
+	for i := 0; i < len(overLines); i++ {
+		if strings.TrimSpace(overLines[i]) == "" {
+			continue
+		}
+		baseLines[i] = overLines[i]
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 // ─── View registry helpers ────────────────────────────────────────────────────

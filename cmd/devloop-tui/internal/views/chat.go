@@ -18,6 +18,7 @@ import (
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/components"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/stream"
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/theme"
+	"github.com/shaifulshabuj/devloop/devloop-tui/internal/uimsg"
 )
 
 // ─── Line kinds ───────────────────────────────────────────────────────────────
@@ -145,6 +146,14 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+	case uimsg.PaletteRun:
+		// Command palette handed off a devloop subcommand. Run it through
+		// the existing dispatchShell so output streams into the scrollback
+		// like any other slash-command invocation.
+		var batch []tea.Cmd
+		m, batch = m.dispatchShell(msg.Command, msg.Arg)
+		return m, tea.Batch(batch...)
 
 	case tea.KeyMsg:
 		// ctrl+c cancels the most-recent running command but does NOT quit.

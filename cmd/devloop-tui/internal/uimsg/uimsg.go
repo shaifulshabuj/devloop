@@ -26,3 +26,13 @@ type OpenFocus struct {
 // CloseFocus requests transition back from Focus Mode to Dashboard. Phase 2
 // (P2-5) emits this on `esc` from Focus Mode.
 type CloseFocus struct{}
+
+// PaletteRun is emitted by the command palette when the user selects an
+// action. The app router forwards it to ViewChat, which dispatches the
+// underlying `bash devloop.sh <command> <arg>` invocation via its existing
+// dispatchShell helper. Command is the devloop subcommand (architect, work,
+// review, …); Arg is whatever positional the user supplied (or empty).
+type PaletteRun struct {
+	Command string
+	Arg     string
+}
