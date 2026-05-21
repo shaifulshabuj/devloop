@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -39,6 +40,15 @@ type streamErrMsg struct{ err error }
 
 // tickMsg is emitted every 100 ms to advance the spinner.
 type tickMsg struct{}
+
+// diffLoadedMsg carries the result of an async git-diff invocation triggered
+// by toggling the DIFF panel open. taskID identifies which task the diff
+// belongs to so a delayed result can be discarded if the user moved on.
+type diffLoadedMsg struct {
+	taskID  string
+	content string
+	err     error
+}
 
 // ─── Options ──────────────────────────────────────────────────────────────────
 
@@ -81,6 +91,13 @@ type DashboardModel struct {
 	specPanel        components.Panel
 	specLoadedForID  string // the TASK-ID whose spec content is in the panel
 
+	// Collapsible DIFF panel — shows `git diff <baseline>..HEAD` for the
+	// currently active task. Baseline hash lives in
+	// .devloop/specs/<TASK-ID>.pre-commit. Toggled with the `d` key.
+	diffPanel       components.Panel
+	diffLoadedForID string
+	diffLoading     bool // a goroutine is currently producing diff output
+
 	err      error // last non-fatal error shown in status bar
 	eventsCh <-chan stream.Event
 	errsCh   <-chan error
@@ -102,6 +119,7 @@ func NewDashboardWithOptions(projectRoot string, opts DashboardOptions) Dashboar
 		opts:        opts,
 		picker:      components.NewPicker(nil),
 		specPanel:   components.NewPanel(components.PanelOptions{Label: "SPEC", ExpandedHeight: 10}),
+		diffPanel:   components.NewPanel(components.PanelOptions{Label: "DIFF", ExpandedHeight: 12}),
 	}
 }
 
@@ -180,6 +198,16 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, waitForErr(m.errsCh))
 		}
 
+	case diffLoadedMsg:
+		m.diffLoading = false
+		// Late results for a task the user has moved away from get
+		// dropped — the panel content already reflects the current
+		// active task (or is empty).
+		if m.active != nil && msg.taskID == m.active.ID {
+			m.diffPanel = m.diffPanel.SetContent(msg.content)
+			m.diffLoadedForID = msg.taskID
+		}
+
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, keyQuit):
@@ -198,12 +226,29 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// task.
 			m.specPanel = m.specPanel.Toggle()
 
+		case msg.String() == "d" && !m.picker.FilterFocused():
+			// Toggle the DIFF panel. On open, lazy-load via a goroutine
+			// (git diff can be slow on large repos — never block the UI).
+			m.diffPanel = m.diffPanel.Toggle()
+			if m.diffPanel.IsOpen() && m.active != nil &&
+				m.diffLoadedForID != m.active.ID && !m.diffLoading {
+				m.diffPanel = m.diffPanel.SetContent("loading diff…")
+				m.diffLoading = true
+				cmds = append(cmds, m.dispatchDiffLoad(m.active.ID))
+			}
+
 		case m.specPanel.IsOpen() && !m.picker.FilterFocused() &&
 			isScrollKey(msg.String()):
 			// While the panel is open, scroll keys (↑/↓/pgup/pgdn) go to
 			// the panel's viewport instead of the picker.
 			var panelCmd tea.Cmd
 			m.specPanel, panelCmd = m.specPanel.Update(msg)
+			cmds = append(cmds, panelCmd)
+
+		case m.diffPanel.IsOpen() && !m.picker.FilterFocused() &&
+			isScrollKey(msg.String()):
+			var panelCmd tea.Cmd
+			m.diffPanel, panelCmd = m.diffPanel.Update(msg)
 			cmds = append(cmds, panelCmd)
 
 		case msg.String() == "enter" && !m.picker.FilterFocused() && len(m.sessions) > 0:
@@ -378,6 +423,75 @@ func isScrollKey(s string) bool {
 	return false
 }
 
+// dispatchDiffLoad returns a tea.Cmd that runs `git diff <baseline>..HEAD`
+// for the given task in a goroutine and emits diffLoadedMsg when done.
+// Baseline hash comes from .devloop/specs/<TASK-ID>.pre-commit; when that
+// file is absent, falls back to `git diff HEAD` (uncommitted changes).
+func (m DashboardModel) dispatchDiffLoad(taskID string) tea.Cmd {
+	root := m.projectRoot
+	return func() tea.Msg {
+		baselinePath := filepath.Join(root, ".devloop", "specs", taskID+".pre-commit")
+		baseline := ""
+		if b, err := os.ReadFile(baselinePath); err == nil {
+			baseline = strings.TrimSpace(string(b))
+		}
+
+		args := []string{"-C", root, "--no-pager", "diff", "--no-color"}
+		if baseline != "" {
+			args = append(args, baseline+"..HEAD")
+		} else {
+			args = append(args, "HEAD")
+		}
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			return diffLoadedMsg{
+				taskID:  taskID,
+				content: fmt.Sprintf("(git diff failed: %v)\n%s", err, out),
+				err:     err,
+			}
+		}
+		content := string(out)
+		if strings.TrimSpace(content) == "" {
+			if baseline == "" {
+				content = "(no baseline recorded — run `devloop work` to capture one)"
+			} else {
+				content = fmt.Sprintf("(no diff vs baseline %s)", baseline[:min(len(baseline), 7)])
+			}
+		} else {
+			content = colourisedDiff(content)
+		}
+		return diffLoadedMsg{taskID: taskID, content: content}
+	}
+}
+
+// colourisedDiff wraps each +/- line of unified-diff output in lipgloss
+// styles so the panel reads at a glance. Hunk headers (@@) get the dim
+// accent. Everything else passes through unchanged.
+func colourisedDiff(raw string) string {
+	addStyle := lipgloss.NewStyle().Foreground(theme.Green)
+	delStyle := lipgloss.NewStyle().Foreground(theme.Red)
+	hunkStyle := lipgloss.NewStyle().Foreground(theme.Blue)
+
+	var b strings.Builder
+	for _, line := range strings.Split(raw, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+			// File headers — leave plain so paths remain readable.
+			b.WriteString(line)
+		case strings.HasPrefix(line, "+"):
+			b.WriteString(addStyle.Render(line))
+		case strings.HasPrefix(line, "-"):
+			b.WriteString(delStyle.Render(line))
+		case strings.HasPrefix(line, "@@"):
+			b.WriteString(hunkStyle.Render(line))
+		default:
+			b.WriteString(line)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // loadSpecContent reads .devloop/specs/<TASK-ID>.md and returns either the
 // content or a friendly placeholder when the spec hasn't been written yet.
 // Errors other than missing-file are surfaced verbatim so the user can
@@ -479,9 +593,10 @@ func (m DashboardModel) renderRight(w, h int) string {
 		content = m.renderSessionDetail(m.active, w-2) // -2 for divider + space
 	}
 
-	// Append the SPEC panel (collapsed = 1 line, open ≈ 11 lines).
-	panel := m.specPanel.SetSize(w - 2).View()
-	content = lipgloss.JoinVertical(lipgloss.Left, content, panel)
+	// Append the SPEC and DIFF panels (collapsed = 1 line each, open ≈ 11/13).
+	specView := m.specPanel.SetSize(w - 2).View()
+	diffView := m.diffPanel.SetSize(w - 2).View()
+	content = lipgloss.JoinVertical(lipgloss.Left, content, specView, diffView)
 
 	pane := lipgloss.NewStyle().
 		Width(w - 1). // leave 1 col for divider
@@ -677,11 +792,14 @@ func (m DashboardModel) syncActive() DashboardModel {
 	item, ok := m.picker.Selected()
 	if !ok {
 		m.active = nil
-		// Clear the spec panel so a stale spec isn't shown if the user
-		// later opens it.
+		// Clear the spec/diff panels so stale content isn't shown.
 		if m.specLoadedForID != "" {
 			m.specPanel = m.specPanel.SetContent("")
 			m.specLoadedForID = ""
+		}
+		if m.diffLoadedForID != "" {
+			m.diffPanel = m.diffPanel.SetContent("")
+			m.diffLoadedForID = ""
 		}
 		return m
 	}
@@ -692,6 +810,11 @@ func (m DashboardModel) syncActive() DashboardModel {
 			if m.specLoadedForID != item.ID {
 				m.specPanel = m.specPanel.SetContent(m.loadSpecContent(item.ID))
 				m.specLoadedForID = item.ID
+			}
+			// Invalidate any stale diff so the next 'd' toggle reloads.
+			if m.diffLoadedForID != item.ID {
+				m.diffPanel = m.diffPanel.SetContent("")
+				m.diffLoadedForID = ""
 			}
 			return m
 		}

@@ -366,6 +366,70 @@ func TestDashboard_SpecPanel_MissingSpecShowsPlaceholder(t *testing.T) {
 	}
 }
 
+// ── DIFF panel (P1-9) ─────────────────────────────────────────────────────────
+
+func TestDashboard_DiffPanel_StartsCollapsed(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-D01", Feature: "f", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, _ := stream.Scan(root)
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+
+	if m.diffPanel.IsOpen() {
+		t.Fatal("expected DIFF panel collapsed by default")
+	}
+}
+
+func TestDashboard_DiffPanel_TogglesOnD(t *testing.T) {
+	s := stream.Session{ID: "TASK-20260520-D02", Feature: "f", Status: "running"}
+	root := makeSession(t, []stream.Session{s})
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	loaded, _ := stream.Scan(root)
+	m = driveModel(t, m, sessionsLoadedMsg{sessions: loaded})
+	m = driveModel(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	// First 'd' opens
+	m = driveModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if !m.diffPanel.IsOpen() {
+		t.Fatal("expected DIFF panel to open after first 'd'")
+	}
+	// Second 'd' closes
+	m = driveModel(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if m.diffPanel.IsOpen() {
+		t.Fatal("expected DIFF panel to close after second 'd'")
+	}
+}
+
+func TestColourisedDiff_PreservesContent(t *testing.T) {
+	in := `diff --git a/x b/x
+--- a/x
++++ b/x
+@@ -1,2 +1,2 @@
+-old line
++new line
+ unchanged
+`
+	out := colourisedDiff(in)
+
+	// File headers should always be present in plain form (no styling).
+	if !strings.Contains(out, "--- a/x") {
+		t.Errorf("expected --- header preserved, got %q", out)
+	}
+	if !strings.Contains(out, "+++ b/x") {
+		t.Errorf("expected +++ header preserved, got %q", out)
+	}
+	// Every line of the input is preserved by stripANSI(out). Done
+	// modulo trailing newlines because colourisedDiff appends one.
+	plain := strings.TrimRight(stripANSI(out), "\n")
+	wantPlain := strings.TrimRight(in, "\n")
+	if plain != wantPlain {
+		t.Errorf("colourise should be reversible via stripANSI:\n want %q\n  got %q",
+			wantPlain, plain)
+	}
+}
+
 func TestDashboard_TopBar_DaemonMaxRestarts(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {
