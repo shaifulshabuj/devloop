@@ -275,6 +275,46 @@ func TestDashboard_TopBar_DaemonAlive(t *testing.T) {
 	}
 }
 
+func TestDashboard_TopBar_DaemonRestarts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(root, ".devloop", "daemon.pid"),
+		fmt.Sprintf("%d\n", os.Getpid()))
+	writeFile(t, filepath.Join(root, ".devloop", "daemon.log"),
+		"[start] daemon up\n[crash] Restarting in 5s...\n[crash] Restarting in 5s...\n[crash] Restarting in 5s...\n")
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = m.refreshHealth()
+
+	out := stripANSI(m.renderHeader(120))
+	if !strings.Contains(out, "×3") {
+		t.Errorf("expected '×3' restart count in header, got %q", out)
+	}
+}
+
+func TestDashboard_TopBar_DaemonMaxRestarts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".devloop"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// PID 1 is alive but we don't own it — kill -0 may succeed or fail
+	// depending on platform. Use our own PID + log a max-reached line.
+	writeFile(t, filepath.Join(root, ".devloop", "daemon.pid"),
+		fmt.Sprintf("%d\n", os.Getpid()))
+	writeFile(t, filepath.Join(root, ".devloop", "daemon.log"),
+		"[crash] Restarting in 5s...\n[crash] Restarting in 5s...\n[fatal] Max restarts (20) reached\n")
+
+	m := NewDashboardWithOptions(root, DashboardOptions{NoStream: true})
+	m = m.refreshHealth()
+
+	out := stripANSI(m.renderHeader(120))
+	if !strings.Contains(out, "max") || !strings.Contains(out, "⊘") {
+		t.Errorf("expected '⊘ ×N max' chip, got %q", out)
+	}
+}
+
 // stripANSI removes ANSI colour escape sequences so test assertions can match
 // the rendered visible text directly.
 func stripANSI(s string) string {

@@ -70,9 +70,11 @@ type DashboardModel struct {
 
 	// Cached provider-failover snapshot for the top bar; refreshed on a
 	// slower cadence than the spinner (see refreshHealth + healthTicker).
-	health    health.ProviderHealth
-	daemonPID int  // 0 if not running / pidfile missing
-	daemonOK  bool // last kill -0 result
+	health           health.ProviderHealth
+	daemonPID        int  // 0 if not running / pidfile missing
+	daemonOK         bool // last kill -0 result
+	daemonRestarts   int  // recent auto-restart count from daemon.log
+	daemonMaxReached bool // true once "Max restarts (...) reached" line is logged
 
 	err      error // last non-fatal error shown in status bar
 	eventsCh <-chan stream.Event
@@ -290,7 +292,7 @@ func (m DashboardModel) renderTopBar() string {
 	parts := []string{
 		formatHealthChip("main", m.health.Main),
 		formatHealthChip("worker", m.health.Worker),
-		formatDaemonChip(m.daemonOK),
+		formatDaemonChip(m.daemonOK, m.daemonRestarts, m.daemonMaxReached),
 	}
 	sep := lipgloss.NewStyle().Foreground(theme.Dim).Render(" · ")
 	return strings.Join(parts, sep)
@@ -311,20 +313,70 @@ func formatHealthChip(label string, s health.State) string {
 	return label + " " + mark + arrow + name
 }
 
-func formatDaemonChip(running bool) string {
-	if running {
+// formatDaemonChip renders one of four daemon states:
+//
+//	daemon ✓                — running, 0 recent restarts (green)
+//	daemon ✓ ×N             — running, N recent restarts (yellow)
+//	daemon ⊘ ×N max         — exhausted max-restart budget (red)
+//	daemon ✗                — not running (red)
+func formatDaemonChip(running bool, restarts int, maxReached bool) string {
+	switch {
+	case !running:
+		return "daemon " + lipgloss.NewStyle().Foreground(theme.Red).Render("✗")
+	case maxReached:
+		count := lipgloss.NewStyle().Foreground(theme.Red).Render(fmt.Sprintf("×%d max", restarts))
+		mark := lipgloss.NewStyle().Foreground(theme.Red).Render("⊘")
+		return "daemon " + mark + " " + count
+	case restarts > 0:
+		mark := lipgloss.NewStyle().Foreground(theme.Yellow).Render("✓")
+		count := lipgloss.NewStyle().Foreground(theme.Yellow).Render(fmt.Sprintf("×%d", restarts))
+		return "daemon " + mark + " " + count
+	default:
 		return "daemon " + lipgloss.NewStyle().Foreground(theme.Green).Render("✓")
 	}
-	return "daemon " + lipgloss.NewStyle().Foreground(theme.Red).Render("✗")
 }
 
-// refreshHealth re-reads provider-health.sh and re-checks the daemon pidfile.
-// Cheap enough to call from the 100ms tick; if it ever becomes a hot path,
-// gate behind a slower cadence.
+// refreshHealth re-reads provider-health.sh and re-checks the daemon pidfile
+// + daemon.log. Cheap enough to call from the 100ms tick; if it ever becomes
+// a hot path, gate behind a slower cadence.
 func (m DashboardModel) refreshHealth() DashboardModel {
 	m.health = health.Load(m.projectRoot)
 	m.daemonPID, m.daemonOK = readDaemonPID(m.projectRoot)
+	m.daemonRestarts, m.daemonMaxReached = readDaemonRestarts(m.projectRoot)
 	return m
+}
+
+// readDaemonRestarts counts occurrences of the auto-restart marker emitted by
+// devloop.sh inside the most recent 50 lines of daemon.log. The result is the
+// "recent restart count" — not lifetime — which is what the top bar should
+// surface: a daemon flapping right now is far more interesting than one that
+// recovered 200 restarts ago. The second return is true once any
+// "Max restarts (...) reached" line has been logged, signalling the daemon
+// gave up.
+func readDaemonRestarts(projectRoot string) (int, bool) {
+	const tailLines = 50
+	const restartMarker = "Restarting in"
+	const maxMarker = "Max restarts"
+
+	b, err := os.ReadFile(filepath.Join(projectRoot, ".devloop", "daemon.log"))
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(string(b), "\n")
+	if len(lines) > tailLines {
+		lines = lines[len(lines)-tailLines:]
+	}
+	count := 0
+	maxed := false
+	for _, ln := range lines {
+		if strings.Contains(ln, restartMarker) {
+			count++
+		}
+		if strings.Contains(ln, maxMarker) {
+			maxed = true
+		}
+	}
+	return count, maxed
 }
 
 // readDaemonPID returns (pid, alive) by reading .devloop/daemon.pid and
