@@ -2552,7 +2552,7 @@ write_agent_orchestrator() {
 ---
 name: devloop-orchestrator
 description: Main DevLoop orchestrator. Receives feature requests remotely and coordinates the architect and reviewer agents through the full build loop until approved. Provider routing can swap architect/reviewer/worker backends while Claude remains the remote-control launcher in v1.
-tools: Agent(devloop-architect, devloop-reviewer), Bash, Read, Write, TodoWrite, mcp__waymark-devloop__write_file, mcp__waymark-devloop__read_file, mcp__waymark-devloop__bash
+tools: Agent(devloop-architect, devloop-reviewer), Bash, Read, Write, TodoWrite
 model: sonnet
 color: cyan
 ---
@@ -2629,7 +2629,6 @@ When starting a long task, include in your first message: "I'll notify you when 
 Claude Code will push a notification to your phone when the task finishes.
 
 ## MCP Tools Available
-- **Waymark** (`mcp__waymark-devloop__*`): `write_file`, `read_file`, `bash` — use for audited file writes when modifying project files
 - **DocuFlow** (`mcp__docuflow__*`): `query_wiki`, `read_module`, `list_modules` — available to architect/reviewer subagents for codebase context
 AGENT
 }

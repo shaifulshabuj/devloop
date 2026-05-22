@@ -2,8 +2,6 @@
 # Docuflow
 .docuflow/
 .playwright-mcp/
-# Waymark
-.waymark/
 
 # devloop-tui build artifacts
 cmd/devloop-tui/bin/
