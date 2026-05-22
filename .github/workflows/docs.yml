@@ -1,0 +1,63 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'docs/requirements.txt'
+      - '.github/workflows/docs.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (e.g. v5.3.0). Leave blank for dev.'
+        required: false
+        default: dev
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install docs dependencies
+        run: pip install -r docs/requirements.txt
+
+      - name: Configure git for mike
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Deploy release version
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          mike deploy --push --update-aliases "$VERSION" stable
+          mike set-default --push stable
+
+      - name: Deploy dev (main push)
+        if: github.event_name == 'push'
+        run: |
+          mike deploy --push --update-aliases dev latest
+
+      - name: Deploy manual version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          mike deploy --push "$VERSION"
