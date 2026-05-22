@@ -1,17 +1,5 @@
 {
   "mcpServers": {
-    "waymark-devloop": {
-      "type": "stdio",
-      "command": "/Users/shabuj/.nvm/versions/node/v20.20.0/bin/node",
-      "args": [
-        "/Users/shabuj/.nvm/versions/node/v20.20.0/lib/node_modules/@way_marks/cli/node_modules/@way_marks/server/dist/mcp/server.js",
-        "--project-root",
-        "/Volumes/SATECHI_WD_BLACK_2/dev/devloop",
-        "--db-path",
-        "/Volumes/SATECHI_WD_BLACK_2/dev/devloop/.waymark/waymark.db"
-      ],
-      "cwd": "/Volumes/SATECHI_WD_BLACK_2/dev/devloop"
-    },
     "docuflow": {
       "type": "stdio",
       "command": "node",
