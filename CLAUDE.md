@@ -75,6 +75,25 @@ _Run `devloop agent-sync` to refresh docs and check for provider updates._
 <!-- DEVLOOP:CLAUDE:START -->
 # Claude Code — DevLoop Project
 
+## Session history — read on demand
+
+Substantial past work is summarised under [`docs/session-history/`](./docs/session-history/).
+Each entry is a single-file record of what was attempted, what shipped,
+what was decided, and what was deferred.
+
+**When to consult**:
+- The user asks about prior work ("what did we do last session?", "why is X
+  the way it is?")
+- You encounter a file or pattern that looks unfamiliar — check the latest
+  entry first; it may explain why
+- Picking up an in-flight effort (open issues / PRs / deferred follow-ups)
+
+**Latest entry**: [`docs/session-history/2026-05-22-tui-v5.3-release.md`](./docs/session-history/2026-05-22-tui-v5.3-release.md)
+— TUI Redesign v5.3 shipped (Phases 1–4, 24 commits, full doc pass, MCP
+cleanup, v5.3.0 + v5.3.0-rc.1 released).
+
+Do NOT pre-load these on every session — read on demand only.
+
 ## System
 This project uses the DevLoop multi-agent pipeline:
 - `devloop-orchestrator` — main thread, receives remote instructions
