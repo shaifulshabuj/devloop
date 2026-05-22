@@ -69,7 +69,7 @@ flowchart LR
     end
 
     subgraph PIPELINE["🔁  Pipeline"]
-        ARCH("devloop architect  · a\n\"feature\" [type] [files]")
+        ARCH("devloop architect  · a\n'feature' [type] [files]")
         WORK("devloop work  · w\n[TASK-ID]")
         REVIEW("devloop review  · r\n[TASK-ID]")
         FIX("devloop fix  · f\n[TASK-ID]")
@@ -113,7 +113,7 @@ flowchart TD
     end
 
     subgraph COPILOT_FILES["🐙 Copilot Context"]
-        CP("`.github/copilot-instructions.md`\nStack, patterns, conventions,\ntest framework, commit format,\nimplementation checklist")
+        CP(".github/copilot-instructions.md\nStack, patterns, conventions,\ntest framework, commit format,\nimplementation checklist")
     end
 
     subgraph DIRS["📁 Directories"]
@@ -135,7 +135,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A_CMD("devloop architect\n\"add feature\"")
+    A_CMD("devloop architect\n'add feature'")
     W_CMD("devloop work\nTASK-ID")
     R_CMD("devloop review\nTASK-ID")
     F_CMD("devloop fix\nTASK-ID")
@@ -146,7 +146,7 @@ flowchart TD
         SPEC("TASK-20260507-135420.md\n─────────────────\nFeature / Type\nStatus: pending ← mutated\nSummary\nFiles to Touch\nImplementation Steps\nAcceptance Criteria\nEdge Cases\nTest Scenarios\n## Copilot Instructions Block")
         PRECOMMIT("TASK-20260507-135420.pre-commit\n─────────────────\n2e20efb...  ← git SHA\n(HEAD before Copilot ran)")
         PRECOMMIT2("TASK-20260507-135420.pre-commit\n─────────────────\n2101eeb...  ← updated SHA\n(HEAD before fix ran)")
-        REVIEW_FILE("TASK-20260507-135420-review.md\n─────────────────\nVerdict: NEEDS_WORK\nScore / Summary\nWhat's Good\nIssues Found\nRequired Fixes\n### Copilot Fix Instructions\n```\nFIX #1: ...\n```")
+        REVIEW_FILE("TASK-20260507-135420-review.md\n─────────────────\nVerdict: NEEDS_WORK\nScore / Summary\nWhat's Good\nIssues Found\nRequired Fixes\n### Copilot Fix Instructions\nFIX #1: ...")
         REVIEW2_FILE("TASK-20260507-135420-review.md\n─────────────────\nVerdict: APPROVED ✅\nScore: 9/10\nNo fixes required")
     end
 
@@ -308,7 +308,7 @@ flowchart TD
     subgraph BACKGROUND["Background process (subshell)"]
         LOOP{"restart\nloop"}
         CAFF("caffeinate -is &\nprevent Mac sleep")
-        CLAUDE_PROC("claude --remote-control\n\"DevLoop: project\"\n--agent devloop-orchestrator\n--permission-mode acceptEdits")
+        CLAUDE_PROC("claude --remote-control\n'DevLoop: project'\n--agent devloop-orchestrator\n--permission-mode acceptEdits")
         WAIT("wait for claude exit")
         BACKOFF("exponential backoff\n5s → 10s → ... → 60s max\n20 retries then stop")
         LOG("append to\n.devloop/daemon.log")
@@ -559,7 +559,7 @@ sequenceDiagram
     A->>F: lazy buildFocus(root, opts, idx, id)
     A->>F: Init() — starts NDJSON tailer for this session
     F-->>A: tea.Batch(scanCmd, tickCmd, waitForEvent)
-    Note over F: User now in Focus Mode; ←/→ navigates,<br/>1/2/3/4 switches tabs, esc returns
+    Note over F: User now in Focus Mode<br/>arrows navigate; 1/2/3/4 switches tabs; esc returns
     U->>F: KeyMsg{esc}
     F-->>A: uimsg.CloseFocus{}
     A->>A: handleSwitch(SwitchViewMsg{Target: ViewDashboard})
