@@ -11,6 +11,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.3.1] — 2026-05-22
+
+Documentation patch release. CLI behaviour unchanged.
+
+### Added
+
+- **Versioned documentation site** at https://shaifulshabuj.github.io/devloop/
+  built with MkDocs Material and mike. 17 pages across Getting Started,
+  Concepts (pipeline, providers, worker modes, permissions, fix
+  escalation), Reference (commands, configuration, events, sessions),
+  and TUI (dashboard, focus mode, palette).
+- **GitHub Actions workflow** (`.github/workflows/docs.yml`) auto-deploys
+  the `dev` alias on every push to main and a versioned `stable` alias
+  on every published release.
+
+### Fixed
+
+- **DEVLOOP-GRAPH.md** mermaid diagrams no longer fail to render on
+  GitHub. Six diagrams used escaped double quotes (`\"...\"`),
+  backticks, or embedded triple-backtick fences inside node labels,
+  all of which the mermaid parser rejects. Replaced with single quotes
+  and plain text. Also normalised a sequenceDiagram `Note` line that
+  mixed a comma with a `<br/>` tag.
+
+---
+
 ## [5.3.0] — 2026-05-22
 
 **TUI Redesign**: `devloop-tui` graduates from a rough side-binary into a
