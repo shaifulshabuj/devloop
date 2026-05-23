@@ -559,7 +559,8 @@ sequenceDiagram
     A->>F: lazy buildFocus(root, opts, idx, id)
     A->>F: Init() — starts NDJSON tailer for this session
     F-->>A: tea.Batch(scanCmd, tickCmd, waitForEvent)
-    Note over F: User now in Focus Mode<br/>arrows navigate; 1/2/3/4 switches tabs; esc returns
+    Note over F: User now in Focus Mode
+    Note over F: arrows navigate; 1/2/3/4 switches tabs; esc returns
     U->>F: KeyMsg{esc}
     F-->>A: uimsg.CloseFocus{}
     A->>A: handleSwitch(SwitchViewMsg{Target: ViewDashboard})
@@ -569,16 +570,18 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant SH as devloop.sh<br/>(cmd_resume)
+    participant SH as devloop.sh (cmd_resume)
     participant NDJSON as .devloop/events.ndjson
     participant T as stream.Tailer
     participant F as FocusModel
 
-    SH->>NDJSON: emit_event phase.escalate<br/>from=fix to=respec retries=3
+    SH->>NDJSON: emit_event phase.escalate
+    Note right of SH: from=fix to=respec retries=3
     NDJSON-->>T: fsnotify Write
     T-->>F: focusStreamEventMsg{event}
     F->>F: applyStreamEvent → m.reArchSessions[id]=true
-    Note over F: Phase card → blue (StylePhaseBoxReArch)<br/>Footer → "⟳ re-architecting after retries..."
+    Note over F: Phase card → blue (StylePhaseBoxReArch)
+    Note over F: Footer → "⟳ re-architecting after retries..."
     SH->>NDJSON: emit_event phase.start phase=respec
     NDJSON-->>T: fsnotify Write
     T-->>F: focusStreamEventMsg{event}
