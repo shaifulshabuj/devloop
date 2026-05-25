@@ -11,6 +11,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.1] — 2026-05-25
+
+Bugfix for the v5.4.0 TUI-delivery flow.
+
+### Fixed
+
+- **`devloop update` now resolves TUI version drift, not just absence.** On a
+  current CLI, the "already up to date" path previously re-fetched the TUI only
+  when it was entirely missing — so a drifted binary (e.g. an old local
+  `make tui-install` build) was left in place even though `devloop check`
+  flagged the mismatch. It now re-fetches when the installed TUI version
+  differs from the CLI, while deliberately leaving a local `dev` build
+  untouched. Adds a `_tui_version` helper, shared with `devloop check`.
+
+---
+
 ## [5.4.0] — 2026-05-25
 
 The TUI now ships with every release and installs alongside the CLI.

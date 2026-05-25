@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.4.0"
+VERSION="5.4.1"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -294,6 +294,15 @@ _install_tui_binary() {
   rm -rf "$tmp"
   success "Installed devloop-tui (${plat}) → ${CYAN}$bin_dir/devloop-tui${RESET}"
   return 0
+}
+
+# _tui_version — echo the installed TUI's version (without a leading 'v'),
+# e.g. "5.4.1" or "dev". Returns non-zero (and echoes nothing) if no TUI is
+# installed or it doesn't report a version.
+_tui_version() {
+  local bin
+  bin="$(_find_tui 2>/dev/null)" || return 1
+  "$bin" --version 2>/dev/null | sed -E 's/^devloop-tui v//' | tr -d '[:space:]'
 }
 
 # ── Session status vocabulary ─────────────────────────────────────────────────
@@ -1005,7 +1014,7 @@ cmd_check() {
   # with the CLI so the user knows to run `devloop update`.
   local tui_bin tui_ver
   if tui_bin="$(_find_tui 2>/dev/null)"; then
-    tui_ver="$("$tui_bin" --version 2>/dev/null | sed -E 's/^devloop-tui v//' | tr -d '[:space:]')"
+    tui_ver="$(_tui_version 2>/dev/null || true)"
     if [[ -z "$tui_ver" || "$tui_ver" == "dev" ]]; then
       info "TUI: ${BOLD}${tui_ver:-unknown}${RESET} (local build — version not stamped)"
     elif [[ "$tui_ver" == "$VERSION" ]]; then
@@ -6810,9 +6819,16 @@ cmd_update() {
   elif [[ "$new_version" == "$current_version" ]]; then
     success "Already up to date (v$current_version) ✅"
     rm -f "$tmp_file"
-    # CLI is current, but the TUI may be missing (e.g. CLI-only install). Fetch it.
-    if ! _find_tui >/dev/null 2>&1; then
+    # CLI is current — reconcile the TUI if it's missing or drifted. (A local
+    # "dev" build is left untouched; the user built it deliberately.)
+    local _tv; _tv="$(_tui_version 2>/dev/null || true)"
+    if [[ -z "$_tv" ]]; then
       info "devloop-tui not found — fetching the matching prebuilt binary..."
+      _install_tui_binary "${release_tag:-v$current_version}"
+    elif [[ "$_tv" == "dev" ]]; then
+      info "devloop-tui is a local dev build — leaving it untouched."
+    elif [[ "$_tv" != "$current_version" ]]; then
+      info "devloop-tui drift (have v${_tv}, want v${current_version}) — re-fetching..."
       _install_tui_binary "${release_tag:-v$current_version}"
     fi
     return
