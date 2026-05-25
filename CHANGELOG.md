@@ -11,6 +11,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.3] — 2026-05-25
+
+### Fixed
+
+- **`devloop update` no longer corrupts the running shell mid-update.**
+  It overwrote `/usr/local/bin/devloop` in place with `cp` while bash was still
+  reading that file, so the shell's read offset fell into mismatched bytes and
+  emitted a spurious `syntax error near unexpected token` (the install itself
+  had already succeeded). The new binary is now staged as a sibling temp file
+  and swapped in with an atomic `mv` — rename() gives the running shell its old
+  inode to finish reading, and needs only directory write permission (so it
+  also handles a root-owned target inside a user-writable dir, superseding the
+  5.4.2 file-permission check).
+
+### Added
+
+- **`devloop update` symlinks `devloop-tui` onto PATH.** After installing the
+  binary to `~/.devloop/bin/`, it links it next to the `devloop` CLI so
+  `devloop-tui` runs as a bare command, just like `devloop`. Best-effort: if
+  the CLI's directory isn't writable it prints how to run via `devloop status`
+  or add the dir to PATH.
+
+---
+
 ## [5.4.2] — 2026-05-25
 
 ### Fixed

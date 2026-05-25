@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.4.2"
+VERSION="5.4.3"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -293,6 +293,20 @@ _install_tui_binary() {
   mv "$tmp/$asset" "$bin_dir/devloop-tui"
   rm -rf "$tmp"
   success "Installed devloop-tui (${plat}) → ${CYAN}$bin_dir/devloop-tui${RESET}"
+
+  # Expose `devloop-tui` on PATH by symlinking it next to the `devloop` CLI, so
+  # it runs as a bare command just like `devloop`. $bin_dir (~/.devloop/bin) is
+  # not normally on PATH; the CLI's own dir is. Best-effort: skip silently if we
+  # can't write there (the CLI still launches the TUI via `devloop status`).
+  local cli_dir; cli_dir="$(dirname "$(command -v devloop 2>/dev/null || echo /usr/local/bin/devloop)")"
+  local link="$cli_dir/devloop-tui"
+  if [[ "$link" != "$bin_dir/devloop-tui" ]]; then
+    if [[ -w "$cli_dir" ]] && ln -sf "$bin_dir/devloop-tui" "$link" 2>/dev/null; then
+      info "Linked onto PATH → ${CYAN}$link${RESET} (run: ${CYAN}devloop-tui${RESET})"
+    else
+      info "Not on PATH: run ${CYAN}devloop status${RESET} or add ${CYAN}$bin_dir${RESET} to PATH"
+    fi
+  fi
   return 0
 }
 
@@ -6837,24 +6851,25 @@ cmd_update() {
   fi
 
   local install_target; install_target="$(command -v devloop 2>/dev/null || echo "/usr/local/bin/devloop")"
+  local target_dir; target_dir="$(dirname "$install_target")"
   chmod +x "$tmp_file"
 
-  # Overwriting an existing file needs write permission on the FILE (cp truncates
-  # it in place) — a writable parent dir is not enough (e.g. a root-owned binary
-  # in a Homebrew-writable /usr/local/bin). Only a brand-new file falls back to
-  # the directory check. When we can't write directly, escalate with sudo.
-  local can_write="false"
-  if [[ -e "$install_target" ]]; then
-    [[ -w "$install_target" ]] && can_write="true"
+  # CRITICAL: we are overwriting the very script the running shell is still
+  # reading. An in-place `cp` truncates + rewrites the file, so bash's read
+  # offset lands in mismatched bytes → "syntax error near unexpected token".
+  # Stage a sibling temp file and atomically `mv` it over the target: rename()
+  # swaps the directory entry to a NEW inode while the running shell keeps
+  # reading the old inode to completion. rename() also needs only DIRECTORY
+  # write permission, so this transparently handles a root-owned target file in
+  # a user-writable dir (and leaves the new file owned by the installing user).
+  local staged="$target_dir/.devloop-update.$$.tmp"
+  if [[ -w "$target_dir" ]]; then
+    cp "$tmp_file" "$staged" && chmod +x "$staged" && mv -f "$staged" "$install_target" \
+      || { error "Failed to install to $install_target"; rm -f "$staged" "$tmp_file"; exit 1; }
   else
-    [[ -w "$(dirname "$install_target")" ]] && can_write="true"
-  fi
-
-  if [[ "$can_write" == "true" ]]; then
-    cp "$tmp_file" "$install_target" || { error "Failed to write $install_target"; rm -f "$tmp_file"; exit 1; }
-  else
-    info "Elevated permissions needed to write ${CYAN}$install_target${RESET} (it is not owned by you)"
-    sudo cp "$tmp_file" "$install_target" || { error "sudo cp failed — could not install to $install_target"; rm -f "$tmp_file"; exit 1; }
+    info "Elevated permissions needed to write into ${CYAN}$target_dir${RESET}"
+    sudo cp "$tmp_file" "$staged" && sudo chmod +x "$staged" && sudo mv -f "$staged" "$install_target" \
+      || { error "sudo install to $install_target failed"; sudo rm -f "$staged" 2>/dev/null; rm -f "$tmp_file"; exit 1; }
   fi
 
   rm -f "$tmp_file"
