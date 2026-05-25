@@ -11,6 +11,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.0] — 2026-05-25
+
+The TUI now ships with every release and installs alongside the CLI.
+Previously `devloop-tui` had to be built from source with `make tui-install`;
+now `devloop update` fetches the prebuilt binary for your platform.
+
+### Added
+
+- **Prebuilt TUI binaries attached to every GitHub release.**
+  `scripts/release.sh` cross-compiles `devloop-tui` for `darwin/arm64`,
+  `darwin/amd64`, `linux/amd64`, and `linux/arm64` (pure Go, `CGO_ENABLED=0`,
+  `-trimpath -ldflags "-s -w -X main.Version=<ver>"`), writes `SHA256SUMS`,
+  and uploads them as release assets.
+- **`devloop update` now installs the matching TUI binary.** New helpers
+  `_tui_platform` (maps `uname` → asset name) and `_install_tui_binary`
+  (downloads via `gh release download`, with curl/wget fallback) drop the
+  binary into `~/.devloop/bin/devloop-tui` — the path `_find_tui` already
+  prefers. Non-fatal: a missing asset only warns, so a CLI update never fails
+  over the TUI. Re-running `devloop update` on a current CLI also fetches the
+  TUI when it is absent.
+- **`devloop check` reports TUI version drift** — in-sync, drift, local-build,
+  or not-installed — pointing at `devloop update` to reconcile.
+
+### Changed
+
+- **`cmd/devloop-tui` version is now stamped at release time.** `main.Version`
+  changed from a hard-coded `const "0.1.0"` to a `var "dev"` overridden via
+  ldflags, so the TUI reports the same version as the CLI it ships with.
+
+---
+
 ## [5.3.1] — 2026-05-22
 
 Documentation patch release. CLI behaviour unchanged.

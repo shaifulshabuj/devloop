@@ -12,7 +12,9 @@ import (
 	"github.com/shaifulshabuj/devloop/devloop-tui/internal/views"
 )
 
-const Version = "0.1.0"
+// Version is stamped at release time via -ldflags "-X main.Version=<ver>".
+// Defaults to "dev" for local `go build` / `make tui-dev`.
+var Version = "dev"
 
 func main() {
 	args := os.Args[1:]

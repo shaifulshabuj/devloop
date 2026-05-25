@@ -176,18 +176,36 @@ fi
 ok "tag to create: $TAG"
 ok "kind: $KIND"
 
-# ── Sanity: build the Go TUI if Go is installed ───────────────────────────────
-section "Build sanity"
+# ── Cross-build the Go TUI release binaries ───────────────────────────────────
+# Produces one binary per OS/arch into $TUI_DIR. These get uploaded as release
+# assets after the GitHub release is created; `devloop update` downloads the
+# binary matching the user's platform. Empty $TUI_DIR ⇒ nothing to upload.
+section "Build TUI binaries"
+
+TUI_TARGETS=( "darwin/arm64" "darwin/amd64" "linux/amd64" "linux/arm64" )
+TUI_DIR=""
 
 if command -v go >/dev/null 2>&1; then
-  if (cd cmd/devloop-tui && go build ./... 2>&1); then
-    ok "go build ./cmd/devloop-tui/... passes"
-  else
-    err "go build failed — fix before releasing"
-    exit 1
-  fi
+  TUI_DIR="$(mktemp -d /tmp/devloop-tui-rel.XXXXXX)"
+  for t in "${TUI_TARGETS[@]}"; do
+    os="${t%/*}"; arch="${t#*/}"
+    out="$TUI_DIR/devloop-tui-${os}-${arch}"
+    if (cd cmd/devloop-tui && \
+        GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+        go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" -o "$out" . 2>&1); then
+      ok "built devloop-tui-${os}-${arch} ($(du -h "$out" | cut -f1 | tr -d ' '))"
+    else
+      err "cross-build failed for ${os}/${arch} — fix before releasing"
+      rm -rf "$TUI_DIR"
+      exit 1
+    fi
+  done
+  # Checksums for verification / supply-chain hygiene.
+  ( cd "$TUI_DIR" && shasum -a 256 devloop-tui-* > SHA256SUMS )
+  ok "wrote SHA256SUMS for $(ls "$TUI_DIR" | grep -c '^devloop-tui-') binaries"
 else
-  warn "go not installed; skipping TUI build sanity check"
+  warn "go not installed; TUI binaries will NOT be attached to this release"
+  warn "users on this version must build with: make tui-install"
 fi
 
 # Sanity: bash syntax check on devloop.sh.
@@ -243,6 +261,7 @@ EOF
 if [[ "$DRY_RUN" == "true" ]]; then
   warn "dry-run requested — stopping before any side effects"
   info "release notes saved at: $NOTES_FILE"
+  [[ -n "$TUI_DIR" ]] && info "TUI binaries built (not uploaded) in: $TUI_DIR"
   exit 0
 fi
 
@@ -287,6 +306,21 @@ else
 fi
 
 rm -f "$NOTES_FILE"
+
+# ── Attach TUI binaries as release assets ─────────────────────────────────────
+# `devloop update` downloads the binary matching the user's OS/arch from here.
+if [[ -n "$TUI_DIR" ]]; then
+  section "Uploading TUI binaries"
+  if gh release upload "$TAG" "$TUI_DIR"/devloop-tui-* "$TUI_DIR/SHA256SUMS" --clobber; then
+    ok "attached $(ls "$TUI_DIR" | grep -c '^devloop-tui-') TUI binaries + SHA256SUMS to $TAG"
+  else
+    err "failed to upload TUI binaries — release exists but has no TUI assets"
+    warn "retry manually: gh release upload $TAG $TUI_DIR/devloop-tui-* $TUI_DIR/SHA256SUMS --clobber"
+  fi
+  rm -rf "$TUI_DIR"
+else
+  warn "no TUI binaries to upload (go was not installed at build time)"
+fi
 
 section "Done"
 ok "$TAG is live"

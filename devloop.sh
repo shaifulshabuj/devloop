@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.3.1"
+VERSION="5.4.0"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -225,6 +225,75 @@ _find_tui() {
     return 0
   fi
   return 1
+}
+
+# _tui_platform — map uname → "<os>-<arch>" matching release asset names.
+# Echoes e.g. "darwin-arm64"; non-zero exit if the platform is unsupported.
+_tui_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux)  os=linux ;;
+    *)      return 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64)  arch=amd64 ;;
+    *)             return 1 ;;
+  esac
+  echo "${os}-${arch}"
+}
+
+# _install_tui_binary <tag> — download the prebuilt devloop-tui binary for the
+# current OS/arch from the given release tag into $HOME/.devloop/bin/.
+# Mirrors the CLI download path (gh release download, then curl fallback).
+# Non-fatal: warns and returns 0 if no matching asset exists so a CLI update
+# never fails just because the TUI is missing for this platform.
+_install_tui_binary() {
+  local tag="$1"
+  local repo="${DEVLOOP_GITHUB_REPO:-shaifulshabuj/devloop}"
+  local plat asset
+  if ! plat="$(_tui_platform)"; then
+    warn "Unsupported platform for prebuilt TUI ($(uname -s)/$(uname -m)) — build with: make tui-install"
+    return 0
+  fi
+  asset="devloop-tui-${plat}"
+
+  local bin_dir="$HOME/.devloop/bin"
+  mkdir -p "$bin_dir"
+  local tmp; tmp="$(mktemp -d /tmp/devloop-tui-dl.XXXXXX)"
+  local got="false"
+
+  # Prefer gh (works for private repos + authenticated rate limits).
+  if command -v gh &>/dev/null; then
+    if gh release download "$tag" --repo "$repo" \
+        --pattern "$asset" --dir "$tmp" 2>/dev/null \
+        && [[ -f "$tmp/$asset" ]]; then
+      got="true"
+    fi
+  fi
+
+  # Fallback: direct asset URL via curl/wget (public repos).
+  if [[ "$got" != "true" ]]; then
+    local url="https://github.com/$repo/releases/download/$tag/$asset"
+    if command -v curl &>/dev/null; then
+      curl -fsSL "$url" -o "$tmp/$asset" 2>/dev/null && [[ -s "$tmp/$asset" ]] && got="true"
+    elif command -v wget &>/dev/null; then
+      wget -qO "$tmp/$asset" "$url" 2>/dev/null && [[ -s "$tmp/$asset" ]] && got="true"
+    fi
+  fi
+
+  if [[ "$got" != "true" ]]; then
+    warn "No prebuilt TUI asset '${asset}' on release ${tag} — build with: make tui-install"
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  chmod +x "$tmp/$asset"
+  mv "$tmp/$asset" "$bin_dir/devloop-tui"
+  rm -rf "$tmp"
+  success "Installed devloop-tui (${plat}) → ${CYAN}$bin_dir/devloop-tui${RESET}"
+  return 0
 }
 
 # ── Session status vocabulary ─────────────────────────────────────────────────
@@ -928,6 +997,25 @@ cmd_check() {
   else
     warn "Update available: ${BOLD}v$VERSION${RESET} → ${GREEN}v$remote_ver${RESET}"
     echo -e "  Run: ${CYAN}devloop update${RESET}"
+  fi
+  echo ""
+
+  # ── TUI version drift check ────────────────────────────────────────────────
+  # The TUI ships as a separate binary; flag when it's missing or out of sync
+  # with the CLI so the user knows to run `devloop update`.
+  local tui_bin tui_ver
+  if tui_bin="$(_find_tui 2>/dev/null)"; then
+    tui_ver="$("$tui_bin" --version 2>/dev/null | sed -E 's/^devloop-tui v//' | tr -d '[:space:]')"
+    if [[ -z "$tui_ver" || "$tui_ver" == "dev" ]]; then
+      info "TUI: ${BOLD}${tui_ver:-unknown}${RESET} (local build — version not stamped)"
+    elif [[ "$tui_ver" == "$VERSION" ]]; then
+      success "TUI: ${BOLD}v$tui_ver${RESET} — in sync with the CLI ✅"
+    else
+      warn "TUI drift: CLI ${BOLD}v$VERSION${RESET} vs TUI ${BOLD}v$tui_ver${RESET}"
+      echo -e "  Run: ${CYAN}devloop update${RESET}${GRAY} (re-fetches the matching TUI)${RESET}"
+    fi
+  else
+    info "TUI: not installed — ${CYAN}devloop update${RESET}${GRAY} fetches it, or ${RESET}${CYAN}make tui-install${RESET}"
   fi
   echo ""
 }
@@ -6664,12 +6752,14 @@ cmd_update() {
   echo ""
 
   local _downloaded="false"
+  local release_tag=""   # the release tag the CLI was pulled from (for matching TUI asset)
 
   # If no custom URL, try gh release download first (works for private repos)
   if [[ -z "$url" ]] && command -v gh &>/dev/null; then
     local latest_tag
     latest_tag="$(gh api "repos/$repo/releases/latest" --jq '.tag_name' 2>/dev/null)"
     if [[ -n "$latest_tag" ]]; then
+      release_tag="$latest_tag"
       local dl_dir; dl_dir="$(mktemp -d /tmp/devloop-dl.XXXXXX)"
       if gh release download "$latest_tag" --repo "$repo" \
           --pattern "devloop.sh" --dir "$dl_dir" 2>/dev/null \
@@ -6720,6 +6810,11 @@ cmd_update() {
   elif [[ "$new_version" == "$current_version" ]]; then
     success "Already up to date (v$current_version) ✅"
     rm -f "$tmp_file"
+    # CLI is current, but the TUI may be missing (e.g. CLI-only install). Fetch it.
+    if ! _find_tui >/dev/null 2>&1; then
+      info "devloop-tui not found — fetching the matching prebuilt binary..."
+      _install_tui_binary "${release_tag:-v$current_version}"
+    fi
     return
   else
     info "Updating: ${BOLD}v$current_version${RESET} → ${GREEN}v$new_version${RESET}"
@@ -6736,6 +6831,12 @@ cmd_update() {
 
   rm -f "$tmp_file"
   success "Installed devloop ${GREEN}v${new_version:-unknown}${RESET} → ${CYAN}$install_target${RESET}"
+  echo ""
+
+  # ── Install the matching prebuilt TUI binary ───────────────────────────────
+  # Pull the devloop-tui asset for this platform from the same release so the
+  # CLI and TUI stay in lockstep. Non-fatal if the asset is missing.
+  _install_tui_binary "${release_tag:-v${new_version:-$current_version}}"
   echo ""
 
   # ── Refresh project configs for the new version ────────────────────────────
