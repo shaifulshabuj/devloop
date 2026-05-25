@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.4.6"
+VERSION="5.4.7"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -9879,6 +9879,63 @@ cmd_help() {
   echo -e "           ${CYAN}DEVLOOP_STATUS_HEADER=on${RESET}       pipeline status header in devloop run/resume (off to disable)\n"
 }
 
+# ── cmd: ask — non-interactive project Q&A ───────────────────────────────────
+# Collects task list + project context, then answers the question via
+# `claude -p` (non-interactive, no tmux). Designed to be called from the TUI
+# chat view so output lands inline in the scrollback.
+cmd_ask() {
+  local question="$*"
+  if [[ -z "$question" ]]; then
+    error "Usage: devloop ask \"<question about the project>\""
+    exit 1
+  fi
+  local root; root="$(find_project_root)"
+  load_config
+  ensure_dirs
+
+  if ! command -v claude >/dev/null 2>&1; then
+    error "claude CLI not found — cannot answer in non-interactive mode"
+    echo "Try: devloop tasks  (to list tasks)"
+    exit 1
+  fi
+
+  # ── Build context ─────────────────────────────────────────────────────────
+  local ctx=""
+
+  # Task list from specs dir
+  if [[ -d "$SPECS_PATH" ]]; then
+    local task_lines=""
+    for spec in $(ls -1t "$SPECS_PATH"/*.md 2>/dev/null | grep -v '\-review\.md'); do
+      local id; id="$(basename "$spec" .md)"
+      local feature; feature="$(grep '^\*\*Feature\*\*:' "$spec" 2>/dev/null | sed 's/\*\*Feature\*\*: //' | head -1)"
+      local status; status="$(grep '^\*\*Status\*\*:' "$spec" 2>/dev/null | sed 's/\*\*Status\*\*: //' | head -1)"
+      task_lines+="- $id: ${feature:-unknown} (${status:-pending})\n"
+    done
+    if [[ -n "$task_lines" ]]; then
+      ctx+="## Tasks\n${task_lines}\n"
+    fi
+  fi
+
+  # Recent events (last 15 lines of events.ndjson as plain text)
+  local events_file="$root/$DEVLOOP_DIR/events.ndjson"
+  if [[ -f "$events_file" ]]; then
+    local recent; recent="$(tail -15 "$events_file" 2>/dev/null | grep -o '"type":"[^"]*"\|"phase":"[^"]*"\|"message":"[^"]*"' | tr '\n' ' ')"
+    [[ -n "$recent" ]] && ctx+="## Recent pipeline events\n$recent\n\n"
+  fi
+
+  # Stack / project description from config
+  if [[ -n "${DEVLOOP_STACK:-}" ]]; then
+    ctx+="## Project stack\n${DEVLOOP_STACK}\n\n"
+  fi
+
+  local model="${CLAUDE_MAIN_MODEL:-${CLAUDE_MODEL:-sonnet}}"
+  local prompt="You are an assistant for a software project managed with DevLoop (a multi-agent coding pipeline). Answer the user's question concisely using the project context below.
+
+${ctx}Question: $question"
+
+  printf '%s\n' "$prompt" | claude -p --model "$model" 2>&1
+}
+
 # ── cmd: do — natural-language entry point ────────────────────────────────────
 # Accepts free-text without quoting conflicts (e.g. devloop do check the status)
 # Joins all args into one sentence and passes to cmd_run.
@@ -9964,7 +10021,8 @@ main() {
     projects)         cmd_projects "$@" ;;
     inbox)            cmd_inbox    "$@" ;;
     stats)            cmd_stats    "$@" ;;
-    do|ask|please|nl) cmd_do      "$@" ;;
+    ask)              cmd_ask      "$@" ;;
+    do|please|nl)     cmd_do       "$@" ;;
     install)          cmd_install  "$@" ;;
     init)             cmd_init     "$@" ;;
     configure|setup|wizard) cmd_configure "$@" ;;

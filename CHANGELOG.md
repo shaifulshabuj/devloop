@@ -11,6 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.7] — 2026-05-25
+
+### Fixed
+
+- **`/ask` in the TUI chat view now works correctly.** Previously `devloop ask`
+  was an alias for `devloop do` → `cmd_run`, which opened a tmux session and
+  failed with "not a terminal" when called from the TUI subprocess runner.
+  `ask` is now its own `cmd_ask` function that answers non-interactively:
+  it collects the task list and recent pipeline events as context, then calls
+  `claude -p` (print mode) and streams the answer to stdout — no tmux, no
+  full pipeline.
+
+---
+
 ## [5.4.6] — 2026-05-25
 
 ### Fixed
