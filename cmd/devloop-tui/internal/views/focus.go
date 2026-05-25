@@ -468,7 +468,8 @@ func (m FocusModel) renderPermitTab(w int) string {
 func (m FocusModel) dispatchPermit(action, id string) tea.Cmd {
 	root := m.projectRoot
 	return func() tea.Msg {
-		cmd := exec.Command("bash", filepath.Join(root, "devloop.sh"), "permit", action, id)
+		inv := devloopInvocation(root, "permit", action, id)
+		cmd := exec.Command(inv[0], inv[1:]...)
 		cmd.Dir = root
 		_ = cmd.Run() // errors surface implicitly via the queue refresh
 		items, _ := permit.Read(root)

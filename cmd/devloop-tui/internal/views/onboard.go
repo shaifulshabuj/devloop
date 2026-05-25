@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -327,8 +326,8 @@ func (m OnboardModel) runDoctor() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash",
-			filepath.Join(root, "devloop.sh"), "doctor", "--json")
+		inv := devloopInvocation(root, "doctor", "--json")
+		cmd := exec.CommandContext(ctx, inv[0], inv[1:]...)
 		cmd.Dir = root
 		out, err := cmd.Output()
 		// doctor returns non-zero when any check fails — that's not a
@@ -375,8 +374,8 @@ func (m OnboardModel) runDoctor() tea.Cmd {
 func (m OnboardModel) streamScript(devArgs []string, onLine func(string) tea.Msg, onDone func(int, error) tea.Msg) tea.Cmd {
 	root := m.projectRoot
 	return func() tea.Msg {
-		args := append([]string{filepath.Join(root, "devloop.sh")}, devArgs...)
-		cmd := exec.Command("bash", args...)
+		inv := devloopInvocation(root, devArgs...)
+		cmd := exec.Command(inv[0], inv[1:]...)
 		cmd.Dir = root
 		var buf bytes.Buffer
 		cmd.Stdout = &buf

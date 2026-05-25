@@ -11,6 +11,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.6] — 2026-05-25
+
+### Fixed
+
+- **All `devloop-tui` views now work with the globally installed `devloop` CLI.**
+  The 5.4.5 fix only covered chat commands. The permit grant/deny action in
+  the focus view (`focus.go`) and the `devloop init` / `devloop doctor` calls
+  in the onboarding wizard (`onboard.go`) still hard-coded
+  `<projectRoot>/devloop.sh`. All three files now share a single
+  `devloopInvocation(root, sub...)` helper that checks for a local script first
+  and falls back to the PATH binary. Affects every TUI command dispatched
+  outside the chat view.
+
+---
+
 ## [5.4.5] — 2026-05-25
 
 ### Fixed
