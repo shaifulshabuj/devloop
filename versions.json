@@ -7,11 +7,16 @@
     ]
   },
   {
-    "version": "v5.4.3",
-    "title": "v5.4.3",
+    "version": "v5.4.4",
+    "title": "v5.4.4",
     "aliases": [
       "stable"
     ]
+  },
+  {
+    "version": "v5.4.3",
+    "title": "v5.4.3",
+    "aliases": []
   },
   {
     "version": "v5.4.2",
