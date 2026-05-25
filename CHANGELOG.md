@@ -11,6 +11,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.5] — 2026-05-25
+
+### Fixed
+
+- **`devloop-tui` chat commands now work in projects that use the globally
+  installed `devloop` CLI** (i.e. no local `devloop.sh`). Previously the TUI
+  hard-coded `<projectRoot>/devloop.sh` and failed with "No such file or
+  directory" when users ran it outside the devloop repo itself. It now checks
+  for a local `devloop.sh` first; if absent it falls back to the `devloop`
+  command on PATH. Both `/ask`, `/run`, `/plan`, `/fix`, and all other chat
+  commands benefit from this fix.
+
+---
+
 ## [5.4.4] — 2026-05-25
 
 ### Added

@@ -760,20 +760,30 @@ func (m ChatModel) dispatchShell(command, arg string) (ChatModel, []tea.Cmd) {
 	return m, []tea.Cmd{startCmd}
 }
 
+// devloopCmd returns the argv prefix to invoke devloop.
+// If devloop.sh exists in the project root (dev / self-hosted mode) it is
+// called via bash.  Otherwise the globally installed `devloop` CLI is used.
+func (m ChatModel) devloopCmd(sub ...string) []string {
+	local := filepath.Join(m.projectRoot, "devloop.sh")
+	if _, err := os.Stat(local); err == nil {
+		return append([]string{"bash", local}, sub...)
+	}
+	return append([]string{"devloop"}, sub...)
+}
+
 func (m ChatModel) buildArgv(command, arg string) []string {
-	devloopScript := filepath.Join(m.projectRoot, "devloop.sh")
 	switch command {
 	case "architect":
-		return []string{"bash", devloopScript, "architect", arg}
+		return m.devloopCmd("architect", arg)
 	case "run":
-		return []string{"bash", devloopScript, "run", arg}
+		return m.devloopCmd("run", arg)
 	case "ask":
-		return []string{"bash", devloopScript, "ask", arg}
+		return m.devloopCmd("ask", arg)
 	case "fix":
 		if arg != "" {
-			return []string{"bash", devloopScript, "fix", arg}
+			return m.devloopCmd("fix", arg)
 		}
-		return []string{"bash", devloopScript, "fix"}
+		return m.devloopCmd("fix")
 	case "diff":
 		id := m.resolveID(arg)
 		specsPath := filepath.Join(m.projectRoot, ".devloop", "specs")
@@ -788,12 +798,11 @@ func (m ChatModel) buildArgv(command, arg string) []string {
 	case "_rollback":
 		return []string{"git", "-C", m.projectRoot, "reset", "--hard", arg}
 	default:
-		out := []string{"bash", devloopScript}
-		out = append(out, strings.Fields(command)...)
+		parts := strings.Fields(command)
 		if arg != "" {
-			out = append(out, arg)
+			parts = append(parts, arg)
 		}
-		return out
+		return m.devloopCmd(parts...)
 	}
 }
 
