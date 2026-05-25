@@ -11,6 +11,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.2] — 2026-05-25
+
+### Fixed
+
+- **`devloop update` now installs correctly over a root-owned binary.** The
+  write-permission check only tested the parent directory, so on a common
+  layout — a root-owned `/usr/local/bin/devloop` inside a user-writable
+  `/usr/local/bin` (e.g. Homebrew) — it chose a plain `cp`, which fails with
+  `Permission denied` because `cp` truncates the target in place and needs
+  write permission on the *file*. It now checks the target file itself (the
+  directory only for a brand-new install) and falls back to `sudo cp` when the
+  file isn't yours. Both `cp` paths now abort loudly on failure instead of
+  silently reporting success.
+
+---
+
 ## [5.4.1] — 2026-05-25
 
 Bugfix for the v5.4.0 TUI-delivery flow.

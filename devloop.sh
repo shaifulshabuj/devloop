@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.4.1"
+VERSION="5.4.2"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
@@ -6839,10 +6839,22 @@ cmd_update() {
   local install_target; install_target="$(command -v devloop 2>/dev/null || echo "/usr/local/bin/devloop")"
   chmod +x "$tmp_file"
 
-  if [[ -w "$(dirname "$install_target")" ]]; then
-    cp "$tmp_file" "$install_target"
+  # Overwriting an existing file needs write permission on the FILE (cp truncates
+  # it in place) — a writable parent dir is not enough (e.g. a root-owned binary
+  # in a Homebrew-writable /usr/local/bin). Only a brand-new file falls back to
+  # the directory check. When we can't write directly, escalate with sudo.
+  local can_write="false"
+  if [[ -e "$install_target" ]]; then
+    [[ -w "$install_target" ]] && can_write="true"
   else
-    sudo cp "$tmp_file" "$install_target"
+    [[ -w "$(dirname "$install_target")" ]] && can_write="true"
+  fi
+
+  if [[ "$can_write" == "true" ]]; then
+    cp "$tmp_file" "$install_target" || { error "Failed to write $install_target"; rm -f "$tmp_file"; exit 1; }
+  else
+    info "Elevated permissions needed to write ${CYAN}$install_target${RESET} (it is not owned by you)"
+    sudo cp "$tmp_file" "$install_target" || { error "sudo cp failed — could not install to $install_target"; rm -f "$tmp_file"; exit 1; }
   fi
 
   rm -f "$tmp_file"
