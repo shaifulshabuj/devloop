@@ -307,6 +307,17 @@ fi
 
 rm -f "$NOTES_FILE"
 
+# ── Attach the CLI script itself ──────────────────────────────────────────────
+# `devloop update`'s preferred path is `gh release download --pattern devloop.sh`
+# (works for private repos); raw-main is only the fallback. Attach it so the
+# preferred path succeeds.
+section "Uploading CLI script"
+if gh release upload "$TAG" devloop.sh --clobber; then
+  ok "attached devloop.sh to $TAG"
+else
+  warn "failed to upload devloop.sh — `devloop update` will use the raw-main fallback"
+fi
+
 # ── Attach TUI binaries as release assets ─────────────────────────────────────
 # `devloop update` downloads the binary matching the user's OS/arch from here.
 if [[ -n "$TUI_DIR" ]]; then
