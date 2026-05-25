@@ -33,10 +33,36 @@ const (
 )
 
 type chatLine struct {
-	Kind   lineKind
-	Text   string
-	Time   time.Time
-	CmdID  int // 0 = not associated with a subprocess
+	Kind  lineKind
+	Text  string
+	Time  time.Time
+	CmdID int // 0 = not associated with a subprocess
+}
+
+// ─── Slash command registry ───────────────────────────────────────────────────
+
+// slashCmd describes one slash command for autocomplete and /help.
+type slashCmd struct {
+	Name string // "/run"
+	Args string // "<feature>" — empty if command takes no args
+	Hint string // one-line description
+}
+
+const maxSuggestions = 5
+
+// allSlashCmds is the canonical list used by autocomplete and /help.
+var allSlashCmds = []slashCmd{
+	{"/ask", "<question>", "ask a question about the project"},
+	{"/run", "<feature>", "full pipeline: architect+work+review"},
+	{"/plan", "<feature>", "design a spec (devloop architect)"},
+	{"/fix", "[TASK-ID]", "apply fix pass"},
+	{"/status", "[TASK-ID]", "show pipeline status inline"},
+	{"/diff", "[TASK-ID]", "git diff from baseline"},
+	{"/skip", "<phase>", "mark phase as skipped"},
+	{"/rollback", "", "git reset to session baseline"},
+	{"/mode", "ask|code|auto", "set session mode"},
+	{"/help", "", "show available commands"},
+	{"/quit", "", "quit the TUI"},
 }
 
 // ─── Subprocess messages ──────────────────────────────────────────────────────
@@ -90,6 +116,7 @@ type ChatModel struct {
 	running        map[int]*runningCmd
 	nextCmdID      int
 	lastCmdID      int // most recently started command (for ctrl+c)
+	suggestionIdx  int // -1 = no selection; index into activeSuggestions()
 	// testHook is called with ("run"|"plan"|"fix"|"diff", feature) in NoSubprocess
 	// mode so tests can assert on the dispatched command without exec.
 	testHook func(command, arg string)
@@ -117,12 +144,13 @@ func NewChatWithOptions(projectRoot string, opts ChatOptions) ChatModel {
 	ti.Focus()
 
 	m := ChatModel{
-		projectRoot: projectRoot,
-		opts:        opts,
-		mode:        mode,
-		input:       ti,
-		running:     make(map[int]*runningCmd),
-		nextCmdID:   1,
+		projectRoot:   projectRoot,
+		opts:          opts,
+		mode:          mode,
+		input:         ti,
+		running:       make(map[int]*runningCmd),
+		nextCmdID:     1,
+		suggestionIdx: -1,
 	}
 
 	// Find the newest session on disk.
@@ -172,7 +200,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			m.lastEscAt = now
-			// If scrolled back, any key returns to bottom.
+			m.suggestionIdx = -1
 			if m.scrollOffset > 0 {
 				m.scrollOffset = 0
 			}
@@ -197,15 +225,66 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Suggestion navigation: intercept ↑ ↓ Tab before normal key handling.
+		if suggs := m.activeSuggestions(); len(suggs) > 0 {
+			switch msg.Type {
+			case tea.KeyUp:
+				m.suggestionIdx--
+				if m.suggestionIdx < -1 {
+					m.suggestionIdx = len(suggs) - 1
+				}
+				return m, nil
+			case tea.KeyDown:
+				m.suggestionIdx++
+				if m.suggestionIdx >= len(suggs) {
+					m.suggestionIdx = -1
+				}
+				return m, nil
+			case tea.KeyTab:
+				idx := m.suggestionIdx
+				if idx < 0 {
+					idx = 0
+				}
+				if idx < len(suggs) {
+					s := suggs[idx]
+					if s.Args != "" {
+						m.input.SetValue(s.Name + " ")
+					} else {
+						m.input.SetValue(s.Name)
+					}
+					m.input.CursorEnd()
+					m.suggestionIdx = -1
+				}
+				return m, nil
+			}
+		}
+
 		// Any other key while scrolled back: snap to bottom.
 		if m.scrollOffset > 0 && msg.Type != tea.KeyEnter {
 			m.scrollOffset = 0
 		}
 
 		if msg.Type == tea.KeyEnter {
+			// If a suggestion is highlighted, complete it first.
+			if m.suggestionIdx >= 0 {
+				if suggs := m.activeSuggestions(); m.suggestionIdx < len(suggs) {
+					s := suggs[m.suggestionIdx]
+					m.suggestionIdx = -1
+					if s.Args != "" {
+						// Command needs an arg — fill the name and let the user type.
+						m.input.SetValue(s.Name + " ")
+						m.input.CursorEnd()
+						return m, nil
+					}
+					// No args — fall through with the completed command.
+					m.input.SetValue(s.Name)
+				}
+			}
+
 			m.scrollOffset = 0
 			text := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
+			m.suggestionIdx = -1
 			if text == "" {
 				return m, nil
 			}
@@ -222,18 +301,17 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var tiCmd tea.Cmd
 		m.input, tiCmd = m.input.Update(msg)
 		cmds = append(cmds, tiCmd)
+		// Reset suggestion selection whenever the input text changes.
+		m.suggestionIdx = -1
 
 	// ── Subprocess messages ────────────────────────────────────────────────
 
 	case cmdStartedMsg:
-		// Nothing special; the running cmd is already registered before the
-		// message is sent.
 		_ = msg
 
 	case cmdLineMsg:
 		prefix := fmt.Sprintf("[#%d] ", msg.id)
 		m = m.appendLine(lineOutput, prefix+msg.line, msg.id)
-		// Re-arm the reader for the next line.
 		if rc, ok := m.running[msg.id]; ok {
 			cmds = append(cmds, readNextLine(rc))
 		}
@@ -247,7 +325,6 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fmt.Sprintf("[#%d] done", msg.id), msg.id)
 		}
 		delete(m.running, msg.id)
-		// Refresh current session after run/plan/fix.
 		m.currentSession = m.resolveNewestSession(m.currentSession)
 	}
 
@@ -273,6 +350,13 @@ var (
 	styleLineOutput = lipgloss.NewStyle().Faint(true).PaddingLeft(2)
 	styleLineInfo   = lipgloss.NewStyle().Faint(true).Foreground(theme.Blue)
 	styleLineError  = lipgloss.NewStyle().Foreground(theme.Red)
+
+	// Suggestion popup styles.
+	styleSuggestCmd = lipgloss.NewStyle().Foreground(theme.Purple)
+	styleSuggestDim = lipgloss.NewStyle().Foreground(theme.Dim)
+	styleSuggestSel = lipgloss.NewStyle().
+			Background(lipgloss.Color("#0d2244")).
+			Foreground(theme.Text)
 )
 
 func (m ChatModel) View() string {
@@ -293,25 +377,88 @@ func (m ChatModel) View() string {
 	header := styleHeader.Width(w).Render(
 		fmt.Sprintf("Chat  ·  mode: %s  ·  session: %s", m.mode, sessionLabel),
 	)
-
 	inputArea := styleInputLine.Width(w).Render(m.input.View())
 
-	// Available lines for scrollback: subtract header (2 lines with border) and input (2 lines with border).
+	// Suggestion popup: rendered between scrollback and input.
+	suggs := m.activeSuggestions()
+	suggestView := m.renderSuggestions(suggs, w)
+	suggestH := len(suggs)
+	if suggestH > maxSuggestions {
+		suggestH = maxSuggestions
+	}
+
 	headerH := 2
 	inputH := 2
-	scrollH := h - headerH - inputH
+	scrollH := h - headerH - inputH - suggestH
 	if scrollH < 1 {
 		scrollH = 1
 	}
 
 	scrollView := m.renderScrollback(w, scrollH)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, scrollView, inputArea)
+	parts := []string{header, scrollView}
+	if suggestView != "" {
+		parts = append(parts, suggestView)
+	}
+	parts = append(parts, inputArea)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// activeSuggestions returns the filtered slash commands matching the current
+// input. Returns nil when the input is not a slash prefix or is already a
+// complete unambiguous command.
+func (m ChatModel) activeSuggestions() []slashCmd {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") || strings.ContainsRune(val, ' ') {
+		return nil
+	}
+	q := strings.ToLower(val)
+	var out []slashCmd
+	for _, c := range allSlashCmds {
+		if strings.HasPrefix(c.Name, q) {
+			out = append(out, c)
+		}
+	}
+	// Hide when the input is already an exact unambiguous command.
+	if len(out) == 1 && out[0].Name == q {
+		return nil
+	}
+	if len(out) > maxSuggestions {
+		out = out[:maxSuggestions]
+	}
+	return out
+}
+
+// renderSuggestions renders the autocomplete popup. Selected row gets a blue
+// highlight; others show the command name in purple and hint in dim.
+func (m ChatModel) renderSuggestions(suggs []slashCmd, w int) string {
+	if len(suggs) == 0 {
+		return ""
+	}
+	var rows []string
+	for i, s := range suggs {
+		if i == m.suggestionIdx {
+			text := "  " + s.Name
+			if s.Args != "" {
+				text += " " + s.Args
+			}
+			text += "  " + s.Hint
+			rows = append(rows, styleSuggestSel.Width(w).Render(text))
+		} else {
+			name := styleSuggestCmd.Render("  " + s.Name)
+			rest := ""
+			if s.Args != "" {
+				rest += styleSuggestDim.Render(" " + s.Args)
+			}
+			rest += styleSuggestDim.Render("  " + s.Hint)
+			rows = append(rows, name+rest)
+		}
+	}
+	return strings.Join(rows, "\n")
 }
 
 // renderScrollback renders the scrollback region clipped to scrollH lines.
 func (m ChatModel) renderScrollback(w, scrollH int) string {
-	// Build all rendered lines.
 	var rendered []string
 	for _, cl := range m.scrollback {
 		rendered = append(rendered, m.renderLine(cl, w))
@@ -319,11 +466,10 @@ func (m ChatModel) renderScrollback(w, scrollH int) string {
 
 	total := len(rendered)
 	if total == 0 {
-		hint := lipgloss.NewStyle().Faint(true).Render("type /help for available commands")
+		hint := lipgloss.NewStyle().Faint(true).Render("type / to see commands, or describe a feature")
 		return lipgloss.NewStyle().Width(w).Height(scrollH).Render(hint)
 	}
 
-	// Clamp scrollOffset.
 	maxOff := total - scrollH
 	if maxOff < 0 {
 		maxOff = 0
@@ -333,7 +479,6 @@ func (m ChatModel) renderScrollback(w, scrollH int) string {
 		off = maxOff
 	}
 
-	// Window: from bottom minus offset.
 	end := total - off
 	start := end - scrollH
 	if start < 0 {
@@ -341,7 +486,6 @@ func (m ChatModel) renderScrollback(w, scrollH int) string {
 	}
 	window := rendered[start:end]
 
-	// Pad to fill the region.
 	for len(window) < scrollH {
 		window = append([]string{""}, window...)
 	}
@@ -388,6 +532,13 @@ func (m ChatModel) dispatch(text string) (ChatModel, []tea.Cmd) {
 	case "/quit", "/exit":
 		return m, []tea.Cmd{tea.Quit}
 
+	case "/ask":
+		if rest == "" {
+			m = m.appendLine(lineError, "usage: /ask <question>", 0)
+			return m, nil
+		}
+		return m.dispatchShell("ask", rest)
+
 	case "/plan":
 		if rest == "" {
 			m = m.appendLine(lineError, "usage: /plan <feature>", 0)
@@ -403,7 +554,7 @@ func (m ChatModel) dispatch(text string) (ChatModel, []tea.Cmd) {
 		return m.dispatchShell("run", rest)
 
 	case "/fix":
-		return m.dispatchShell("fix", rest) // rest may be empty → newest
+		return m.dispatchShell("fix", rest)
 
 	case "/status":
 		return m.doStatus(rest), nil
@@ -430,7 +581,7 @@ func (m ChatModel) dispatch(text string) (ChatModel, []tea.Cmd) {
 		return m.doMode(rest), nil
 
 	default:
-		m = m.appendLine(lineError, fmt.Sprintf("unknown command %q — type /help for help", cmd), 0)
+		m = m.appendLine(lineError, fmt.Sprintf("unknown command %q — type / to see commands", cmd), 0)
 		return m, nil
 	}
 }
@@ -438,25 +589,14 @@ func (m ChatModel) dispatch(text string) (ChatModel, []tea.Cmd) {
 // ─── /help ────────────────────────────────────────────────────────────────────
 
 func (m ChatModel) doHelp() ChatModel {
-	lines := []string{
-		"Available commands:",
-		"  /help                  — this list",
-		"  /quit, /exit           — quit the TUI",
-		"  /plan <feature>        — design a spec (devloop architect)",
-		"  /run  <feature>        — full pipeline (devloop run)",
-		"  /fix  [TASK-ID]        — apply fix pass",
-		"  /status [TASK-ID]      — show pipeline grid inline",
-		"  /diff  [TASK-ID]       — git diff from baseline",
-		"  /skip  <phase>         — mark phase as skipped",
-		"  /rollback              — git reset to session baseline",
-		"  /inbox                 — (Phase 4)",
-		"  /mode ask|code|auto    — set session mode",
-		"",
-		"  Bare text is treated as /run <text>.",
+	m = m.appendLine(lineInfo, "Available commands:", 0)
+	for _, c := range allSlashCmds {
+		line := fmt.Sprintf("  %-22s — %s", c.Name+" "+c.Args, c.Hint)
+		m = m.appendLine(lineInfo, line, 0)
 	}
-	for _, l := range lines {
-		m = m.appendLine(lineInfo, l, 0)
-	}
+	m = m.appendLine(lineInfo, "", 0)
+	m = m.appendLine(lineInfo, "  Bare text is treated as /run <text>.", 0)
+	m = m.appendLine(lineInfo, "  Type / and use ↑↓ Tab to navigate commands.", 0)
 	return m
 }
 
@@ -485,7 +625,6 @@ func (m ChatModel) doStatus(arg string) ChatModel {
 		return m
 	}
 
-	// Update current session.
 	m.currentSession = id
 
 	phases := buildPhases(sess)
@@ -507,7 +646,6 @@ func (m ChatModel) doMode(arg string) ChatModel {
 	switch arg {
 	case "ask", "code", "auto":
 		m.mode = arg
-		// Persist to the current session dir.
 		if id := m.resolveNewestSession(m.currentSession); id != "" {
 			sessionDir := filepath.Join(m.projectRoot, ".devloop", "sessions", id)
 			_ = os.MkdirAll(sessionDir, 0o755)
@@ -539,7 +677,6 @@ func (m ChatModel) doSkip(phase string) (ChatModel, []tea.Cmd) {
 		return m, nil
 	}
 
-	// Emit a phase.end NDJSON event.
 	event := map[string]string{
 		"ts":      time.Now().UTC().Format(time.RFC3339),
 		"kind":    "phase.end",
@@ -583,15 +720,13 @@ func (m ChatModel) doRollback() (ChatModel, []tea.Cmd) {
 	return m.dispatchShell("_rollback", hash)
 }
 
-// ─── /diff: shell command helpers ────────────────────────────────────────────
+// ─── Shell dispatch ───────────────────────────────────────────────────────────
 
 func (m ChatModel) dispatchShell(command, arg string) (ChatModel, []tea.Cmd) {
 	if m.opts.NoSubprocess {
-		// Test mode: emit two fake lines and a done message.
 		id := m.nextCmdID
 		m.nextCmdID++
 		m.lastCmdID = id
-		// Store testHook result before returning.
 		if m.testHook != nil {
 			m.testHook(command, arg)
 		}
@@ -607,7 +742,6 @@ func (m ChatModel) dispatchShell(command, arg string) (ChatModel, []tea.Cmd) {
 		return m, []tea.Cmd{fakeCmd, fakeCmd2, fakeDone}
 	}
 
-	// Build the actual argv.
 	argv := m.buildArgv(command, arg)
 	id := m.nextCmdID
 	m.nextCmdID++
@@ -633,13 +767,14 @@ func (m ChatModel) buildArgv(command, arg string) []string {
 		return []string{"bash", devloopScript, "architect", arg}
 	case "run":
 		return []string{"bash", devloopScript, "run", arg}
+	case "ask":
+		return []string{"bash", devloopScript, "ask", arg}
 	case "fix":
 		if arg != "" {
 			return []string{"bash", devloopScript, "fix", arg}
 		}
 		return []string{"bash", devloopScript, "fix"}
 	case "diff":
-		// /diff [TASK-ID]: use baseline if available, else git diff HEAD.
 		id := m.resolveID(arg)
 		specsPath := filepath.Join(m.projectRoot, ".devloop", "specs")
 		baselineFile := filepath.Join(specsPath, id+".pre-commit")
@@ -651,12 +786,8 @@ func (m ChatModel) buildArgv(command, arg string) []string {
 		}
 		return []string{"git", "-C", m.projectRoot, "diff", "HEAD"}
 	case "_rollback":
-		// arg is the baseline hash.
 		return []string{"git", "-C", m.projectRoot, "reset", "--hard", arg}
 	default:
-		// Generic path: support multi-word commands like "daemon stop",
-		// "permit grant", "permit status" by splitting Command on
-		// whitespace. arg (if non-empty) is appended verbatim.
 		out := []string{"bash", devloopScript}
 		out = append(out, strings.Fields(command)...)
 		if arg != "" {
@@ -668,21 +799,17 @@ func (m ChatModel) buildArgv(command, arg string) []string {
 
 // ─── Subprocess streaming ─────────────────────────────────────────────────────
 
-// runShellCmd starts a subprocess and returns a tea.Cmd that begins streaming
-// its output. Lines come back as cmdLineMsg; completion as cmdDoneMsg.
-// It does NOT use tea.ExecProcess; the TUI remains live.
 func runShellCmd(id int, argv []string, cwd string, rc *runningCmd) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Dir = cwd
-		// Inherit the full environment so DEVLOOP_AUTO etc. propagate.
 		cmd.Env = os.Environ()
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			return cmdDoneMsg{id: id, exitCode: 1}
 		}
-		cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
+		cmd.Stderr = cmd.Stdout
 
 		if err := cmd.Start(); err != nil {
 			return cmdDoneMsg{id: id, exitCode: 1}
@@ -696,7 +823,6 @@ func runShellCmd(id int, argv []string, cwd string, rc *runningCmd) tea.Cmd {
 			}
 		}
 
-		// Goroutine: read lines from stdout, forward to channel.
 		go func() {
 			sc := bufio.NewScanner(stdout)
 			for sc.Scan() {
@@ -706,34 +832,26 @@ func runShellCmd(id int, argv []string, cwd string, rc *runningCmd) tea.Cmd {
 			close(lines)
 		}()
 
-		// Return the first line (or done if the channel closes immediately).
 		return readNextLine(rc)()
 	}
 }
 
-// readNextLine returns a tea.Cmd that pulls one line from rc.lines.
 func readNextLine(rc *runningCmd) tea.Cmd {
 	id := rc.id
 	ch := rc.lines
 	return func() tea.Msg {
 		line, ok := <-ch
 		if !ok {
-			// Channel closed — process has exited. We don't have the exit code
-			// here, but the goroutine already called cmd.Wait(). Report 0.
 			return cmdDoneMsg{id: id, exitCode: exitCodeFromClosed(ch)}
 		}
 		return cmdLineMsg{id: id, line: line}
 	}
 }
 
-// exitCodeFromClosed returns 0; the goroutine already called cmd.Wait()
-// without capturing the exit code. A future enhancement can use an atomic int.
 func exitCodeFromClosed(_ chan string) int { return 0 }
 
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
-// resolveNewestSession returns id if non-empty and found on disk; otherwise
-// returns the newest session ID from disk. Returns "" if no sessions exist.
 func (m ChatModel) resolveNewestSession(prefer string) string {
 	sessions, err := stream.Scan(m.projectRoot)
 	if err != nil || len(sessions) == 0 {
@@ -749,8 +867,6 @@ func (m ChatModel) resolveNewestSession(prefer string) string {
 	return sessions[0].ID
 }
 
-// resolveID picks the session to operate on. If arg is a TASK-… ID it uses
-// that; otherwise it returns the current session (or newest on disk).
 func (m ChatModel) resolveID(arg string) string {
 	if strings.HasPrefix(arg, "TASK-") {
 		return arg
@@ -793,6 +909,4 @@ func (m ChatModel) maxScrollOffset() int {
 	return n
 }
 
-// _syncMapSentinel prevents the sync package from being reported unused
-// if the compiler inlines exitCodeFromClosed.
 var _syncMapSentinel sync.Map

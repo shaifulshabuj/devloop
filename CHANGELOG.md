@@ -11,6 +11,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [5.4.4] — 2026-05-25
+
+### Added
+
+- **`/ask <question>` command in `devloop-tui` chat view.**  
+  Type `/ask how does authentication work?` and the TUI shells out to
+  `devloop ask <question>`, which routes through the same natural-language
+  pipeline as `devloop do`. Great for quick project Q&A without leaving the
+  terminal dashboard.
+
+- **Slash-command autocomplete popup in `devloop-tui` chat view.**  
+  Typing `/` (or any prefix like `/ru`) shows a filtered inline popup of
+  matching commands with their argument hints. Navigate with `↑`/`↓`, confirm
+  with `Tab` (fills the command name) or `Enter` (fills + dispatches when the
+  command takes no args). Pressing any other key dismisses the popup and
+  continues normal typing.
+
+---
+
 ## [5.4.3] — 2026-05-25
 
 ### Fixed

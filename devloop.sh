@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-VERSION="5.4.3"
+VERSION="5.4.4"
 DEVLOOP_DIR=".devloop"
 SPECS_DIR="$DEVLOOP_DIR/specs"
 PROMPTS_DIR="$DEVLOOP_DIR/prompts"
