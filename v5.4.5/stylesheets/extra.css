@@ -1,0 +1,92 @@
+:root {
+  --md-primary-fg-color: #6a0dad;
+  --md-accent-fg-color: #ff6d00;
+}
+
+/* Hero section */
+.dl-hero {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  background: linear-gradient(135deg, #1a0533 0%, #2d0f54 50%, #1a1a2e 100%);
+  border-radius: 12px;
+  margin-bottom: 2rem;
+  color: #fff;
+}
+.dl-hero h1 {
+  color: #fff;
+  font-size: 2.4rem;
+  margin: 0 0 .5rem;
+}
+.dl-hero p.tagline {
+  color: rgba(255,255,255,.85);
+  font-size: 1.1rem;
+  max-width: 720px;
+  margin: 0 auto 1.5rem;
+}
+.dl-hero .badges {
+  margin: .8rem 0 1.4rem;
+}
+.dl-hero .badges img {
+  margin: 0 .2rem;
+  vertical-align: middle;
+}
+
+/* Feature card grid */
+.dl-features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1.25rem;
+  margin: 2rem 0;
+}
+.dl-feature {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 10px;
+  padding: 1.2rem 1.3rem;
+  background: var(--md-default-bg-color);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.dl-feature:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(106,13,173,.12);
+}
+.dl-feature h3 {
+  margin-top: 0;
+  font-size: 1.05rem;
+  color: var(--md-accent-fg-color);
+}
+.dl-feature p {
+  margin-bottom: 0;
+  font-size: .92rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* CTA buttons */
+.dl-btn {
+  display: inline-block;
+  padding: .7rem 1.6rem;
+  border-radius: 6px;
+  font-weight: 600;
+  text-decoration: none !important;
+  margin: .3rem;
+  transition: opacity .2s;
+}
+.dl-btn:hover { opacity: .85; }
+.dl-btn-primary {
+  background: var(--md-accent-fg-color);
+  color: #fff !important;
+}
+.dl-btn-secondary {
+  background: transparent;
+  border: 2px solid rgba(255,255,255,.5);
+  color: #fff !important;
+}
+
+/* Quote block */
+.dl-quote {
+  border-left: 4px solid var(--md-accent-fg-color);
+  padding: .6rem 1rem;
+  background: var(--md-default-fg-color--lightest);
+  border-radius: 0 6px 6px 0;
+  margin: 1.4rem 0;
+  font-style: italic;
+}
