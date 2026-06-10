@@ -1,0 +1,61 @@
+# devloop — Isolated Agent Development Environment
+#
+# Purpose: Build and test devloop (bash engine + Go TUI) in an isolated
+#          linux/arm64 container. Credentials and repo are the only host
+#          paths mounted; no SSH, no other projects, no host files.
+#
+# Build:  scripts/dev-container.sh  (handles build + run automatically)
+# Manual: container build --tag devloop-dev:latest --file Dockerfile.dev .
+
+FROM ubuntu:24.04
+
+LABEL org.opencontainers.image.title="devloop-dev"
+LABEL org.opencontainers.image.description="Isolated dev environment for devloop — bash engine + Go TUI"
+
+ARG GO_VERSION=1.24.2
+
+# ── Base toolchain ────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git bash jq unzip wget sudo bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" \
+    | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:$PATH"
+ENV CGO_ENABLED=0
+ENV GOPATH=/go
+ENV GOMODCACHE=/go/pkg/mod
+
+# ── GitHub CLI (gh) ───────────────────────────────────────────────────────────
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=arm64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+        https://cli.github.com/packages stable main" \
+        | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 22 (needed for Claude Code CLI) ───────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Claude Code CLI ───────────────────────────────────────────────────────────
+# Auth is provided via mounted ~/.claude at container runtime (read-only).
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    || echo "⚠  Claude CLI install failed — mount credentials and retry at runtime"
+ENV PATH="/root/.claude/local/bin:/root/.local/bin:$PATH"
+
+# ── Git config ────────────────────────────────────────────────────────────────
+# Teach git to trust /workspace (cross-device mount from macOS host)
+RUN git config --global --add safe.directory /workspace
+
+# ── Go module cache (pre-warm in a writable layer, not from host) ─────────────
+RUN mkdir -p /go/pkg/mod /go/bin
+VOLUME ["/go/pkg/mod"]
+
+WORKDIR /workspace
+
+CMD ["/bin/bash", "--login"]
