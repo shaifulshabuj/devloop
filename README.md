@@ -1,5 +1,7 @@
 # 🔁 DevLoop
 
+> **Active line: v5.4.7 (bash + TUI).** Tags v6.0.0–v6.1.4 were a Go-rewrite experiment that was reverted — do not install from those tags. Install via `main` or any `v5.x` tag.
+
 **Multi-agent AI development pipeline — remote-controllable, self-healing, provider-flexible**
 
 A single shell script that orchestrates Claude Code, GitHub Copilot, OpenCode, and Pi into a fully automated design → implement → review loop. Configure which AI handles which role, start a remote session, and send feature requests from your phone.
