@@ -149,6 +149,8 @@ A Go TUI (Bubble Tea + Lipgloss) sits beside the bash engine, watching the
 same `.devloop/` directory it reads and writes. CLI behaviour is unchanged;
 the TUI is opt-in.
 
+**Build/test**: use `make build` / `make test` from the repo root — `go build ./...` fails from the root because go.work only lists `./cmd/devloop-tui` as a module.
+
 ### Package layout
 
 ```
