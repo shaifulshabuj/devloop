@@ -207,3 +207,43 @@ cmd/devloop-tui/
 ## Learned Patterns
 <!-- devloop learn appends dated lessons here -->
 <!-- DEVLOOP:CLAUDE:END -->
+
+### Agent Sync — 2026-06-11 (providers: claude copilot)
+## Provider Doc Review — 2026-06-11
+
+### What the fetches actually returned
+
+Both pages returned mostly JavaScript/CSS rendering boilerplate, not prose documentation. The extractable signal is limited to navigation structure and one explicit deprecation notice.
+
+---
+
+### 1. New CLI Features / Flags (non-interactive / piped usage)
+
+**Copilot CLI** (from nav tree — confirmed new surface area):
+- `automate-copilot-cli/run-cli-programmatically` — dedicated programmatic-use guide now exists
+- `automate-copilot-cli/schedule-prompts` — built-in prompt scheduling (no external cron needed)
+- `automate-copilot-cli/automate-with-actions` — GitHub Actions integration documented
+- `copilot-cli-reference/acp-server` — ACP (Agent Control Protocol) server reference; relevant for piped/headless use
+- Fleet mode (`parallel task execution`) and Chronicle (`session data`) are now first-class concepts
+
+**Claude Code**: No extractable new flags — the fetched page was the Overview, which rendered as JS only.
+
+---
+
+### 2. Breaking Changes
+
+- **`gh copilot` extension is retired.** The old GitHub CLI Copilot extension no longer exists. DevLoop's `PROVIDER=copilot` invocation must use the new standalone Copilot CLI binary, not `gh copilot suggest` / `gh copilot explain`.
+
+---
+
+### 3. Best Practices for Large Prompts / Spec Files
+
+No explicit guidance was extractable from these fetches. Standard practice applies: pipe via stdin or pass a file path argument rather than inline strings.
+
+---
+
+### 4. Recommended DevLoop Improvements
+
+- **Update the `copilot` provider shim** — replace any `gh copilot` calls in `devloop.sh` / provider scripts with the new Copilot CLI binary invocation before it breaks silently.
+- **Explore ACP server for structured piping** — the new ACP server reference suggests a machine-readable protocol; worth investigating as a replacement for ad-hoc stdout parsing in the review loop.
+- **Re-run `devloop agent-sync`** — the cached provider docs are stale; the Copilot CLI surface area has expanded significantly (fleet, chronicle, hooks, LSP).
