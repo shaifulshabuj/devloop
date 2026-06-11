@@ -12,7 +12,7 @@ flowchart TD
     CLAUDE_START("claude --remote-control\n+ orchestrator agent")
     ARCH("@devloop-architect\nsubagent")
     WORK("devloop work")
-    COPILOT("gh copilot")
+    COPILOT("copilot CLI")
     REVIEW("devloop review")
     CLAUDE_REVIEW("claude -p\nreviewer prompt")
     FIX("devloop fix")
@@ -252,7 +252,7 @@ flowchart TD
     SPEC_FILE -->|"cat task file"| P3
     CONFIG -->|"live values"| P2
 
-    COPILOT("gh copilot\n/plan mode")
+    COPILOT("copilot CLI\n(--allow-all-tools)")
     PROMPT -->|"piped via stdin"| COPILOT
     COPILOT -->|"implements + stages + commits"| GIT("git repo")
 ```
@@ -387,7 +387,7 @@ flowchart TD
     ORCH("devloop-orchestrator\nmodel: sonnet\ntools: Agent · Bash · Read\nWrite · TodoWrite")
     ARCH("devloop-architect\nmodel: CLAUDE_MODEL\ntools: Bash · Read · Glob · Grep")
     REVI("devloop-reviewer\nmodel: CLAUDE_MODEL\ntools: Bash · Read · Glob · Grep")
-    COPILOT("gh copilot\n/plan mode")
+    COPILOT("copilot CLI\n(--allow-all-tools)")
     GIT("git repo")
 
     subgraph TODO["TodoWrite — per task"]

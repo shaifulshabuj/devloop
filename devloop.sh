@@ -787,7 +787,10 @@ _probe_provider() {
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
       ;;
     copilot)
-      if ! copilot --allow-all-tools --allow-all-paths -p "Reply with exactly: OK" > "$tmp" 2>&1; then
+      if ! command -v copilot &>/dev/null; then
+        printf 'copilot: binary not installed\n' > "$tmp"
+        rc=2
+      elif ! copilot --allow-all-tools --allow-all-paths -p "Reply with exactly: OK" > "$tmp" 2>&1; then
         rc=1
       fi
       _is_rate_limit_error "$(cat "$tmp")" && rc=1
@@ -7787,20 +7790,18 @@ cmd_failover() {
       local worker_p; worker_p="$(worker_provider)"
       step "🩺 Probing providers..."
       divider
-      echo -n "  Main   ($(provider_label "$main_p")): "
-      if _probe_provider "$main_p"; then
-        echo -e "${GREEN}OK${RESET}"
-      else
-        echo -e "${RED}RATE LIMITED${RESET}"
-      fi
-      if [[ "$worker_p" != "$main_p" ]]; then
-        echo -n "  Worker ($(provider_label "$worker_p")): "
-        if _probe_provider "$worker_p"; then
-          echo -e "${GREEN}OK${RESET}"
-        else
-          echo -e "${RED}RATE LIMITED${RESET}"
-        fi
-      fi
+      _probe_and_report() {
+        local label="$1" provider="$2"
+        echo -n "  $label ($(provider_label "$provider")): "
+        _probe_provider "$provider"; local rc=$?
+        case $rc in
+          0) echo -e "${GREEN}OK${RESET}" ;;
+          2) echo -e "${YELLOW}NOT INSTALLED${RESET}  (npm install -g @github/copilot)" ;;
+          *) echo -e "${RED}RATE LIMITED${RESET}" ;;
+        esac
+      }
+      _probe_and_report "Main  " "$main_p"
+      [[ "$worker_p" != "$main_p" ]] && _probe_and_report "Worker" "$worker_p"
       divider
       echo ""
       ;;
