@@ -9,11 +9,11 @@ It is registered via `.codex/config.toml` and available as MCP tools in every Co
 - **read_module** — Analyse a single file: language, classes, functions, dependencies, DB tables, endpoints, config refs, raw content.
   - `read_module({ path: "src/UserService.cs" })`
 - **list_modules** — Walk a directory, extract facts for every file. One call to understand the whole project.
-  - `list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })`
+  - `list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })`
 - **write_spec** — Save a markdown spec to `.docuflow/specs/<name>.md`.
-  - `write_spec({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop", filename: "UserService", content: "..." })`
+  - `write_spec({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop", filename: "UserService", content: "..." })`
 - **read_specs** — Read saved specs, optionally filtered by name.
-  - `read_specs({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })`
+  - `read_specs({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })`
 
 ### Wiki Pipeline
 - **ingest_source** — Ingest a markdown file from `.docuflow/sources/` into the wiki (entities, concepts).
@@ -21,7 +21,7 @@ It is registered via `.codex/config.toml` and available as MCP tools in every Co
 - **list_wiki** — List all wiki pages by category (entity/concept/timeline/synthesis).
 - **wiki_search** — BM25 search across all wiki pages.
 - **query_wiki** — Q&A: searches wiki, synthesises an answer, returns citations.
-  - `query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop", question: "How does auth work?" })`
+  - `query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop", question: "How does auth work?" })`
 - **synthesize_answer** — Generate a markdown synthesis from a list of page IDs.
 - **save_answer_as_page** — Persist a synthesis as a wiki page.
 
@@ -34,18 +34,18 @@ It is registered via `.codex/config.toml` and available as MCP tools in every Co
 
 Start here — understand the codebase:
 ```
-list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
+list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 → write_spec for important modules
 ```
 
 Answer a question:
 ```
-query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop", question: "..." })
+query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop", question: "..." })
 ```
 
 Maintain wiki health:
 ```
-lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
+lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 ```
 
 ## Storage Layout

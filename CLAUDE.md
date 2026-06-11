@@ -8,11 +8,11 @@ It is registered in your Claude Desktop config and available as MCP tools in eve
 - **read_module** — Analyse a single source file. Returns language, classes, functions, dependencies, DB tables, endpoints, config refs, and raw content (first 8 KB).
   - Example: `read_module({ path: "src/UserService.cs" })`
 - **list_modules** — Walk a directory and extract facts for every non-binary file. Use this to understand the full project in one call.
-  - Example: `list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })`
+  - Example: `list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })`
 - **write_spec** — Persist a markdown spec to `.docuflow/specs/<filename>.md` and update the index.
-  - Example: `write_spec({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop", filename: "UserService", content: "# UserService\n..." })`
+  - Example: `write_spec({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop", filename: "UserService", content: "# UserService\n..." })`
 - **read_specs** — Read previously written specs, optionally filtered by name.
-  - Example: `read_specs({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })`
+  - Example: `read_specs({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })`
 
 ## Wiki Pipeline Tools
 
@@ -34,20 +34,20 @@ It is registered in your Claude Desktop config and available as MCP tools in eve
 
 ### First time — understand the codebase
 ```
-list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
+list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 → read the language breakdown and dependency map
 → write_spec each important module
 ```
 
 ### Ongoing — answer a question
 ```
-query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop", question: "How does authentication work?" })
+query_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop", question: "How does authentication work?" })
 → save_answer_as_page if the answer is worth keeping
 ```
 
 ### Maintenance — check wiki health
 ```
-lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
+lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 → fix orphans and broken refs
 ```
 
@@ -148,6 +148,8 @@ See devloop.config.sh for project-specific stack details.
 A Go TUI (Bubble Tea + Lipgloss) sits beside the bash engine, watching the
 same `.devloop/` directory it reads and writes. CLI behaviour is unchanged;
 the TUI is opt-in.
+
+**Build/test**: use `make build` / `make test` from the repo root — `go build ./...` fails from the root because go.work only lists `./cmd/devloop-tui` as a module.
 
 ### Package layout
 

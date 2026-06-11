@@ -72,7 +72,7 @@ cat devloop.config.sh
 If the DocuFlow MCP server is available in this session, prefer its tools:
 
 ```
-list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/mySysTools/devloop" })
+list_modules({ path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 ```
 
 Then use `write_spec` to persist structured analysis, and `ingest_source` + `update_index` to rebuild the wiki.
