@@ -1,6 +1,12 @@
 # 🔁 DevLoop
 
-> **Active line: v5.4.7 (bash + TUI).** Tags v6.0.0–v6.1.4 were a Go-rewrite experiment that was reverted — do not install from those tags. Install via `main` or any `v5.x` tag.
+> [!IMPORTANT]
+> **Supported, stable line: `v5.4.7` (`main`).**
+> Install from `main` or any `v5.x` tag.
+>
+> **The `v6.x` tags (`v6.0.0`–`v6.1.4`) are a deprecated redesign — do not use them.**
+> They represent an abandoned Go-rewrite / interactive-platform experiment that was reverted.
+> Those tags are archived on the `v6-deprecated` branch and are not maintained or supported.
 
 **Multi-agent AI development pipeline — remote-controllable, self-healing, provider-flexible**
 
