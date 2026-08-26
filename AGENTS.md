@@ -66,7 +66,7 @@ lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 
 ## Working agreement (Agentic Development)
 
-<!-- PLAYBOOK-BLOCK v12 source=dna-concept/01-agent-rules-block.md@39035ea -->
+<!-- PLAYBOOK-BLOCK v13 source=dna-concept/01-agent-rules-block.md@bb17fc2 -->
 > Canonical source: `dna-concept/01-agent-rules-block.md` (12 rules). Do not edit this section in place —
 > update the canonical file and re-propagate, or the copies drift. The marker above is how drift is detected.
 
@@ -153,6 +153,17 @@ the only path to a live deployment.
 > turn is the rational way to beat interruption. A louder in-turn gate did not stop it (it was
 > bypassable from inside the turn). **A gate must be cheaper to satisfy than to skip, or it loses
 > exactly when pressure is highest.**
+
+**[AUTHORITY] Detection and authority are different controls, and you are usually short of the second.**
+Every rule above splits into two questions: *did anyone look, and did they see it?* (detection) and
+*who gets to say it is resolved?* (authority). A control only prevents the failure it is shaped for.
+Test any control you rely on: **if you disagreed with its output, could you proceed anyway?** If yes,
+it is a detection control and nothing is holding the other axis.
+
+> Measured: of the two worst defects in a six-stage run, one was a reviewer looking and judging wrong
+> (detection), and the other was a reviewer judging **right** while the builder overruled it and shipped
+> the bypass (authority). Better reviewing would not have prevented the second. You may supply
+> evidence; you may never be the one who declares it safe.
 
 **A builder may PROPOSE an overrule of a finding; it may never self-clear one.** A blind reviewer will
 flag spec-mandated behaviour (no accounts, anonymous posting) as a vulnerability — real, and not a
