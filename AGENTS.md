@@ -66,16 +66,18 @@ lint_wiki({ project_path: "/Volumes/SATECHI_WD_BLACK_2/dev/devloop" })
 
 ## Working agreement (Agentic Development)
 
-<!-- PLAYBOOK-BLOCK v13 source=dna-concept/01-agent-rules-block.md@bb17fc2 -->
-> Canonical source: `dna-concept/01-agent-rules-block.md` (12 rules). Do not edit this section in place —
+<!-- PLAYBOOK-BLOCK v14 source=dna-concept/01-agent-rules-block.md@c4fe610 -->
+> Canonical source: `dna-concept/01-agent-rules-block.md` (15 rules). Do not edit this section in place —
 > update the canonical file and re-propagate, or the copies drift. The marker above is how drift is detected.
 
 **[EXECUTABLE] Signals.** Every status message starts with a verb:
 ASSIGN · ACK · PROGRESS · DONE · BLOCKED · QUERY. Reject verb-less messages at the tool.
 
 **[ATTESTED] Done means evidence — and evidence has strength.** Strongest: a named test that fails
-without the change and passes with it. Then: exit-0 output of a command exercising the change. Weakest:
-a commit SHA — it proves a commit exists, not that the task was done, so never send it alone.
+without the change and passes with it — and you must have **seen both halves**. A test you have only
+ever watched pass is not evidence: state the mutation you applied to break it and the failure it
+produced. Then: exit-0 output of a command exercising the change. Weakest: a commit SHA — it proves a
+commit exists, not that the task was done, so never send it alone.
 
 **[EXECUTABLE] Branch only.** Work on a feature branch. Never merge, deploy, or push to the default
 branch. Commit at each logical step, so an interruption costs a resume and not a redo.
@@ -115,7 +117,15 @@ delete, message anyone).
 
 **[ATTESTED] Review the working tree, not just the diff.** Before merging: `git status` clean AND
 HEAD equals the reviewed SHA. Uncommitted files ride along otherwise.
-```
+
+> **On "seen both halves" above.** Measured in production: two builder-written tests asserted exactly
+> the right properties and *could not fail*. One called through a loader that resolved
+> `require(…/dist/…)` and so never loaded the source under review — gutting that source left the suite
+> green. The other asserted a condition that already held unconditionally (8 hits on a clean tree, 9
+> with a secret planted), so it passed whether or not detection worked. Mutation testing killed 4/4 of
+> the real guards and exposed the dead one. **The builder assembles the instrument that judges the
+> bundle, not merely the bundle** — so a passing test is a claim about the instrument until you have
+> watched it go red.
 
 **State where each constraint is enforced, not only what must be true.** "Only the owner may edit"
 describes a property and yields a check in one handler. "The persistence query must be scoped to the
@@ -133,16 +143,50 @@ looks like a successful one.
 > enforcement out of the handler: 1 of 3 generations deleted its handler check and returned
 > `200 "Pinned"` to a non-admin while the scoped `UPDATE` matched zero rows — secure, but silently
 > successful.
+>
+> **This governs the agent's own instruction surface, not only its code.** Measured in production: two
+> turn-loop peers each re-ran finished work six times. Their charters — re-read at the start of every
+> turn — still named that work as `## Current task`, so six explicit STOP messages to their mailboxes
+> changed nothing, and one charter edit stopped both immediately. Neither agent malfunctioned; both
+> executed the instruction actually in force. **To change what an agent does, edit the artifact it
+> re-reads, not the channel it receives.** If you have told an agent the same thing three times, you are
+> enforcing at the wrong site.
 
 **[ATTESTED] Demonstrate the remedy, don't just apply it.** A finding is not resolved until its fix is
 shown to work by an observed request→response against the running system — never the diff, never the
-commit message. A correct finding does not make its suggested fix correct.
+commit message. A correct finding does not make its suggested fix correct. **And the remedy must live in
+the artifact that ships:** name the identifier and the file holding it, on the pushed branch. A design
+note is a plan, not a remedy.
+
+> Measured in production: one agent named `EXTRACT namespace` and `source-hash validation` as
+> implemented across four separate signals. `git grep` over the shipping path returned **0 files** for
+> both, while the design note contained them. A leftover scratch file held a four-line prototype of the
+> mechanism — built, written up, signalled DONE, never landed. The check is mechanical and costs
+> nothing: `git grep <identifier> <branch> -- <ship path>`; zero hits ⇒ reject without reading further.
 
 > Measured: a reviewer's real HIGH was "fixed" with `AND ? = 1` bound to an admin flag — which folds to
 > `AND 1 = 1` for an admin, a predicate that constrains nothing. It passed the bundle, a second
 > cross-family attestation that *certified* it, the delta, and the deploy gate, and **shipped** — every
 > layer verified a change existed, not that it worked. Prove a scoped delete with a non-owner request
 > returning **0 rows**; prove a rate limit with the live count rising **+5, not +7**.
+
+**[ATTESTED — PROVISIONAL, n=4, one day] Exercise the control; confirm the state, not the report.**
+Before asserting a property of a system, run it — and where the claim is causal, observe a control that
+should *not* show the property. An operation's own report tells you whether it did what it did, never
+whether it did what you wanted.
+
+> Observed four times in one day, four unrelated systems, two agents: a cache header attributed to a fix
+> that was in fact the platform default (an untouched control asset carried it too); a rename validated
+> on the send path while the receive path silently broke; a public leak reported FIXED+VERIFIED from a
+> cache-busted probe while un-busted requests — what a visitor actually sends — still returned the file;
+> and `git push` printing **"Everything up-to-date" with exit 0** while the commit sat on another
+> branch, the report truthfully answering a different question than the one asked.
+>
+> The last is the instructive one: no care in reading that output would have caught it, only checking
+> the remote ref. **The shared shape is accepting a signal *adjacent* to your actual question, not
+> accepting a sloppy one** — which is also how a green test that never loaded the code under review
+> passes, and how a builder-written check certifies its own blind spot. Provisional: one day, two
+> agents, no control condition.
 
 **[EXECUTABLE] Deploy is not a builder action.** Take the deploy credential off the builder: a separate,
 unmetered actor deploys only after the claim, delta, and attestation exist. Then satisfying the gate is
